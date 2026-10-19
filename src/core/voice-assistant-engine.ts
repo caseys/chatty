@@ -182,6 +182,9 @@ export class VoiceAssistantEngine {
   // Chat model when an ONNX model is picked (always on phones); else Gemma 4 via llmProvider
   private onnxChat: OnnxLlmProvider | null = null;
   private isPhone = false;
+  // Every model load takes the next ticket; only the newest may mark the model ready or report
+  // an error (a model switch in Settings supersedes a load that is still running)
+  private llmLoadTicket = 0;
   // Set once initialize() runs; settings saved before then only take effect when it does
   private started = false;
   // Browser speech recognition instead of Whistle (phones, or ?stt=native)
@@ -536,11 +539,14 @@ export class VoiceAssistantEngine {
         });
         startupLlm = chat;
       }
-      const modelName = this.getLlmDisplayName();
       startLlm = () => {
+        const ticket = ++this.llmLoadTicket;
+        // The model chosen now: Settings may have changed it since the page loaded
+        const provider = splitPipeline ? startupLlm : this.chatLlm;
+        const modelName = this.getLlmDisplayName();
         writeLlmLoadMarker(this.chatModelId);
         if (!this.phoneModels) writeLoadStage(modelName);
-        return startupLlm
+        return provider
           .initialize((loaded, total, current?: { label: string; loaded: number; total: number }) => {
             const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
             const mb = (loaded / (1024 * 1024)).toFixed(0);
@@ -550,6 +556,7 @@ export class VoiceAssistantEngine {
           })
           .then(() => {
             clearLlmLoadMarker();
+            if (ticket !== this.llmLoadTicket) return;
             this.stateCoordinator.setModelState('llm', 'ready');
             const readinessMs = Math.max(1, Math.round(performance.now() - startInit));
             this.orchestrator.recordInitializationTiming(readinessMs, readinessMs);
@@ -557,6 +564,7 @@ export class VoiceAssistantEngine {
           })
           .catch((err): Promise<void> | void => {
             clearLlmLoadMarker();
+            if (ticket !== this.llmLoadTicket) return;
             console.error(`${modelName} WebGPU initialization failed:`, err);
             const reason = err instanceof Error ? err.message : String(err);
             this.stateCoordinator.setModelState('llm', 'failed');
@@ -1277,22 +1285,23 @@ export class VoiceAssistantEngine {
 
     this.stateCoordinator.setModelState('llm', 'downloading');
     const modelName = this.getLlmDisplayName();
-    const load = (): Promise<void> =>
-      this.chatLlm
+    const load = (): Promise<void> => {
+      const ticket = ++this.llmLoadTicket;
+      return this.chatLlm
         .initialize((loaded, total) => {
           const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
           const mb = (loaded / (1024 * 1024)).toFixed(0);
           const totalMb = (total / (1024 * 1024)).toFixed(0);
-          this.events.onLlmProgress?.(loaded, total, pct, mb, totalMb);
-          this.events.onStatusChange?.(
-            `Pulling ${modelName} WebGPU to OPFS: ${mb} / ${totalMb} MB (${pct}%)...`
-          );
+          // Same status line and meter as startup loading (with live MB/s)
+          this.events.onLlmProgress?.(loaded, total, pct, mb, totalMb, { label: modelName, loaded, total });
         })
         .then(() => {
+          if (ticket !== this.llmLoadTicket) return;
           this.stateCoordinator.setModelState('llm', 'ready');
           this.events.onStatusChange?.(null);
         })
         .catch((err): Promise<void> | void => {
+          if (ticket !== this.llmLoadTicket) return;
           const reason = err instanceof Error ? err.message : String(err);
           this.stateCoordinator.setModelState('llm', 'failed');
           this.events.onStatusChange?.(`${modelName} didn't load: ${reason}`);
@@ -1302,6 +1311,7 @@ export class VoiceAssistantEngine {
             return load();
           }
         });
+    };
     void load();
   }
 
