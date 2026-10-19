@@ -344,7 +344,9 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
         throw new Error(`Failed to fetch Gemma model (${response.status}) from ${modelUrl}`);
       }
 
-      const contentLength = Number(response.headers.get('Content-Length')) || expectedTotal;
+      const headerLength = Number(response.headers.get('Content-Length'));
+      const hasContentLength = headerLength > 0;
+      const contentLength = headerLength || expectedTotal;
       let loadedBytes = 0;
 
       // Stream into OPFS while simultaneously streaming to Engine.create
@@ -405,35 +407,43 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
         opfsWritable = null;
         if (w) await Promise.resolve(w.abort?.()).catch(() => {});
       };
+      // Closes the OPFS file and writes the completion marker. Must run as soon as the last byte
+      // is written: Engine.create stops pulling once it has the full model and never reads the
+      // stream's end, so waiting for `done` left the download in an uncommitted swap file and
+      // every reload re-downloaded the model.
+      let opfsFinalized = false;
+      const finalizeOpfs = async () => {
+        if (!opfsWritable) return;
+        opfsFinalized = true;
+        const w = opfsWritable;
+        opfsWritable = null;
+        let closed = true;
+        await w.close().catch(() => {
+          closed = false;
+        });
+        if (closed && opfsOk && loadedBytes > 0) {
+          // Completion marker: records exact size of a fully written file
+          try {
+            const root = await navigator.storage.getDirectory();
+            const mh = await root.getFileHandle(`${modelId}.litertlm.complete`, { create: true });
+            const mw = await (mh as any).createWritable?.();
+            if (mw) {
+              await mw.write(String(loadedBytes));
+              await mw.close();
+            }
+          } catch {
+            // Without a marker the exact-size check still applies on next load
+          }
+        } else if (!opfsOk || !closed) {
+          await removeCachedModel();
+        }
+      };
       modelSource = new ReadableStream<Uint8Array>({
         async pull(controller) {
           try {
             const { done, value } = await reader.read();
             if (done) {
-              if (opfsWritable) {
-                const w = opfsWritable;
-                opfsWritable = null;
-                let closed = true;
-                await w.close().catch(() => {
-                  closed = false;
-                });
-                if (closed && opfsOk && loadedBytes > 0) {
-                  // Completion marker: records exact size of a fully written file
-                  try {
-                    const root = await navigator.storage.getDirectory();
-                    const mh = await root.getFileHandle(`${modelId}.litertlm.complete`, { create: true });
-                    const mw = await (mh as any).createWritable?.();
-                    if (mw) {
-                      await mw.write(String(loadedBytes));
-                      await mw.close();
-                    }
-                  } catch {
-                    // Without a marker the exact-size check still applies on next load
-                  }
-                } else if (!opfsOk || !closed) {
-                  await removeCachedModel();
-                }
-              }
+              await finalizeOpfs();
               controller.close();
               return;
             }
@@ -447,6 +457,7 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
                   opfsOk = false;
                   await abortWritable();
                 }
+                if (hasContentLength && loadedBytes >= contentLength) await finalizeOpfs();
               }
               controller.enqueue(value);
             }
@@ -463,7 +474,7 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
         },
         async cancel() {
           await abortWritable();
-          await removeCachedModel();
+          if (!opfsFinalized) await removeCachedModel();
           await reader.cancel();
         },
       });

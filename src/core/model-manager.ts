@@ -57,7 +57,7 @@ export const MODEL_REGISTRY: ReadonlyArray<ModelManifest> = [
     version: '1.0.0',
     task: 'llm',
     url: 'https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm',
-    expectedSizeBytes: 2_890_000_000,
+    expectedSizeBytes: 2_969_059_328,
     sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
     runtime: 'litert-lm',
     requiredCapabilities: ['webgpu', 'wasm'],
