@@ -841,7 +841,7 @@ export class JavascriptRuntime {
       background: transparent !important;
       pointer-events: none;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      color: #f1f5f9;
+      color: light-dark(#0f172a, #f1f5f9);
       -webkit-font-smoothing: antialiased;
     }
     #root {
@@ -881,27 +881,27 @@ export class JavascriptRuntime {
       border-collapse: collapse;
       margin: 8px 0;
       font-size: 13px;
-      background: rgba(15, 23, 42, 0.85);
+      background: light-dark(rgba(255, 255, 255, 0.9), rgba(15, 23, 42, 0.85));
       border-radius: 8px;
       overflow: hidden;
       backdrop-filter: blur(12px);
     }
     th, td {
-      border: 1px solid rgba(255,255,255,0.15);
+      border: 1px solid light-dark(rgba(15,23,42,0.15), rgba(255,255,255,0.15));
       padding: 6px 12px;
       text-align: left;
     }
     th {
-      background: rgba(255,255,255,0.12);
+      background: light-dark(rgba(15,23,42,0.06), rgba(255,255,255,0.12));
       font-weight: 600;
     }
     button, input, select {
       font-family: inherit;
       border-radius: 8px;
       padding: 8px 14px;
-      border: 1px solid rgba(255,255,255,0.2);
-      background: rgba(15, 23, 42, 0.8);
-      color: white;
+      border: 1px solid light-dark(rgba(15,23,42,0.2), rgba(255,255,255,0.2));
+      background: light-dark(rgba(255, 255, 255, 0.9), rgba(15, 23, 42, 0.8));
+      color: light-dark(#0f172a, white);
       backdrop-filter: blur(8px);
       pointer-events: auto;
     }

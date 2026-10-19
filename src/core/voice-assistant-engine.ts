@@ -131,6 +131,8 @@ export interface VoiceAssistantEngineEvents {
   onMessageUpdated?: (message: ConversationMessage) => void;
   onTelemetryUpdated?: (telemetry: SystemTelemetry) => void;
   onError?: (error: Error, context: string) => void;
+  /** Yes/no question for the user (the app shows a browser confirm dialog); no answer means no */
+  onConfirm?: (message: string) => boolean;
   onCapabilitiesDetected?: (caps: BrowserCapabilities) => void;
   onLlmProgress?: (
     loaded: number,
@@ -439,12 +441,24 @@ export class VoiceAssistantEngine {
     // is still present, the tab died mid-load (out of memory), so retry with the smaller model
     // instead of crashing again on every visit.
     this.previousLoadFailure = takeLoadStage();
+    // Never reloads on its own: the user decides whether to try the smaller model.
     const crashedLoad = readLlmLoadMarker();
+    let skipLlmLoad = false;
     if (crashedLoad) {
-      this.chatModelId = isConstrained ? SMALLEST_PHONE_CHAT_MODEL_ID : recommended.fallbackLlmModelId;
-      this.events.onStatusChange?.(
-        'The last model load ran out of memory; retrying with the smaller model.'
-      );
+      clearLlmLoadMarker();
+      const fallbackId = isConstrained ? SMALLEST_PHONE_CHAT_MODEL_ID : recommended.fallbackLlmModelId;
+      const fallbackName =
+        findOnnxChatModel(fallbackId)?.label ?? (fallbackId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B');
+      const crashedName = this.previousLoadFailure ?? 'the model';
+      if (
+        this.ask(
+          `Last time, loading ${crashedName} stopped the page (probably out of memory).\n\nLoad ${fallbackName} now?`
+        )
+      ) {
+        this.chatModelId = fallbackId;
+      } else {
+        skipLlmLoad = true;
+      }
     }
     // The coder always shares the chat model (there's no separate picker). A stale divergent
     // codingModelId from older settings would load a second multi-GB model onto the GPU
@@ -541,14 +555,24 @@ export class VoiceAssistantEngine {
             this.orchestrator.recordInitializationTiming(readinessMs, readinessMs);
             this.events.onStatusChange?.(null);
           })
-          .catch((err) => {
+          .catch((err): Promise<void> | void => {
             clearLlmLoadMarker();
             console.error(`${modelName} WebGPU initialization failed:`, err);
+            const reason = err instanceof Error ? err.message : String(err);
             this.stateCoordinator.setModelState('llm', 'failed');
-            this.events.onStatusChange?.(
-              `${modelName} initialization error: ${err instanceof Error ? err.message : String(err)}`
-            );
+            this.events.onStatusChange?.(`${modelName} didn't load: ${reason}`);
+            // Never retried automatically (a retry can mean another multi-GB download): ask
+            if (this.ask(`${modelName} didn't load:\n${reason}\n\nTry again?`)) {
+              this.stateCoordinator.setModelState('llm', 'downloading');
+              return startLlm();
+            }
           });
+      };
+    }
+    if (skipLlmLoad) {
+      startLlm = async () => {
+        this.stateCoordinator.setModelState('llm', 'failed');
+        this.events.onStatusChange?.('Model not loaded. Reload the page or choose a model in Settings to try again.');
       };
     }
 
@@ -1253,26 +1277,37 @@ export class VoiceAssistantEngine {
 
     this.stateCoordinator.setModelState('llm', 'downloading');
     const modelName = this.getLlmDisplayName();
-    void this.chatLlm
-      .initialize((loaded, total) => {
-        const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
-        const mb = (loaded / (1024 * 1024)).toFixed(0);
-        const totalMb = (total / (1024 * 1024)).toFixed(0);
-        this.events.onLlmProgress?.(loaded, total, pct, mb, totalMb);
-        this.events.onStatusChange?.(
-          `Pulling ${modelName} WebGPU to OPFS: ${mb} / ${totalMb} MB (${pct}%)...`
-        );
-      })
-      .then(() => {
-        this.stateCoordinator.setModelState('llm', 'ready');
-        this.events.onStatusChange?.(null);
-      })
-      .catch((err) => {
-        this.stateCoordinator.setModelState('llm', 'failed');
-        this.events.onStatusChange?.(
-          `${modelName} initialization error: ${err instanceof Error ? err.message : String(err)}`
-        );
-      });
+    const load = (): Promise<void> =>
+      this.chatLlm
+        .initialize((loaded, total) => {
+          const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
+          const mb = (loaded / (1024 * 1024)).toFixed(0);
+          const totalMb = (total / (1024 * 1024)).toFixed(0);
+          this.events.onLlmProgress?.(loaded, total, pct, mb, totalMb);
+          this.events.onStatusChange?.(
+            `Pulling ${modelName} WebGPU to OPFS: ${mb} / ${totalMb} MB (${pct}%)...`
+          );
+        })
+        .then(() => {
+          this.stateCoordinator.setModelState('llm', 'ready');
+          this.events.onStatusChange?.(null);
+        })
+        .catch((err): Promise<void> | void => {
+          const reason = err instanceof Error ? err.message : String(err);
+          this.stateCoordinator.setModelState('llm', 'failed');
+          this.events.onStatusChange?.(`${modelName} didn't load: ${reason}`);
+          // Never retried automatically: ask
+          if (this.ask(`${modelName} didn't load:\n${reason}\n\nTry again?`)) {
+            this.stateCoordinator.setModelState('llm', 'downloading');
+            return load();
+          }
+        });
+    void load();
+  }
+
+  /** Asks the user a yes/no question; without a UI to answer, the answer is no. */
+  private ask(message: string): boolean {
+    return this.events.onConfirm?.(message) ?? false;
   }
 
   async setCodingModelId(modelId: string): Promise<void> {

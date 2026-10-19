@@ -182,6 +182,7 @@ export class MinimalVoiceApp {
         this.sttLoadSettled = true;
         this.updateUiState();
       },
+      onConfirm: (message) => window.confirm(message),
       onError: (err, context) => {
         if (this.statusEl) {
           this.statusEl.textContent = `Error (${context}): ${err.message}`;

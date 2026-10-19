@@ -17,6 +17,26 @@ import {
 
 env.allowLocalModels = false;
 
+type GpuLike = { requestAdapter(options?: { powerPreference?: string }): Promise<unknown | null> };
+
+/**
+ * Asks for the GPU here, retrying with each power preference: Safari sometimes returns no
+ * adapter for a moment (e.g. right after another model released the GPU). The adapter is
+ * handed to ONNX Runtime, which would otherwise ask once and give up.
+ */
+async function acquireGpuAdapter(): Promise<unknown | null> {
+  const gpu = (navigator as unknown as { gpu?: GpuLike }).gpu;
+  if (!gpu) return null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    for (const powerPreference of [undefined, 'high-performance', 'low-power']) {
+      const adapter = await gpu.requestAdapter(powerPreference ? { powerPreference } : undefined).catch(() => null);
+      if (adapter) return adapter;
+    }
+    await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+  }
+  return null;
+}
+
 type ChatMessage = { role: string; content: string };
 
 type InboundMessage =
@@ -62,6 +82,15 @@ self.onmessage = async (ev: MessageEvent<InboundMessage>) => {
           }
           post({ id: msg.id, type: 'progress', loaded, total });
         };
+        const adapter = await acquireGpuAdapter();
+        if (!adapter) {
+          throw new Error(
+            'The browser did not make the GPU available (no WebGPU adapter). Reload the page; if it keeps happening, quit and reopen the browser.'
+          );
+        }
+        const onnxEnv = env.backends.onnx as { webgpu?: { adapter?: unknown } };
+        onnxEnv.webgpu ??= {};
+        onnxEnv.webgpu.adapter = adapter;
         tokenizer = await AutoTokenizer.from_pretrained(repo, { progress_callback });
         model = await AutoModelForCausalLM.from_pretrained(repo, {
           dtype: dtype as 'q4f16',

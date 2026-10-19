@@ -24,6 +24,12 @@ function isNetworkOrHttpError(err: unknown): boolean {
   return /failed to fetch|fetch|network|http|download|cors|\(\s*[45]\d\d\s*\)|\b[45]\d\d\b|timed? ?out|offline|quota/i.test(msg);
 }
 
+/** The worker couldn't get WebGPU at all (as opposed to failing while loading the model). */
+function isGpuUnavailableError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return /adapter|webgpu|navigator\.gpu|gpu is not|not supported/i.test(msg);
+}
+
 export class WorkerLlmProvider implements LlmRuntimeProvider {
   readonly id = 'worker-llm';
   modelId: string;
@@ -218,10 +224,12 @@ export class WorkerLlmProvider implements LlmRuntimeProvider {
           // Ignore
         }
         if (this.worker === worker) this.worker = null;
-        // Disposed mid-init, or a network/HTTP download failure: surface it instead of retrying on main thread.
-        if (epoch !== this.epoch || isNetworkOrHttpError(workerErr)) throw workerErr;
-        // If WebGPU adapter acquisition failed inside the Worker context (e.g. Safari worker
-        // WebGPU restriction or adapter exhaustion), fall back to main-thread LiteRtLlmProvider.
+        // Only a GPU-in-worker problem (e.g. Safari's worker WebGPU restriction or adapter
+        // exhaustion) is retried, on the main thread. Anything else, including download
+        // failures, is surfaced so the user decides whether to try again.
+        if (epoch !== this.epoch || isNetworkOrHttpError(workerErr) || !isGpuUnavailableError(workerErr)) {
+          throw workerErr;
+        }
         const fallback = new LiteRtLlmProvider(targetModelId, { contextLimit: this.contextLimit, maxOutputTokens: this.maxOutputTokens });
         this.directFallback = fallback;
         try {
