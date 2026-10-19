@@ -24,6 +24,7 @@ import {
   stripToolCallMarkup,
 } from './speech-normalizer.ts';
 import { StateMachineCoordinator } from './state-machine.ts';
+import { runReadyTool, type ReadyToolOutcome, type TurnRouter } from './phone-pipeline.ts';
 import {
   JavascriptRuntime,
   inspectExecutableCode,
@@ -169,6 +170,12 @@ export class ConversationOrchestrator {
   private compactionThreshold: number;
   private getConversationId?: () => string;
   private shouldAutoTitle?: (conversationId: string) => boolean;
+  // Phone pipeline (small models): router picks a tool / code / chat each turn
+  private phonePipeline: {
+    router: TurnRouter;
+    coder: LlmRuntimeProvider;
+    chatSystemPrompt: string;
+  } | null = null;
 
   private ttsSynthesisQueue: BoundedQueue<PhraseSegment>;
   private activeAssistantMessage: ConversationMessage | null = null;
@@ -212,6 +219,20 @@ export class ConversationOrchestrator {
       highWaterMark: Math.max(6, Math.floor(maxTtsQueueSize * 0.75)),
       lowWaterMark: Math.max(2, Math.floor(maxTtsQueueSize * 0.25)),
     });
+  }
+
+  /**
+   * Switches to the phone pipeline: `chat` writes prose replies, `router` (FunctionGemma) picks
+   * a ready-made tool, coder_agent (JavaScript written by `coder`) or plain chat for each turn.
+   */
+  configurePhonePipeline(config: {
+    chat: LlmRuntimeProvider;
+    coder: LlmRuntimeProvider;
+    router: TurnRouter;
+    chatSystemPrompt: string;
+  }): void {
+    this.llmProvider = config.chat;
+    this.phonePipeline = { router: config.router, coder: config.coder, chatSystemPrompt: config.chatSystemPrompt };
   }
 
   setLlmProvider(provider: LlmRuntimeProvider): void {
@@ -444,10 +465,13 @@ export class ConversationOrchestrator {
     this.events.onMessageCreated?.(userMsg);
 
     // Stage 4: Choose a response mode (direct, clarification, verification, tool_execution)
-    const responseMode = this.selectResponseMode(normalized, resolvedContext.workingMessages);
+    // Phone pipeline routes with FunctionGemma instead of keyword-matched tool execution
+    const responseMode = this.phonePipeline
+      ? 'direct'
+      : this.selectResponseMode(normalized, resolvedContext.workingMessages);
 
     // Stage 3: Build the prompt respecting model context budget
-    const { systemPrompt, promptMessages } = this.buildModelPrompt(
+    let { systemPrompt, promptMessages } = this.buildModelPrompt(
       normalized,
       resolvedContext,
       responseMode
@@ -573,6 +597,52 @@ export class ConversationOrchestrator {
     try {
       // Stage 5: Generate incrementally (or execute tool if tool_execution mode)
       let finalCanonicalText = '';
+      let generationProvider = this.llmProvider;
+
+      if (this.phonePipeline) {
+        const route = await this.phonePipeline.router.route(normalized, signal);
+        if (!this.scheduler.isTurnValid(turnId) || signal.aborted) return assistantMsg;
+
+        if (route.kind === 'tool') {
+          assistantMsg.toolCall = { name: route.name, arguments: route.args };
+          this.events.onMessageUpdated?.({ ...assistantMsg });
+          const outcome = await runReadyTool(route.name, route.args, {
+            speakLater: (text) => void this.speakOutOfTurn(text),
+          }).catch((err): ReadyToolOutcome => ({
+            context: `The ${route.name} tool failed (${err instanceof Error ? err.message : String(err)}). Apologize briefly.`,
+          }));
+          if (!this.scheduler.isTurnValid(turnId) || signal.aborted) return assistantMsg;
+          assistantMsg.toolCall = {
+            name: route.name,
+            arguments: route.args,
+            result: outcome.say ?? outcome.context?.slice(0, 160),
+            status: 'completed',
+          };
+          this.events.onMessageUpdated?.({ ...assistantMsg });
+          if (outcome.say) {
+            finalCanonicalText = outcome.say;
+            assistantMsg.canonicalContent = finalCanonicalText;
+            this.events.onTokenStream?.(turnId, finalCanonicalText, finalCanonicalText);
+            this.events.onMessageUpdated?.({ ...assistantMsg });
+            for (const phrase of segmenter.push(finalCanonicalText + ' ')) {
+              enqueuePhraseForSpeech(phrase);
+            }
+            for (const phrase of segmenter.flush()) {
+              enqueuePhraseForSpeech(phrase);
+            }
+          } else if (outcome.context) {
+            systemPrompt = `${systemPrompt}\nAnswer the user using this information:\n${outcome.context}`;
+          }
+        } else if (route.kind === 'code') {
+          // Qwen2.5-Coder writes the program; the existing code path streams speak() and runs it
+          assistantMsg.toolCall = { name: 'coder_agent', arguments: { task: route.task } };
+          this.events.onMessageUpdated?.({ ...assistantMsg });
+          generationProvider = this.phonePipeline.coder;
+          systemPrompt = CONCISE_VOICE_SYSTEM_PROMPT;
+          promptMessages = [{ role: 'user', content: route.task }];
+          this.events.onStatusChange?.('Writing code…');
+        }
+      }
 
       if (responseMode === 'tool_execution') {
         const toolExecutionOutcome = await this.tryExecuteMatchingTool(normalized, turnId);
@@ -590,14 +660,16 @@ export class ConversationOrchestrator {
       if (!finalCanonicalText) {
         let rawAccumulatedTokens = '';
         let lastSpokenTextEmitted = '';
-        let streamMode: 'unknown' | 'code' | 'prose' = 'unknown';
+        // Phone chat model replies in prose only; only the coder's output is run as code
+        const forceProse = !!this.phonePipeline && generationProvider !== this.phonePipeline.coder;
+        let streamMode: 'unknown' | 'code' | 'prose' = forceProse ? 'prose' : 'unknown';
 
-        const genResult = await this.llmProvider.generate({
+        const genResult = await generationProvider.generate({
           turnId,
           systemPrompt,
           messages: promptMessages,
           temperature: 0.1,
-          maxOutputTokens: this.llmProvider.maxOutputTokens,
+          maxOutputTokens: generationProvider.maxOutputTokens,
           signal,
           tools: Array.from(this.tools.values()),
           onToken: (chunk) => {
@@ -672,6 +744,8 @@ export class ConversationOrchestrator {
             }
           },
         });
+
+        if (generationProvider !== this.llmProvider) this.events.onStatusChange?.(null);
 
         // Discard stale results if turn was canceled during generation
         if (!this.scheduler.isTurnValid(turnId) || genResult.aborted) {
@@ -926,7 +1000,9 @@ export class ConversationOrchestrator {
         }
 
         if (!executedLegacyTool && this.scheduler.isTurnValid(turnId)) {
-          const { code: executableCode, isProse } = inspectExecutableCode(rawContent);
+          const inspected = inspectExecutableCode(rawContent);
+          const executableCode = inspected.code;
+          const isProse = inspected.isProse || forceProse;
           assistantMsg.rawCode = executableCode;
           assistantMsg.rawLlmOutput = rawContent;
 
@@ -1450,7 +1526,11 @@ export class ConversationOrchestrator {
     systemPrompt: string;
     promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   } {
-    const systemParts: string[] = [CONCISE_VOICE_SYSTEM_PROMPT];
+    const systemParts: string[] = [
+      this.phonePipeline
+        ? `${this.phonePipeline.chatSystemPrompt} Current date and time: ${new Date().toLocaleString()}.`
+        : CONCISE_VOICE_SYSTEM_PROMPT,
+    ];
 
     if (context.relevantMemories.length > 0) {
       const memStr = context.relevantMemories.map((m) => `${m.key}: ${m.value}`).join('; ');
@@ -1494,7 +1574,8 @@ export class ConversationOrchestrator {
 
     for (const msg of context.workingMessages) {
       if (msg.role === 'assistant') {
-        const content = (msg.rawLlmOutput || msg.rawCode || msg.canonicalContent || '')
+        // Phone chat model sees what was said, not generated code (it would imitate the code)
+        const content = (this.phonePipeline ? msg.canonicalContent || '' : msg.rawLlmOutput || msg.rawCode || msg.canonicalContent || '')
           .replace(/\s*\[Interrupted\]\s*$/, '')
           .trim();
         if (!content || content === '[Response interrupted]' || content.startsWith('[Error')) {

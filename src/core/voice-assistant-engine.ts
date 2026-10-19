@@ -24,6 +24,13 @@ import { createDrawGraphicsTool } from '../tools/draw-tool.ts';
 import { createWikipediaTool, createInstantAnswersTool } from '../tools/web-tools.ts';
 import { MODEL_REGISTRY } from './model-manager.ts';
 import {
+  PHONE_CHAT_SYSTEM_PROMPT,
+  PHONE_MODEL_SPECS,
+  PhoneModelSet,
+  SwappingLlmProvider,
+  TurnRouter,
+} from './phone-pipeline.ts';
+import {
   type ChattySettings,
   DEFAULT_SETTINGS,
   loadSettingsFromStorage,
@@ -32,6 +39,7 @@ import {
 import type {
   BrowserCapabilities,
   ConversationMessage,
+  LlmRuntimeProvider,
   StoredConversation,
   SupportedLanguage,
   SystemTelemetry,
@@ -112,6 +120,7 @@ export class VoiceAssistantEngine {
   private voiceId: string = DEFAULT_SETTINGS.voiceId;
   private sidebarOpen: boolean = DEFAULT_SETTINGS.sidebarOpen;
   private codingLlmProvider: WorkerLlmProvider | null = null;
+  private phoneModels: PhoneModelSet | null = null;
 
   private activeConversationId = 'chat_default';
   private compactionAbort: AbortController | null = null;
@@ -387,7 +396,7 @@ export class VoiceAssistantEngine {
     this.stateCoordinator.setModelState('llm', 'downloading');
     this.stateCoordinator.setModelState('tts', 'downloading');
 
-    let llmInitDone: Promise<void> | null = null;
+    let startLlm: () => Promise<void> = async () => {};
     const hasWebGpu =
       caps.hasWebGPU || (typeof navigator !== 'undefined' && 'gpu' in navigator);
 
@@ -397,38 +406,54 @@ export class VoiceAssistantEngine {
         'WebGPU is required for Gemma 4 local inference. Please use Chrome, Edge, or Safari with WebGPU enabled.'
       );
     } else {
-      const modelName = this.chatModelId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B';
-      writeLlmLoadMarker(this.chatModelId);
-      llmInitDone = this.llmProvider
-        .initialize((loaded, total) => {
-          const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
-          const mb = (loaded / (1024 * 1024)).toFixed(0);
-          const totalMb = (total / (1024 * 1024)).toFixed(0);
-          this.events.onLlmProgress?.(loaded, total, pct, mb, totalMb);
-          this.events.onStatusChange?.(
-            `Pulling ${modelName} WebGPU to OPFS: ${mb} / ${totalMb} MB (${pct}%)...`
-          );
-        })
-        .then(() => {
-          clearLlmLoadMarker();
-          this.stateCoordinator.setModelState('llm', 'ready');
-          const readinessMs = Math.max(1, Math.round(performance.now() - startInit));
-          this.orchestrator.recordInitializationTiming(readinessMs, readinessMs);
-          this.events.onStatusChange?.(null);
-        })
-        .catch((err) => {
-          clearLlmLoadMarker();
-          console.error('Gemma 4 WebGPU initialization failed:', err);
-          this.stateCoordinator.setModelState('llm', 'failed');
-          this.events.onStatusChange?.(
-            `Gemma 4 initialization error: ${err instanceof Error ? err.message : String(err)}`
-          );
+      // Phones run small ONNX models (FunctionGemma router + Gemma 3 1B chat, Qwen coder on demand)
+      let startupLlm: LlmRuntimeProvider = this.llmProvider;
+      if (isConstrained) {
+        this.phoneModels = new PhoneModelSet();
+        const chat = new SwappingLlmProvider(this.phoneModels, this.phoneModels.chat, 'conversation');
+        const coder = new SwappingLlmProvider(this.phoneModels, this.phoneModels.coder, 'coder');
+        this.orchestrator.configurePhonePipeline({
+          chat,
+          coder,
+          router: new TurnRouter(this.phoneModels.router),
+          chatSystemPrompt: PHONE_CHAT_SYSTEM_PROMPT,
         });
+        startupLlm = chat;
+      }
+      const modelName = this.getLlmDisplayName();
+      startLlm = () => {
+        writeLlmLoadMarker(this.chatModelId);
+        return startupLlm
+          .initialize((loaded, total) => {
+            const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
+            const mb = (loaded / (1024 * 1024)).toFixed(0);
+            const totalMb = (total / (1024 * 1024)).toFixed(0);
+            this.events.onLlmProgress?.(loaded, total, pct, mb, totalMb);
+            this.events.onStatusChange?.(
+              `Loading ${modelName}: ${mb} / ${totalMb} MB (${pct}%)…`
+            );
+          })
+          .then(() => {
+            clearLlmLoadMarker();
+            this.stateCoordinator.setModelState('llm', 'ready');
+            const readinessMs = Math.max(1, Math.round(performance.now() - startInit));
+            this.orchestrator.recordInitializationTiming(readinessMs, readinessMs);
+            this.events.onStatusChange?.(null);
+          })
+          .catch((err) => {
+            clearLlmLoadMarker();
+            console.error(`${modelName} WebGPU initialization failed:`, err);
+            this.stateCoordinator.setModelState('llm', 'failed');
+            this.events.onStatusChange?.(
+              `${modelName} initialization error: ${err instanceof Error ? err.message : String(err)}`
+            );
+          });
+      };
     }
 
-    // 3 & 4. Speech models load one at a time after the LLM settles. The WebGPU LLM load is the
-    // memory peak, so it runs alone; the small WASM models follow (WASM heaps never shrink, so
-    // keeping them out of the LLM load window lowers the peak).
+    // 3 & 4. Speech models (Piper, then Whistle) and the LLM load one at a time, never overlapping.
+    // Desktop: the LLM first, so it can answer sooner. Phones: the small WASM speech models first,
+    // then the WebGPU models, so the LLM load is the last allocation on a tight memory budget.
     const startSpeechModels = async () => {
       await this.ttsProvider
         .initialize((loaded, total) => {
@@ -456,7 +481,11 @@ export class VoiceAssistantEngine {
         })
         .finally(() => this.events.onSttLoadSettled?.());
     };
-    void (llmInitDone ?? Promise.resolve()).finally(() => startSpeechModels());
+    if (isConstrained) {
+      void startSpeechModels().finally(() => startLlm());
+    } else {
+      void startLlm().finally(() => startSpeechModels());
+    }
 
     // 5. Visibility and lifecycle handlers
     if (typeof document !== 'undefined') {
@@ -476,6 +505,18 @@ export class VoiceAssistantEngine {
         void this.dispose();
       });
     }
+  }
+
+  /** Approximate startup LLM download size (bytes), before the download reports its own total. */
+  getStartupLlmExpectedBytes(): number {
+    if (this.phoneModels) return 570_000_000 + 784_000_000; // FunctionGemma fp16 + Gemma 3 1B q4f16
+    return MODEL_REGISTRY.find((m) => m.id === this.chatModelId)?.expectedSizeBytes ?? 2_008_432_640;
+  }
+
+  /** Name of the model(s) loading/answering, for status text. */
+  getLlmDisplayName(): string {
+    if (this.phoneModels) return `${PHONE_MODEL_SPECS.router.label} + ${PHONE_MODEL_SPECS.chat.label}`;
+    return this.chatModelId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B';
   }
 
   async toggleMicrophone(): Promise<void> {
@@ -1111,6 +1152,7 @@ export class VoiceAssistantEngine {
       await this.codingLlmProvider.dispose();
     }
     await this.llmProvider.dispose();
+    await this.phoneModels?.dispose();
     await this.ttsProvider.dispose();
   }
 }

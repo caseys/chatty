@@ -878,6 +878,12 @@ export class JavascriptRuntime {
         if (out === undefined && logs.length > 0) {
           out = logs.join('\\n');
         }
+        // Functions, DOM nodes etc. can't be posted to the host; send a description instead
+        try {
+          structuredClone(out);
+        } catch {
+          out = typeof out === 'function' ? '[function ' + (out.name || 'anonymous') + ']' : String(out);
+        }
 
         window.parent.postMessage({
           type: 'result',

@@ -149,8 +149,7 @@ export class MinimalVoiceApp {
         this.updateUiState();
       },
       onLlmProgress: (loaded, total) => {
-        const modelName = this.engine.llmProvider.modelId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B';
-        this.reportLoadProgress('llm', loaded, total, modelName);
+        this.reportLoadProgress('llm', loaded, total, this.engine.getLlmDisplayName());
       },
       onTtsProgress: (loaded, total) => {
         this.reportLoadProgress('tts', loaded, total, 'Piper voice');
@@ -776,7 +775,7 @@ export class MinimalVoiceApp {
     const expected = (id: string, fallback: number) =>
       MODEL_REGISTRY.find((m) => m.id === id)?.expectedSizeBytes ?? fallback;
     const defaults: Record<LoadKind, number> = {
-      llm: expected(this.engine.llmProvider.modelId, 2_008_432_640),
+      llm: this.engine.getStartupLlmExpectedBytes(),
       tts: expected(settings.voiceId, 63_201_294),
       stt: expected('whistle-stt-base', 16_919_407),
     };
