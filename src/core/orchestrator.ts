@@ -38,12 +38,23 @@ import {
 } from '../tools/javascript-runtime.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 
+/** Errors this soon after a program ran are sent back to the model to fix */
+const AUTO_FIX_WINDOW_MS = 10_000;
+
+/** How a reply's code went: ran, failed, still running (a song, a timer), or there was none */
+export interface RunStatus {
+  kind: 'ok' | 'running' | 'error' | 'none';
+  text: string;
+}
+
 export interface OrchestratorEvents {
   onMessageCreated?: (message: ConversationMessage) => void;
   onMessageUpdated?: (message: ConversationMessage) => void;
   onTokenStream?: (turnId: string, token: string, canonicalSoFar: string) => void;
   /** The model's raw output so far for this turn, exactly as generated */
   onRawOutput?: (turnId: string, rawSoFar: string) => void;
+  /** Whether this reply's code ran, and how it went */
+  onRunStatus?: (turnId: string | null, status: RunStatus) => void;
   onPhraseReadyForPlayback?: (phrase: PhraseSegment) => Promise<void> | void;
   onInterruption?: (canceledTurnId: string, preservedCanonicalText: string) => void;
   onTelemetryUpdated?: (telemetry: SystemTelemetry) => void;
@@ -62,6 +73,8 @@ export interface ConversationOrchestratorOptions {
   audioContextAccessor?: () => Promise<AudioContext | null> | AudioContext | null;
   events?: OrchestratorEvents;
   enableSpeechOutput?: boolean;
+  /** Send a failed program's error back to the model for one automatic fix (see maybeAutoFix) */
+  autoFixErrors?: boolean;
   maxTtsQueueSize?: number;
   contextCompactionThreshold?: number;
   /** Id of the conversation currently loaded in memory (used to attribute auto-titles). */
@@ -139,7 +152,7 @@ export function classifyTranscript(
 export const CONCISE_VOICE_SYSTEM_PROMPT = [
   "You are Chatty, a voice assistant that acts by writing JavaScript. Your reply runs as a program in the user's browser, immediately and exactly as written.",
   'Rules:',
-  '1. Reply with JavaScript only: no markdown fences, no explanation before or after it.',
+  '1. Reply with JavaScript only: no markdown fences, no explanation before or after it. Write the shortest program that fully does what was asked.',
   '2. Act first: do what was asked (draw, build, play, compute, look up) as a live, working browser app, then tell the user what you did with speak("...").',
   '3. speak(text) talks to the user; plain conversation is just speak(). It accepts computed values: speak(`The total is ${total}.`). Never mention code, JavaScript or programming in what you say, and never offer code.',
   '4. The page (document.body) is a transparent, full-window layer. Use <canvas> for visuals: drawings, art, animations, games and simulations (2D or WebGL). Use HTML and CSS for interfaces: buttons, forms, cards, notes, tables, gauges, dashboards and widgets. <svg> works for diagrams and icons.',
@@ -250,12 +263,22 @@ export class ConversationOrchestrator {
   private audioContextAccessor?: () => Promise<AudioContext | null> | AudioContext | null;
   private events: OrchestratorEvents;
   private enableSpeechOutput: boolean;
+  private autoFixErrors: boolean;
   private compactionThreshold: number;
   private getConversationId?: () => string;
   private shouldAutoTitle?: (conversationId: string) => boolean;
   // Last tool or program in each conversation: lets follow-ups ("make it bigger", "what about
   // Paris?") continue the previous action, and gives the coder the program it is editing
   private lastAction: LastAction | null = null;
+  // The newest program run, so an error it hits (during or soon after the run) goes back to the model once
+  private lastRun: {
+    turnId: string;
+    code: string;
+    finishedAt: number;
+    isAutoFix: boolean;
+    fixRequested: boolean;
+    error: string | null;
+  } | null = null;
   // Phone pipeline (small models): router picks a tool / code / chat each turn
   private phonePipeline: {
     router: TurnRouter;
@@ -284,6 +307,7 @@ export class ConversationOrchestrator {
     this.ttsProvider = options.ttsProvider;
     this.events = options.events ?? {};
     this.enableSpeechOutput = options.enableSpeechOutput ?? true;
+    this.autoFixErrors = options.autoFixErrors ?? false;
     this.compactionThreshold = options.contextCompactionThreshold ?? 0.85;
     this.getConversationId = options.getConversationId;
     this.shouldAutoTitle = options.shouldAutoTitle;
@@ -495,6 +519,8 @@ export class ConversationOrchestrator {
     options?: {
       isVoiceTranscript?: boolean;
       sttFinalizationLatencyMs?: number;
+      /** The program that failed: this turn asks the model to fix it (see maybeAutoFix) */
+      autoFix?: string;
     }
   ): Promise<ConversationMessage | null> {
     // Stage 1: Capture and normalize input
@@ -545,6 +571,7 @@ export class ConversationOrchestrator {
       role: 'user',
       canonicalContent: normalized,
       rawTranscript: options?.isVoiceTranscript ? rawTranscript : undefined,
+      ...(options?.autoFix ? { autoFix: true } : {}),
       timestamp: Date.now(),
     };
 
@@ -569,7 +596,8 @@ export class ConversationOrchestrator {
     // otherwise past programs appear only as one-line summaries.
     const lastAction = this.getLastAction(conversationId);
     const programBeingEdited =
-      lastAction?.kind === 'code' && isFollowUpEdit(normalized) ? lastAction.code : null;
+      options?.autoFix ??
+      (lastAction?.kind === 'code' && isFollowUpEdit(normalized) ? lastAction.code : null);
     let { systemPrompt, promptMessages } = this.buildModelPrompt(
       normalized,
       resolvedContext,
@@ -1146,7 +1174,9 @@ export class ConversationOrchestrator {
           assistantMsg.rawCode = executableCode;
           assistantMsg.rawLlmOutput = rawContent;
 
-          if (!isProse) {
+          if (isProse) {
+            this.events.onRunStatus?.(turnId, { kind: 'none', text: 'No code to run in this reply' });
+          } else {
             // Execute the generated output through the Universal Programmatic Agent Harness
             // Set once the run returns: later speak() calls come from timers/handlers the code left
             // running, and are voiced outside the (finished) turn instead of being dropped.
@@ -1175,6 +1205,22 @@ export class ConversationOrchestrator {
               audioContextAccessor: this.audioContextAccessor,
             });
             runFinished = true;
+            this.lastRun = {
+              turnId,
+              code: executableCode,
+              finishedAt: performance.now(),
+              isAutoFix: !!options?.autoFix,
+              fixRequested: false,
+              error: execResult.error ?? null,
+            };
+            this.events.onRunStatus?.(
+              turnId,
+              execResult.error
+                ? { kind: 'error', text: `Error: ${execResult.error}` }
+                : execResult.stillRunning
+                  ? { kind: 'running', text: 'Ran; still running' }
+                  : { kind: 'ok', text: `Ran in ${Math.max(1, Math.round(execResult.executionTimeMs))} ms` }
+            );
             // The program follow-ups may edit; remembered even when it failed ("fix it" edits it
             // too). Talk-only replies (desktop chat is speak() code) don't replace it.
             if (!isTalkOnly(executableCode)) {
@@ -1287,6 +1333,7 @@ export class ConversationOrchestrator {
       this.stateCoordinator.transitionInteraction('idle', null);
       this.events.onMessageUpdated?.({ ...assistantMsg });
       this.emitTelemetry();
+      this.maybeAutoFix(turnId);
 
       // If this was the first completed turn in this session, generate a concise title
       // (or, when the host tracks titles, the first turn of a conversation still untitled)
@@ -1353,6 +1400,32 @@ export class ConversationOrchestrator {
    * Speaks text outside the normal turn pipeline, e.g. speak() calls fired by
    * runtime timers or event handlers after the code-mode turn has finished.
    */
+  /**
+   * An error a program threw after it started (a timer, handler or async function). Shown, and
+   * if it's the newest program and it just ran, sent back to the model to fix.
+   */
+  reportProgramError(message: string): void {
+    this.events.onRunStatus?.(null, { kind: 'error', text: `Error while running: ${message}` });
+    const run = this.lastRun;
+    if (!run || run.error || performance.now() - run.finishedAt > AUTO_FIX_WINDOW_MS) return;
+    run.error = message;
+    // Still finishing its turn (speaking): the turn's end sends it
+    if (!this.scheduler.getActiveTurnId()) this.maybeAutoFix(run.turnId);
+  }
+
+  /** One automatic fix per request: the error goes back to the model, which rewrites the program. */
+  private maybeAutoFix(turnId: string): void {
+    const run = this.lastRun;
+    if (!this.autoFixErrors) return;
+    if (!run || run.turnId !== turnId || !run.error || run.isAutoFix || run.fixRequested) return;
+    if (this.scheduler.getActiveTurnId()) return; // the user has already moved on
+    run.fixRequested = true;
+    this.events.onRunStatus?.(turnId, { kind: 'error', text: `Error: ${run.error} (asking the model to fix it)` });
+    void this.submitUserInput(`That code failed with this error: ${run.error}\nFix the program and run it again.`, {
+      autoFix: run.code,
+    });
+  }
+
   speakOutOfTurn(text: string): Promise<void> {
     const phraseText = text.trim();
     if (!phraseText) return Promise.resolve();

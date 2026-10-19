@@ -9,6 +9,7 @@ import { MODEL_REGISTRY } from './core/model-manager.ts';
 import { FluidAudioVisualizer } from './audio/visualizer.ts';
 import { clearModelCache, getModelCacheBytes } from './core/model-cache.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
+import type { RunStatus } from './core/orchestrator.ts';
 import { createToolSummaryElement, parseStreamingToolCall, stripToolCallMarkup } from './tools/tool-formatter.ts';
 
 type LoadKind = 'llm' | 'tts' | 'stt';
@@ -26,6 +27,8 @@ const SETTINGS_SEEN_KEY = 'chatty_settings_seen';
 const HAS_SPOKEN_KEY = 'chatty_has_spoken';
 /** Matches the CSS breakpoint where the chat and code panels stack */
 const NARROW_LAYOUT = '(max-width: 760px)';
+
+const RUN_STATUS_ICONS: Record<RunStatus['kind'], string> = { ok: '▶', running: '▶', error: '✕', none: '–' };
 
 /** True on the very first visit (settings never saved or shown). */
 function isFirstVisit(): boolean {
@@ -50,6 +53,8 @@ export class MinimalVoiceApp {
   private modelCacheSizeEl = document.getElementById('model-cache-size');
   private clearModelCacheBtn = document.getElementById('btn-clear-model-cache') as HTMLButtonElement | null;
   private rawOutputEl = document.getElementById('raw-output');
+  private runStatusEl = document.getElementById('run-status');
+  private rawOutputTurnId: string | null = null;
   // Chat bubbles by message id and by turn (streamed text arrives before the reply is saved)
   private bubbles = new Map<string, HTMLElement>();
   private turnBubbles = new Map<string, HTMLElement>();
@@ -148,11 +153,20 @@ export class MinimalVoiceApp {
       onTokenStream: (turnId, _chunk, fullText) => {
         this.renderAssistantOutput(this.bubbleForTurn(turnId), fullText, undefined, true);
       },
-      onRawOutput: (_turnId, raw) => {
+      onRawOutput: (turnId, raw) => {
+        // A new reply: its run status comes once its code has run
+        if (turnId !== this.rawOutputTurnId) {
+          this.rawOutputTurnId = turnId;
+          this.setRunStatus(null);
+        }
         this.setRawOutput(raw);
       },
+      onRunStatus: (_turnId, status) => {
+        this.setRunStatus(status);
+      },
       onMessageCreated: (msg) => {
-        if (msg.role === 'user' && msg.canonicalContent) {
+        // Chatty's own "fix this error" turns aren't the user's words
+        if (msg.role === 'user' && msg.canonicalContent && !msg.autoFix) {
           this.addUserBubble(msg);
           try {
             navigator.vibrate?.([8, 20, 8]);
@@ -278,6 +292,15 @@ export class MinimalVoiceApp {
   }
 
   private bindEvents(): void {
+    // Tapping an example sends it as if typed (the tap also unlocks audio for the reply)
+    this.chatExamplesEl?.addEventListener('click', (e) => {
+      const example = (e.target as HTMLElement).closest('.chat-example');
+      if (!example || !this.chatInput) return;
+      this.chatInput.value = (example.textContent ?? '').replace(/[“”]/g, '').trim();
+      if (this.chatSendBtn?.disabled) this.chatInput.focus(); // still loading: send it when ready
+      else this.chatInputForm?.requestSubmit();
+    });
+
     this.chatInputForm?.addEventListener('submit', (e) => {
       e.preventDefault();
       const text = this.chatInput?.value.trim();
@@ -675,7 +698,7 @@ export class MinimalVoiceApp {
     this.clearChatLog();
     if (summary?.summaryText) this.showSummaryNote(summary.summaryText);
     for (const m of messages) {
-      if (m.role === 'user' && m.canonicalContent) this.addUserBubble(m);
+      if (m.role === 'user' && m.canonicalContent && !m.autoFix) this.addUserBubble(m);
       else if (m.role === 'assistant' && (m.canonicalContent || m.toolCall)) this.renderAssistantMessage(m);
     }
     const lastReply = [...messages].reverse().find((m) => m.role === 'assistant');
@@ -757,6 +780,14 @@ export class MinimalVoiceApp {
       .trim();
     this.rawOutputEl.innerHTML = Prism.highlight(code, Prism.languages.javascript, 'javascript');
     this.rawOutputEl.scrollTop = this.rawOutputEl.scrollHeight;
+  }
+
+  private setRunStatus(status: RunStatus | null): void {
+    const el = this.runStatusEl;
+    if (!el) return;
+    el.hidden = !status;
+    el.textContent = status ? `${RUN_STATUS_ICONS[status.kind]} ${status.text}` : '';
+    el.dataset.kind = status?.kind ?? '';
   }
 
   /** Keeps the chat log scrolled to the newest message. */

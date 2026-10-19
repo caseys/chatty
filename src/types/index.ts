@@ -172,6 +172,8 @@ export interface ConversationMessage {
   role: 'system' | 'user' | 'assistant';
   canonicalContent: string;
   rawTranscript?: string;
+  /** User turn Chatty sent itself to report a failed program back to the model (not shown as a bubble) */
+  autoFix?: boolean;
   rawCode?: string;
   rawLlmOutput?: string;
   speechReadyContent?: string;

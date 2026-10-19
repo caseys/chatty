@@ -77,17 +77,17 @@
       <div class="chat-workspace">
         <section class="chat-panel" aria-label="Conversation">
           <div id="chat-log" class="chat-log scroller" aria-live="polite"></div>
-          <!-- Shown until the user speaks for the first time -->
+          <!-- Shown until the user speaks for the first time; tapping one sends it -->
           <div id="chat-examples" class="chat-examples" hidden>
             <div class="chat-examples-title">Try saying</div>
             <ul class="chat-examples-list">
-              <li>“Draw a rainbow over some hills”</li>
-              <li>“Play Twinkle Twinkle Little Star”</li>
-              <li>“Animate a bouncing ball”</li>
-              <li>“Make a tip calculator”</li>
-              <li>“Show a ten second countdown”</li>
-              <li>“Who was Ada Lovelace?”</li>
-              <li>“What’s 15 percent of 84?”</li>
+              <li><button type="button" class="chat-example">“Draw a rainbow over some hills”</button></li>
+              <li><button type="button" class="chat-example">“Play Twinkle Twinkle Little Star”</button></li>
+              <li><button type="button" class="chat-example">“Animate a bouncing ball”</button></li>
+              <li><button type="button" class="chat-example">“Make a tip calculator”</button></li>
+              <li><button type="button" class="chat-example">“Show a ten second countdown”</button></li>
+              <li><button type="button" class="chat-example">“Who was Ada Lovelace?”</button></li>
+              <li><button type="button" class="chat-example">“What’s 15 percent of 84?”</button></li>
             </ul>
           </div>
           <form id="chat-input-form" class="chat-input" autocomplete="off">
@@ -104,6 +104,8 @@
         <section class="raw-panel" aria-label="Raw model output">
           <div class="raw-panel-title">Model output</div>
           <pre id="raw-output" class="raw-output scroller"></pre>
+          <!-- Whether the newest reply's code ran, and any error it hit -->
+          <div id="run-status" class="run-status" role="status" hidden></div>
         </section>
       </div>
 
@@ -174,22 +176,22 @@
                     <label for="toggle-speech" class="settings-toggle">
                       <span class="settings-label">
                         <span class="settings-label-title">Speech</span>
-                        <span class="settings-label-desc">Listen with Whistle and talk with Piper. Off: type to chat, and no speech models are loaded.</span>
+                        <span class="settings-label-desc">Talk with Chatty out loud. Off: type to chat, and no speech models are loaded.</span>
                       </span>
                       <input id="toggle-speech" class="settings-switch" type="checkbox" role="switch" checked />
                     </label>
                   </div>
 
-                  <!-- Piper Voice Selection (hidden while speech is off) -->
+                  <!-- Voice selection (hidden while speech is off) -->
                   <div id="settings-voice-field" class="settings-field">
                     <label for="select-piper-voice" class="settings-label">
-                      <span class="settings-label-title">Piper Voice</span>
-                      <span class="settings-label-desc">Local ONNX text-to-speech synthesis</span>
+                      <span class="settings-label-title">Voice</span>
+                      <span class="settings-label-desc">How Chatty sounds</span>
                     </label>
                     <div class="settings-select-wrapper">
                       <select id="select-piper-voice" class="settings-select">
-                        <option value="en_US-hfc_female-medium">Piper US Female (Medium ONNX)</option>
-                        <option value="en_US-hfc_male-medium">Piper US Male (Medium ONNX)</option>
+                        <option value="en_US-hfc_female-medium">US Female</option>
+                        <option value="en_US-hfc_male-medium">US Male</option>
                       </select>
                     </div>
                   </div>

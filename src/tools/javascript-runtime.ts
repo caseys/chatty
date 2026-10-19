@@ -50,6 +50,8 @@ export interface JavascriptRuntimeOptions {
   iframeContainer?: HTMLElement | null;
   /** The app's running audio context, shared with programs (see programAudio) */
   getSharedAudioContext?: () => AudioContext | null;
+  /** An error a program threw after it started (in a timer, event handler or async function) */
+  onProgramError?: (message: string) => void;
 }
 
 export const CODING_AGENT_SYSTEM_PROMPT = [
@@ -309,6 +311,7 @@ export class JavascriptRuntime {
   private onIframeLoad?: (iframe: HTMLIFrameElement) => void;
   private pendingRuns = new Map<string, PendingIframeRun>();
   private getSharedAudioContext?: () => AudioContext | null;
+  private onProgramError?: (message: string) => void;
   private programOutput: GainNode | null = null;
 
   constructor(options?: JavascriptRuntimeOptions) {
@@ -319,6 +322,7 @@ export class JavascriptRuntime {
     this.onVisualChange = options?.onVisualChange;
     this.iframeContainer = options?.iframeContainer ?? null;
     this.getSharedAudioContext = options?.getSharedAudioContext;
+    this.onProgramError = options?.onProgramError;
     if (this.getSharedAudioContext && typeof window !== 'undefined') {
       // Read by the sandbox's AudioContext stand-in (same origin)
       (window as unknown as { __chattySharedAudio?: () => unknown }).__chattySharedAudio = () => this.programAudio();
@@ -993,6 +997,16 @@ export class JavascriptRuntime {
     window.AudioContext = SharedAudioContext;
     window.webkitAudioContext = SharedAudioContext;
 
+    // Errors after the run started (timers, handlers, async code) would otherwise fail silently
+    window.addEventListener('error', (event) => {
+      const err = event.error;
+      window.parent.postMessage({ type: 'program_error', message: err ? (err.message || String(err)) : event.message }, '*');
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+      const err = event.reason;
+      window.parent.postMessage({ type: 'program_error', message: err ? (err.message || String(err)) : 'Promise rejected' }, '*');
+    });
+
     window.addEventListener('message', async (event) => {
       const data = event.data;
       if (!data) return;
@@ -1151,6 +1165,11 @@ export class JavascriptRuntime {
 
     if (data.type === 'playNotes' || data.type === 'searchWikipedia') {
       void this.handleAsyncCall(iframe, data);
+      return;
+    }
+
+    if (data.type === 'program_error') {
+      this.onProgramError?.(String(data.message ?? 'Unknown error'));
       return;
     }
 

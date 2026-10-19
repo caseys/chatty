@@ -1946,12 +1946,25 @@ body {
   gap: 6px;
 }
 
-.chat-examples-list li {
+.chat-example {
   padding: 4px 10px;
+  border: 1px solid transparent;
   border-radius: 999px;
   background: var(--fill-subtle);
   color: var(--text-primary);
+  font: inherit;
   font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.chat-example:hover {
+  background: var(--fill-hover);
+  border-color: var(--line);
+}
+
+.chat-example:active {
+  transform: scale(0.96);
 }
 
 /* Mic and voice waveforms overlaid in one box; lighten keeps whichever bar is brighter.
@@ -1987,6 +2000,29 @@ body {
   text-transform: uppercase;
   color: var(--text-secondary);
   border-bottom: 1px solid var(--line);
+}
+
+/* Under the code: whether the newest reply's code ran */
+.run-status {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border-top: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.run-status[hidden] {
+  display: none;
+}
+
+.run-status[data-kind='ok'] {
+  color: var(--success);
+}
+
+.run-status[data-kind='error'] {
+  color: var(--danger);
 }
 
 .raw-output {

@@ -8,7 +8,7 @@
 import { SharedAudioSubsystem } from '../audio/audio-subsystem.ts';
 import { ConversationMemoryStore } from './memory-store.ts';
 import { ModelManager } from './model-manager.ts';
-import { classifyTranscript, ConversationOrchestrator } from './orchestrator.ts';
+import { classifyTranscript, ConversationOrchestrator, type RunStatus } from './orchestrator.ts';
 import { StateMachineCoordinator, type CoordinatedStateSnapshot } from './state-machine.ts';
 import { WhistleSttProvider } from '../runtimes/stt-provider.ts';
 import { NativeSpeechRecognizer } from '../runtimes/native-stt.ts';
@@ -137,6 +137,7 @@ export interface VoiceAssistantEngineEvents {
   onTranscript?: (text: string, isFinal: boolean) => void;
   onTokenStream?: (turnId: string, chunk: string, fullText: string) => void;
   onRawOutput?: (turnId: string, rawSoFar: string) => void;
+  onRunStatus?: (turnId: string | null, status: RunStatus) => void;
   onMessageCreated?: (message: ConversationMessage) => void;
   onMessageUpdated?: (message: ConversationMessage) => void;
   onTelemetryUpdated?: (telemetry: SystemTelemetry) => void;
@@ -226,6 +227,7 @@ export class VoiceAssistantEngine {
     this.jsRuntime = new JavascriptRuntime({
       mode: 'iframe',
       getSharedAudioContext: () => this.audioSubsystem.getAudioContext(),
+      onProgramError: (message) => this.orchestrator.reportProgramError(message),
       onResult: (res) => {
         this.events.onJavascriptExecution?.(res);
       },
@@ -287,6 +289,7 @@ export class VoiceAssistantEngine {
       llmProvider: this.llmProvider,
       ttsProvider: this.ttsProvider,
       enableSpeechOutput: this.speechEnabled,
+      autoFixErrors: true,
       javascriptRuntime: this.jsRuntime,
       audioContextAccessor: () => this.audioSubsystem.ensureAudioContext(),
       tools: [],
@@ -309,6 +312,9 @@ export class VoiceAssistantEngine {
         },
         onRawOutput: (turnId, raw) => {
           this.events.onRawOutput?.(turnId, raw);
+        },
+        onRunStatus: (turnId, status) => {
+          this.events.onRunStatus?.(turnId, status);
         },
         onPhraseReadyForPlayback: async (phrase) => {
           if (phrase.audioSamples && phrase.sampleRate) {
@@ -511,6 +517,7 @@ export class VoiceAssistantEngine {
 
     this.ttsProvider.voiceId = this.voiceId;
     this.orchestrator.setSpeechOutputEnabled(this.speechEnabled);
+    this.audioSubsystem.setAudioSessionType(this.speechEnabled ? 'play-and-record' : 'playback');
 
     this.stateCoordinator.setModelState('stt', 'ready');
     this.stateCoordinator.setModelState('llm', 'downloading');
@@ -638,7 +645,7 @@ export class VoiceAssistantEngine {
 
   /** Piper, then Whistle, one at a time. Stops (and frees them) if speech is turned off meanwhile. */
   private async loadSpeechModels(): Promise<void> {
-    writeLoadStage('Piper voice');
+    writeLoadStage('the voice');
     this.stateCoordinator.setModelState('tts', 'downloading');
     await this.ttsProvider
       .initialize((loaded, total) => {
@@ -666,7 +673,7 @@ export class VoiceAssistantEngine {
       return;
     }
     await this.loadGap();
-    writeLoadStage('Whistle speech recognition');
+    writeLoadStage('speech recognition');
     await this.sttProvider
       .initialize((loaded, total) => this.events.onSttProgress?.(loaded, total))
       .catch((err) => {
@@ -694,6 +701,7 @@ export class VoiceAssistantEngine {
       // ignore
     }
     this.orchestrator.setSpeechOutputEnabled(on);
+    this.audioSubsystem.setAudioSessionType(on ? 'play-and-record' : 'playback');
     if (on) {
       await this.loadSpeechModels().finally(clearLoadStage);
       return;

@@ -172,6 +172,7 @@ export class SharedAudioSubsystem {
   private mediaStream: MediaStream | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private processorNode: ScriptProcessorNode | null = null;
+  private sessionType: 'play-and-record' | 'playback' = 'play-and-record';
   /** Zero-gain output for the mic processor: it must be pulled by the graph to run, but nothing it outputs may reach the speakers */
   private processorSink: GainNode | null = null;
   private vad: VoiceActivityDetector;
@@ -198,13 +199,24 @@ export class SharedAudioSubsystem {
     return this.audioCtx;
   }
 
-  /** iOS/WebKit: one audio session for simultaneous mic and speaker (set before mic or context). */
+  /**
+   * iOS/WebKit audio session: 'play-and-record' when the mic may be used (speech on), 'playback'
+   * when it never is (speech off: no recording, speaker output, not muted by the silent switch).
+   */
+  setAudioSessionType(type: 'play-and-record' | 'playback'): void {
+    this.sessionType = type;
+    this.configureAudioSession();
+  }
+
+  /** Applies the session type (before mic or context). Only a real change is written: each one reconfigures the session. */
   private configureAudioSession(): void {
     if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
+      const session = (navigator as any).audioSession;
+      if (session.type === this.sessionType) return;
       try {
-        (navigator as any).audioSession.type = 'play-and-record';
+        session.type = this.sessionType;
       } catch (err) {
-        console.debug('[AudioSubsystem] audioSession.type play-and-record not supported or failed:', err);
+        console.debug(`[AudioSubsystem] audioSession.type ${this.sessionType} not supported or failed:`, err);
       }
     }
   }

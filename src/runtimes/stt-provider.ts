@@ -143,7 +143,7 @@ export class WhistleSttProvider implements SttRuntimeProvider {
     words?: TranscriptWord[];
     latencyMs: number;
   }> {
-    return withActivity('transcribing speech (Whistle)', () => this.transcribeNow(samples, sampleRate, language, signal));
+    return withActivity('transcribing speech', () => this.transcribeNow(samples, sampleRate, language, signal));
   }
 
   private async transcribeNow(

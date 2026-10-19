@@ -555,7 +555,7 @@ export class WorkerTtsProvider implements TtsRuntimeProvider {
     synthesisTimeMs: number;
     audioDurationMs: number;
   }> {
-    return withActivity('speaking (Piper voice)', () => this.synthesizeNow(text, turnId, sequence, signal));
+    return withActivity('speaking', () => this.synthesizeNow(text, turnId, sequence, signal));
   }
 
   private async synthesizeNow(

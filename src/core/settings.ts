@@ -64,7 +64,7 @@ export const LOCAL_CHAT_MODELS: ReadonlyArray<LocalChatModel> = [
 ];
 
 /** Phones start on Llama 3.2 1B: the smallest memory footprint, and it did best in testing */
-export const DEFAULT_PHONE_CHAT_MODEL_ID = 'llama-3.2-1b';
+export const DEFAULT_PHONE_CHAT_MODEL_ID = 'qwen3-0.6b';
 /** Offered after a phone load dies (likely out of memory): the smallest memory footprint */
 export const SMALLEST_PHONE_CHAT_MODEL_ID = 'llama-3.2-1b';
 
@@ -102,12 +102,12 @@ export const SUPPORTED_CODING_MODELS: ReadonlyArray<ModelOptionItem> = [
 export const SUPPORTED_PIPER_VOICES: ReadonlyArray<ModelOptionItem> = [
   {
     id: 'en_US-hfc_female-medium',
-    name: 'Piper US Female (Medium ONNX)',
+    name: 'US Female',
     description: 'Natural female voice',
   },
   {
     id: 'en_US-hfc_male-medium',
-    name: 'Piper US Male (Medium ONNX)',
+    name: 'US Male',
     description: 'Natural male voice',
   },
 ];
