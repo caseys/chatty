@@ -31,9 +31,10 @@ const NARROW_LAYOUT = '(max-width: 760px)';
 const RUN_STATUS_ICONS: Record<RunStatus['kind'], string> = { ok: '▶', running: '▶', error: '✕', none: '–' };
 
 /** True on the very first visit (settings never saved or shown). */
-function isFirstVisit(): boolean {
+/** First visit, or the first load of new code: Settings opens before anything downloads. */
+function settingsNotSeenForThisVersion(): boolean {
   try {
-    return localStorage.getItem(SETTINGS_SEEN_KEY) === null && localStorage.getItem('chatty_user_settings') === null;
+    return localStorage.getItem(SETTINGS_SEEN_KEY) !== __APP_VERSION__;
   } catch {
     return false;
   }
@@ -231,9 +232,9 @@ export class MinimalVoiceApp {
     this.updateBusyIndicator();
     this.updateDownloadProgress('Loading models…', 0, '0%');
     try {
-      // First visit, or the last model load crashed or failed: choose before anything downloads
+      // First visit, new code, or the last model load crashed or failed: choose before anything downloads
       const loadProblem = this.engine.getLastLoadProblem();
-      if (isFirstVisit() || loadProblem) {
+      if (settingsNotSeenForThisVersion() || loadProblem) {
         await this.engine.detectDevice();
         await this.showSettingsAndWait(loadProblem);
       }
@@ -893,7 +894,7 @@ export class MinimalVoiceApp {
         'close',
         () => {
           try {
-            localStorage.setItem(SETTINGS_SEEN_KEY, '1');
+            localStorage.setItem(SETTINGS_SEEN_KEY, __APP_VERSION__);
           } catch {
             // ignore
           }
