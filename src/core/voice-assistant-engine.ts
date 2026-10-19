@@ -11,6 +11,7 @@ import { ModelManager } from './model-manager.ts';
 import { ConversationOrchestrator } from './orchestrator.ts';
 import { StateMachineCoordinator, type CoordinatedStateSnapshot } from './state-machine.ts';
 import { WhistleSttProvider } from '../runtimes/stt-provider.ts';
+import { NativeSpeechRecognizer } from '../runtimes/native-stt.ts';
 import { WorkerLlmProvider, WorkerTtsProvider } from '../runtimes/worker-bridge.ts';
 import {
   JavascriptRuntime,
@@ -66,6 +67,32 @@ function readLlmLoadMarker(): string | null {
     return null;
   }
 }
+// Which model was loading when the tab last died (any startup model, for diagnostics)
+const LOAD_STAGE_KEY = 'chatty_load_stage';
+function writeLoadStage(label: string): void {
+  try {
+    localStorage.setItem(LOAD_STAGE_KEY, label);
+  } catch {
+    // Storage unavailable
+  }
+}
+function takeLoadStage(): string | null {
+  try {
+    const stage = localStorage.getItem(LOAD_STAGE_KEY);
+    localStorage.removeItem(LOAD_STAGE_KEY);
+    return stage;
+  } catch {
+    return null;
+  }
+}
+function clearLoadStage(): void {
+  try {
+    localStorage.removeItem(LOAD_STAGE_KEY);
+  } catch {
+    // Ignore
+  }
+}
+
 function clearLlmLoadMarker(): void {
   try {
     localStorage.removeItem(LLM_LOAD_MARKER_KEY);
@@ -84,7 +111,15 @@ export interface VoiceAssistantEngineEvents {
   onTelemetryUpdated?: (telemetry: SystemTelemetry) => void;
   onError?: (error: Error, context: string) => void;
   onCapabilitiesDetected?: (caps: BrowserCapabilities) => void;
-  onLlmProgress?: (loaded: number, total: number, pct: number, mb: string, totalMb: string) => void;
+  onLlmProgress?: (
+    loaded: number,
+    total: number,
+    pct: number,
+    mb: string,
+    totalMb: string,
+    /** Phones load two models in this stage: which one is loading, and its own bytes */
+    current?: { label: string; loaded: number; total: number }
+  ) => void;
   onTtsProgress?: (loaded: number, total: number, pct: number, mb?: string, totalMb?: string) => void;
   onSttProgress?: (loaded: number, total: number) => void;
   /** Fired once the startup Whistle STT load settles (success or failure). */
@@ -121,6 +156,10 @@ export class VoiceAssistantEngine {
   private sidebarOpen: boolean = DEFAULT_SETTINGS.sidebarOpen;
   private codingLlmProvider: WorkerLlmProvider | null = null;
   private phoneModels: PhoneModelSet | null = null;
+  // Browser speech recognition instead of Whistle (phones, or ?stt=native)
+  private nativeStt: NativeSpeechRecognizer | null = null;
+  /** Model that was loading when the previous page load died (likely out of memory), if any */
+  previousLoadFailure: string | null = null;
 
   private activeConversationId = 'chat_default';
   private compactionAbort: AbortController | null = null;
@@ -351,6 +390,7 @@ export class VoiceAssistantEngine {
     // Crash-loop guard: the marker is set while the LLM loads and cleared once it settles. If it
     // is still present, the tab died mid-load (out of memory), so retry with the smaller model
     // instead of crashing again on every visit.
+    this.previousLoadFailure = takeLoadStage();
     const crashedLoad = readLlmLoadMarker();
     if (crashedLoad) {
       if (this.chatModelId !== recommended.fallbackLlmModelId) {
@@ -396,6 +436,16 @@ export class VoiceAssistantEngine {
     this.stateCoordinator.setModelState('llm', 'downloading');
     this.stateCoordinator.setModelState('tts', 'downloading');
 
+    // Phone tuning, overridable from the URL for on-device testing:
+    //   ?stt=native|whistle   ?chat=270m   ?gap=<ms between model loads>
+    const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
+    const sttPref = params?.get('stt');
+    const loadGapMs = Number(params?.get('gap') ?? (isConstrained ? 1500 : 0)) || 0;
+    const gap = () => (loadGapMs > 0 ? new Promise<void>((r) => setTimeout(r, loadGapMs)) : Promise.resolve());
+    if ((sttPref ? sttPref === 'native' : isConstrained) && NativeSpeechRecognizer.isSupported()) {
+      this.setupNativeStt();
+    }
+
     let startLlm: () => Promise<void> = async () => {};
     const hasWebGpu =
       caps.hasWebGPU || (typeof navigator !== 'undefined' && 'gpu' in navigator);
@@ -409,7 +459,11 @@ export class VoiceAssistantEngine {
       // Phones run small ONNX models (FunctionGemma router + Gemma 3 1B chat, Qwen coder on demand)
       let startupLlm: LlmRuntimeProvider = this.llmProvider;
       if (isConstrained) {
-        this.phoneModels = new PhoneModelSet();
+        this.phoneModels = new PhoneModelSet({
+          smallChat: params?.get('chat') === '270m',
+          loadGapMs,
+          onModelLoadStart: writeLoadStage,
+        });
         const chat = new SwappingLlmProvider(this.phoneModels, this.phoneModels.chat, 'conversation');
         const coder = new SwappingLlmProvider(this.phoneModels, this.phoneModels.coder, 'coder');
         this.orchestrator.configurePhonePipeline({
@@ -423,15 +477,14 @@ export class VoiceAssistantEngine {
       const modelName = this.getLlmDisplayName();
       startLlm = () => {
         writeLlmLoadMarker(this.chatModelId);
+        if (!this.phoneModels) writeLoadStage(modelName);
         return startupLlm
-          .initialize((loaded, total) => {
+          .initialize((loaded, total, current?: { label: string; loaded: number; total: number }) => {
             const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
             const mb = (loaded / (1024 * 1024)).toFixed(0);
             const totalMb = (total / (1024 * 1024)).toFixed(0);
-            this.events.onLlmProgress?.(loaded, total, pct, mb, totalMb);
-            this.events.onStatusChange?.(
-              `Loading ${modelName}: ${mb} / ${totalMb} MB (${pct}%)…`
-            );
+            // The UI renders the status line from this (which model, N of M)
+            this.events.onLlmProgress?.(loaded, total, pct, mb, totalMb, current);
           })
           .then(() => {
             clearLlmLoadMarker();
@@ -455,15 +508,13 @@ export class VoiceAssistantEngine {
     // Desktop: the LLM first, so it can answer sooner. Phones: the small WASM speech models first,
     // then the WebGPU models, so the LLM load is the last allocation on a tight memory budget.
     const startSpeechModels = async () => {
+      writeLoadStage('Piper voice');
       await this.ttsProvider
         .initialize((loaded, total) => {
           const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
           const mb = (loaded / (1024 * 1024)).toFixed(0);
           const totalMb = (total / (1024 * 1024)).toFixed(0);
           this.events.onTtsProgress?.(loaded, total, pct, mb, totalMb);
-          this.events.onStatusChange?.(
-            `Pulling Piper Voice: ${mb} / ${totalMb} MB (${pct}%)...`
-          );
         })
         .then(() => {
           this.stateCoordinator.setModelState('tts', 'ready');
@@ -473,7 +524,13 @@ export class VoiceAssistantEngine {
           this.stateCoordinator.setModelState('tts', 'failed');
         });
 
-      // 4. Pre-warm Whistle STT WASM provider
+      // 4. Pre-warm Whistle STT WASM provider (skipped when the browser's recognizer is used)
+      if (this.nativeStt) {
+        this.events.onSttLoadSettled?.();
+        return;
+      }
+      await gap();
+      writeLoadStage('Whistle speech recognition');
       await this.sttProvider
         .initialize((loaded, total) => this.events.onSttProgress?.(loaded, total))
         .catch((err) => {
@@ -482,9 +539,13 @@ export class VoiceAssistantEngine {
         .finally(() => this.events.onSttLoadSettled?.());
     };
     if (isConstrained) {
-      void startSpeechModels().finally(() => startLlm());
+      void startSpeechModels()
+        .then(gap)
+        .finally(() => startLlm().finally(clearLoadStage));
     } else {
-      void startLlm().finally(() => startSpeechModels());
+      void startLlm()
+        .then(gap)
+        .finally(() => startSpeechModels().finally(clearLoadStage));
     }
 
     // 5. Visibility and lifecycle handlers
@@ -502,20 +563,67 @@ export class VoiceAssistantEngine {
       window.addEventListener('pagehide', () => {
         // A normal close/reload mid-load isn't an out-of-memory crash
         clearLlmLoadMarker();
+        clearLoadStage();
         void this.dispose();
       });
     }
   }
 
+  /** Routes the browser's speech recognizer into the same STT events Whistle produces. */
+  private setupNativeStt(): void {
+    let turnId = '';
+    this.nativeStt = new NativeSpeechRecognizer({
+      onSpeechStart: () => {
+        turnId = `voice_turn_${Date.now()}_${++this.speechTurnCounter}`;
+        this.events.onStatusChange?.('Speech detected — listening...');
+        this.orchestrator.handleSttEvent({ type: 'speech_started', turnId, sequence: 1, timestamp: performance.now() });
+      },
+      onFinal: (text) => {
+        if (!turnId) turnId = `voice_turn_${Date.now()}_${++this.speechTurnCounter}`;
+        this.events.onStatusChange?.(null);
+        this.events.onTranscript?.(text, true);
+        this.orchestrator.handleSttEvent({ type: 'final_transcript', turnId, sequence: 3, timestamp: performance.now(), text });
+        turnId = '';
+      },
+      onError: (message) => {
+        this.events.onStatusChange?.(message);
+        if (!this.nativeStt?.isActive) {
+          this.isListening = false;
+          this.stateCoordinator.setMicrophoneState('unavailable');
+        }
+      },
+    });
+    // Mute recognition while the assistant thinks or talks, so it doesn't transcribe itself
+    this.stateCoordinator.subscribe((snap) => {
+      if (!this.nativeStt?.isActive) return;
+      const assistantBusy =
+        snap.interaction === 'building_context' ||
+        snap.interaction === 'generating' ||
+        snap.interaction === 'speaking' ||
+        snap.interaction === 'compacting' ||
+        snap.playback === 'playing' ||
+        snap.playback === 'buffering';
+      if (assistantBusy) this.nativeStt.pause();
+      else this.nativeStt.resume();
+    });
+  }
+
   /** Approximate startup LLM download size (bytes), before the download reports its own total. */
   getStartupLlmExpectedBytes(): number {
-    if (this.phoneModels) return 570_000_000 + 784_000_000; // FunctionGemma fp16 + Gemma 3 1B q4f16
+    if (this.phoneModels) return 570_000_000 + (this.phoneModels.chatSpec.dtype === 'fp16' ? 570_000_000 : 784_000_000);
     return MODEL_REGISTRY.find((m) => m.id === this.chatModelId)?.expectedSizeBytes ?? 2_008_432_640;
+  }
+
+  /** Startup models in load order, as the UI labels them ("Loading model N of M"). */
+  getStartupModelOrder(): string[] {
+    const speech = this.nativeStt ? ['Piper voice'] : ['Piper voice', 'Whistle speech recognition'];
+    if (this.phoneModels) return [...speech, PHONE_MODEL_SPECS.router.label, this.phoneModels.chatSpec.label];
+    return [this.getLlmDisplayName(), ...speech];
   }
 
   /** Name of the model(s) loading/answering, for status text. */
   getLlmDisplayName(): string {
-    if (this.phoneModels) return `${PHONE_MODEL_SPECS.router.label} + ${PHONE_MODEL_SPECS.chat.label}`;
+    if (this.phoneModels) return `${PHONE_MODEL_SPECS.router.label} + ${this.phoneModels.chatSpec.label}`;
     return this.chatModelId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B';
   }
 
@@ -532,6 +640,7 @@ export class VoiceAssistantEngine {
     if (isBusy) {
       this.interrupt('User clicked Stop');
       if (this.isListening) {
+        this.nativeStt?.stop();
         this.audioSubsystem.stopMicrophoneCapture();
         this.isListening = false;
         this.stateCoordinator.setMicrophoneState('stopped');
@@ -540,6 +649,14 @@ export class VoiceAssistantEngine {
     }
 
     // 2. If listening: stop capture cleanly
+    if (this.isListening && this.nativeStt) {
+      this.nativeStt.stop();
+      this.isListening = false;
+      this.stateCoordinator.setMicrophoneState('stopped');
+      this.stateCoordinator.transitionInteraction('idle', null);
+      this.events.onStatusChange?.(null);
+      return;
+    }
     if (this.isListening) {
       const remaining = this.audioSubsystem.stopMicrophoneCapture();
       this.isListening = false;
@@ -558,10 +675,16 @@ export class VoiceAssistantEngine {
     // 3. Start capture
     try {
       this.stateCoordinator.setMicrophoneState('requesting_permission');
-      await this.audioSubsystem.startMicrophoneCapture();
+      if (this.nativeStt) {
+        // The browser's recognizer owns the mic; we only need audio output for speech
+        this.nativeStt.start();
+        await this.audioSubsystem.ensureAudioContext();
+      } else {
+        await this.audioSubsystem.startMicrophoneCapture();
+      }
       this.isListening = true;
       this.stateCoordinator.setMicrophoneState('listening');
-      this.events.onStatusChange?.('Listening for speech (VAD active)...');
+      this.events.onStatusChange?.(this.nativeStt ? 'Listening…' : 'Listening for speech (VAD active)...');
 
       // Greet on Start when the chat is empty (audio system is now set up)
       if (!this.hasHistory()) {

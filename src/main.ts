@@ -148,8 +148,8 @@ export class MinimalVoiceApp {
         }
         this.updateUiState();
       },
-      onLlmProgress: (loaded, total) => {
-        this.reportLoadProgress('llm', loaded, total, this.engine.getLlmDisplayName());
+      onLlmProgress: (loaded, total, _pct, _mb, _totalMb, current) => {
+        this.reportLoadProgress('llm', loaded, total, current?.label ?? this.engine.getLlmDisplayName(), current);
       },
       onTtsProgress: (loaded, total) => {
         this.reportLoadProgress('tts', loaded, total, 'Piper voice');
@@ -190,6 +190,13 @@ export class MinimalVoiceApp {
     this.updateDownloadProgress('Loading models…', 0, '0%');
     try {
       await this.engine.initialize();
+      // The page died mid-load last time: say which model, so on-device testing can pinpoint it
+      const failedStage = this.engine.previousLoadFailure;
+      const note = document.getElementById('load-failure-note');
+      if (failedStage && note) {
+        note.textContent = `Last visit stopped while loading ${failedStage} (likely out of memory).`;
+        note.hidden = false;
+      }
     } finally {
       this.appInitializing = false;
       this.updateBusyIndicator();
@@ -770,7 +777,14 @@ export class MinimalVoiceApp {
    * One progress bar for all startup models (loaded one at a time): the status line names the
    * model currently loading, the bar shows bytes across all three.
    */
-  private reportLoadProgress(kind: LoadKind, loaded: number, total: number, label: string): void {
+  private reportLoadProgress(
+    kind: LoadKind,
+    loaded: number,
+    total: number,
+    label: string,
+    /** The single model loading within a multi-model stage, with its own bytes */
+    current?: { loaded: number; total: number }
+  ): void {
     const settings = this.engine.getSettings();
     const expected = (id: string, fallback: number) =>
       MODEL_REGISTRY.find((m) => m.id === id)?.expectedSizeBytes ?? fallback;
@@ -796,10 +810,13 @@ export class MinimalVoiceApp {
     }
     const overallPct = sumTotal > 0 ? Math.min(100, Math.round((sumLoaded * 100) / sumTotal)) : 0;
     const mb = (n: number) => (n / (1024 * 1024)).toFixed(0);
-    const own = this.loadBytes[kind];
+    const own = current ?? this.loadBytes[kind];
     const ownPct = own.total > 0 ? Math.min(100, Math.round((own.loaded * 100) / own.total)) : 0;
+    const order = this.engine.getStartupModelOrder();
+    const index = order.indexOf(label);
+    const step = index >= 0 ? `model ${index + 1} of ${order.length}: ` : '';
     this.updateDownloadProgress(
-      `Loading ${label}: ${mb(own.loaded)} / ${mb(own.total)} MB (${ownPct}%)…`,
+      `Loading ${step}${label} — ${mb(own.loaded)} / ${mb(own.total)} MB (${ownPct}%)`,
       overallPct,
       `${overallPct}% · ${mb(sumLoaded)} / ${mb(sumTotal)} MB`
     );

@@ -14,7 +14,7 @@ import { OnnxLlmProvider, type OnnxModelSpec } from '../runtimes/onnx-llm-provid
 import { fetchWikipediaSummary } from '../tools/web-tools.ts';
 import type { LlmGenerationOptions, LlmGenerationResult, LlmRuntimeProvider } from '../types/index.ts';
 
-export const PHONE_MODEL_SPECS: Record<'router' | 'chat' | 'coder', OnnxModelSpec & { label: string }> = {
+export const PHONE_MODEL_SPECS: Record<'router' | 'chat' | 'chatSmall' | 'coder', OnnxModelSpec & { label: string }> = {
   router: {
     label: 'FunctionGemma 270M',
     repo: 'onnx-community/functiongemma-270m-it-ONNX',
@@ -27,6 +27,15 @@ export const PHONE_MODEL_SPECS: Record<'router' | 'chat' | 'coder', OnnxModelSpe
     label: 'Gemma 3 1B',
     repo: 'onnx-community/gemma-3-1b-it-ONNX',
     dtype: 'q4f16',
+    contextLimit: 8192,
+    maxOutputTokens: 256,
+  },
+  // Opt-in (?chat=270m) for phones that can't hold the 1B model
+  chatSmall: {
+    label: 'Gemma 3 270M',
+    repo: 'onnx-community/gemma-3-270m-it-ONNX',
+    // Like FunctionGemma (same 270M base), 4-bit weights degrade it badly
+    dtype: 'fp16',
     contextLimit: 8192,
     maxOutputTokens: 256,
   },
@@ -47,36 +56,78 @@ export const PHONE_CHAT_SYSTEM_PROMPT = [
 
 type Group = 'conversation' | 'coder';
 
+/** Progress summed across a group's models, plus the model currently loading and its own bytes. */
+export type PhoneProgress = (
+  loaded: number,
+  total: number,
+  current?: { label: string; loaded: number; total: number }
+) => void;
+
 /** Owns the three phone models and keeps only one group in memory at a time. */
 export class PhoneModelSet {
   readonly router = new OnnxLlmProvider('functiongemma-270m', PHONE_MODEL_SPECS.router);
-  readonly chat = new OnnxLlmProvider('gemma-3-1b', PHONE_MODEL_SPECS.chat);
+  readonly chat: OnnxLlmProvider;
+  readonly chatSpec: (typeof PHONE_MODEL_SPECS)['chat'];
   readonly coder = new OnnxLlmProvider('qwen2.5-coder-1.5b', PHONE_MODEL_SPECS.coder);
   private active: Group | null = null;
   private switching: Promise<void> = Promise.resolve();
 
   /**
+   * @param options.smallChat use Gemma 3 270M instead of 1B for chat
+   * @param options.loadGapMs pause between model loads, giving the browser time to settle memory
+   * @param options.onModelLoadStart called as each model starts loading (crash diagnostics)
+   */
+  constructor(
+    private readonly options: {
+      smallChat?: boolean;
+      loadGapMs?: number;
+      onModelLoadStart?: (label: string) => void;
+    } = {}
+  ) {
+    this.chatSpec = options.smallChat ? PHONE_MODEL_SPECS.chatSmall : PHONE_MODEL_SPECS.chat;
+    this.chat = new OnnxLlmProvider(options.smallChat ? 'gemma-3-270m' : 'gemma-3-1b', this.chatSpec);
+  }
+
+  private async gap(): Promise<void> {
+    const ms = this.options.loadGapMs ?? 0;
+    if (ms > 0) await new Promise((r) => setTimeout(r, ms));
+  }
+
+  /**
    * Loads a group, unloading the other first. Models within a group load one after another.
    * onProgress reports bytes summed across the group's models.
    */
-  activate(group: Group, onProgress?: (loaded: number, total: number) => void): Promise<void> {
+  activate(group: Group, onProgress?: PhoneProgress): Promise<void> {
     const run = async () => {
       if (group === 'coder') {
         await this.router.dispose();
         await this.chat.dispose();
         this.active = 'coder';
-        await this.coder.initialize(onProgress);
+        await this.gap();
+        this.options.onModelLoadStart?.(PHONE_MODEL_SPECS.coder.label);
+        await this.coder.initialize((loaded, total) =>
+          onProgress?.(loaded, total, { label: PHONE_MODEL_SPECS.coder.label, loaded, total })
+        );
         return;
       }
       await this.coder.dispose();
       this.active = 'conversation';
       let routerBytes = { loaded: 0, total: 0 };
+      if (!this.router.isLoaded) this.options.onModelLoadStart?.(PHONE_MODEL_SPECS.router.label);
       await this.router.initialize((loaded, total) => {
         routerBytes = { loaded, total };
-        onProgress?.(loaded, total);
+        onProgress?.(loaded, total, { label: PHONE_MODEL_SPECS.router.label, loaded, total });
       });
+      if (!this.chat.isLoaded) {
+        await this.gap();
+        this.options.onModelLoadStart?.(this.chatSpec.label);
+      }
       await this.chat.initialize((loaded, total) =>
-        onProgress?.(routerBytes.total + loaded, routerBytes.total + total)
+        onProgress?.(routerBytes.total + loaded, routerBytes.total + total, {
+          label: this.chatSpec.label,
+          loaded,
+          total,
+        })
       );
     };
     const next = this.switching.then(run, run);
@@ -119,7 +170,7 @@ export class SwappingLlmProvider implements LlmRuntimeProvider {
     return this.inner.maxOutputTokens;
   }
 
-  initialize(onProgress?: (loaded: number, total: number) => void): Promise<void> {
+  initialize(onProgress?: PhoneProgress): Promise<void> {
     return this.set.activate(this.group, onProgress);
   }
 
