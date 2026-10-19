@@ -233,9 +233,10 @@ export class SharedAudioSubsystem {
       if (!AudioContextCtor) {
         return null as unknown as AudioContext;
       }
-      // 2. Set latency to realtime interactive setting for immediate voice response
+      // 2. "balanced": a larger output buffer than the default "interactive", steadier on a busy
+      // phone (Piper and the LLM share the CPU/GPU); mic response is set by the processor's block size
       this.audioCtx = new AudioContextCtor({
-        latencyHint: 'interactive',
+        latencyHint: 'balanced',
       });
       this.contextPredatesCapture = !this.mediaStream;
 
