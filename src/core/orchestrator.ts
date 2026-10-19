@@ -122,6 +122,19 @@ export function repetitionCutIndex(text: string): number {
   if (inline && inline.index !== undefined && /[A-Za-z]/.test(inline[1])) {
     return start + inline.index + inline[1].length;
   }
+  // A block of 2–12 lines written three times in a row (the same few lines of code, a paragraph)
+  const blockStart = Math.max(0, text.length - 2400);
+  const done = text.slice(blockStart).split('\n').slice(0, -1); // the last line may still be arriving
+  for (let k = 2; k <= 12 && done.length >= k * 3; k++) {
+    // Where the lines start repeating every k lines
+    let p = done.length - k;
+    while (p > 0 && done[p - 1] === done[p - 1 + k]) p--;
+    if (done.length - p < k * 3) continue;
+    const block = done.slice(p, p + k).join('\n');
+    if (block.replace(/\s/g, '').length < 20 || !/[A-Za-z]/.test(block)) continue;
+    // Keep the first copy
+    return blockStart + done.slice(0, p + k).join('\n').length;
+  }
   return -1;
 }
 

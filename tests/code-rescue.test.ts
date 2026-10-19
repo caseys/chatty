@@ -74,8 +74,23 @@ describe('repeat-loop guard', () => {
     expect(inline.slice(0, repetitionCutIndex(inline))).toBe('I love you! ');
   });
 
-  it('leaves normal code alone', async () => {
+  it('cuts a block of lines repeated over and over, keeping the first copy', async () => {
     const { repetitionCutIndex } = await import('../src/core/orchestrator.ts');
+    const block = 'inputTotal.addEventListener("input", () => {\n  calculate();\n});\n\n';
+    const text = `const inputTotal = document.getElementById("total");\n${block.repeat(4)}inputTotal.add`;
+    expect(text.slice(0, repetitionCutIndex(text))).toBe(
+      'const inputTotal = document.getElementById("total");\ninputTotal.addEventListener("input", () => {\n  calculate();\n});\n'
+    );
+  });
+
+  it('leaves normal code alone', async () => {
+    const { repetitionCutIndex, EXAMPLE_TURNS } = await import('../src/core/orchestrator.ts');
+    // Checked as the reply streams in, like the real guard
+    for (const turn of EXAMPLE_TURNS.filter((t) => t.role === 'assistant')) {
+      for (let end = 40; end <= turn.content.length + 40; end += 40) {
+        expect(repetitionCutIndex(turn.content.slice(0, end))).toBe(-1);
+      }
+    }
     expect(repetitionCutIndex('function a() {\n  if (x) {\n    y();\n  }\n}\n}\n}\n}')).toBe(-1);
     expect(repetitionCutIndex('ctx.lineTo(1, 2);\nctx.lineTo(3, 4);\nctx.lineTo(5, 6);\nctx.lineTo(7, 8);')).toBe(-1);
   });
