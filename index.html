@@ -144,21 +144,14 @@
             </dialog>
 
             <!-- Settings Modal (Native <dialog>) -->
-            <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-dialog-title">
+            <dialog id="settings-dialog" class="settings-dialog" aria-label="Settings">
               <div class="settings-dialog-content">
+                <button id="btn-close-settings-x" class="settings-close-x" type="button" aria-label="Close Settings">✕</button>
                 <div class="settings-brand">
                   <img src="/mascott.png" alt="" class="settings-brand-logo" width="72" height="67" />
                   <div class="settings-brand-name">Chatty</div>
                   <div class="settings-brand-tagline">100% local chatbot and JavaScript runner</div>
                 </div>
-                <div class="settings-header">
-                  <div class="settings-title-group">
-                    <span class="settings-title-icon" aria-hidden="true">⚙️</span>
-                    <h3 id="settings-dialog-title">Settings</h3>
-                  </div>
-                  <button id="btn-close-settings-x" class="settings-close-x" type="button" aria-label="Close Settings">✕</button>
-                </div>
-
                 <form id="settings-form" method="dialog" class="settings-form">
                   <!-- Chat Model Selection -->
                   <div class="settings-field">
@@ -176,8 +169,19 @@
                     <p id="model-load-warning" class="settings-warning" role="alert" hidden></p>
                   </div>
 
-                  <!-- Piper Voice Selection -->
+                  <!-- Speech on/off -->
                   <div class="settings-field">
+                    <label for="toggle-speech" class="settings-toggle">
+                      <span class="settings-label">
+                        <span class="settings-label-title">Speech</span>
+                        <span class="settings-label-desc">Listen with Whistle and talk with Piper. Off: type to chat, and no speech models are loaded.</span>
+                      </span>
+                      <input id="toggle-speech" class="settings-switch" type="checkbox" role="switch" checked />
+                    </label>
+                  </div>
+
+                  <!-- Piper Voice Selection (hidden while speech is off) -->
+                  <div id="settings-voice-field" class="settings-field">
                     <label for="select-piper-voice" class="settings-label">
                       <span class="settings-label-title">Piper Voice</span>
                       <span class="settings-label-desc">Local ONNX text-to-speech synthesis</span>

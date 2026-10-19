@@ -91,6 +91,8 @@ export class MinimalVoiceApp {
   private cancelSettingsBtn = document.getElementById('btn-cancel-settings') as HTMLButtonElement | null;
   private selectChatModel = document.getElementById('select-chat-model') as HTMLSelectElement | null;
   private selectPiperVoice = document.getElementById('select-piper-voice') as HTMLSelectElement | null;
+  private toggleSpeech = document.getElementById('toggle-speech') as HTMLInputElement | null;
+  private voiceField = document.getElementById('settings-voice-field');
 
   // Sidebar Elements
   private sidebarEl = document.getElementById('chat-sidebar') as HTMLElement | null;
@@ -245,6 +247,7 @@ export class MinimalVoiceApp {
     const initialSettings = this.engine.getSettings();
     this.fillChatModelOptions(initialSettings.chatModelId);
     if (this.selectPiperVoice) this.selectPiperVoice.value = initialSettings.voiceId;
+    this.fillSpeechSetting(initialSettings.speechEnabled);
 
     // Restore sidebar state from saved preferences
     if (this.engine.getSidebarOpen()) {
@@ -380,7 +383,13 @@ export class MinimalVoiceApp {
       this.fillChatModelOptions(current.chatModelId);
       void this.refreshModelCacheSize();
       if (this.selectPiperVoice) this.selectPiperVoice.value = current.voiceId;
+      this.fillSpeechSetting(current.speechEnabled);
       this.settingsDialog?.showModal();
+    });
+
+    // The voice picker only matters with speech on
+    this.toggleSpeech?.addEventListener('change', () => {
+      if (this.voiceField) this.voiceField.hidden = !this.toggleSpeech?.checked;
     });
 
     this.closeSettingsXBtn?.addEventListener('click', () => {
@@ -409,13 +418,15 @@ export class MinimalVoiceApp {
       const newChatModelId = this.selectChatModel?.value || current.chatModelId;
       const newCodingModelId = newChatModelId; // coder follows the chat model
       const newVoiceId = this.selectPiperVoice?.value || current.voiceId;
+      const newSpeechEnabled = this.toggleSpeech?.checked ?? current.speechEnabled;
 
       this.settingsDialog?.close();
 
       const hasChanges =
         newChatModelId !== current.chatModelId ||
         newCodingModelId !== current.codingModelId ||
-        newVoiceId !== current.voiceId;
+        newVoiceId !== current.voiceId ||
+        newSpeechEnabled !== current.speechEnabled;
 
       if (hasChanges) {
         if (this.statusEl) {
@@ -425,6 +436,7 @@ export class MinimalVoiceApp {
           chatModelId: newChatModelId,
           codingModelId: newCodingModelId,
           voiceId: newVoiceId,
+          speechEnabled: newSpeechEnabled,
         });
         this.updateUiState();
       }
@@ -752,6 +764,11 @@ export class MinimalVoiceApp {
     if (this.chatLogEl) this.chatLogEl.scrollTop = this.chatLogEl.scrollHeight;
   }
 
+  private fillSpeechSetting(on: boolean): void {
+    if (this.toggleSpeech) this.toggleSpeech.checked = on;
+    if (this.voiceField) this.voiceField.hidden = !on;
+  }
+
   private updateUiState(): void {
     const snap = this.engine.getSnapshot();
     // 'unloaded' counts as loading too: it is the state before startup begins
@@ -773,10 +790,17 @@ export class MinimalVoiceApp {
     const isActive = isListening || canInterrupt;
     const hasHistory = this.engine.hasHistory();
 
+    // Speech off: no Start (chat is typed) and no waveforms; the button only appears as Stop
+    const speechOn = this.engine.isSpeechEnabled();
     if (this.micBtn) {
       this.micBtn.disabled = isModelLoading;
       this.micBtn.classList.toggle('listening', isActive);
+      this.micBtn.hidden = !speechOn && !canInterrupt;
     }
+    const waves = document.querySelector<HTMLElement>('.chat-waveforms');
+    if (waves) waves.hidden = !speechOn;
+    const examplesTitle = this.chatExamplesEl?.querySelector('.chat-examples-title');
+    if (examplesTitle) examplesTitle.textContent = speechOn ? 'Try saying' : 'Try typing';
 
     if (this.micLabel) {
       this.micLabel.textContent = isModelLoading ? 'Loading…' : isActive ? 'Stop' : hasHistory ? 'Continue' : 'Start';
@@ -820,6 +844,7 @@ export class MinimalVoiceApp {
     const current = this.engine.getSettings();
     this.fillChatModelOptions(current.chatModelId);
     if (this.selectPiperVoice) this.selectPiperVoice.value = current.voiceId;
+    this.fillSpeechSetting(current.speechEnabled);
     void this.refreshModelCacheSize();
     return new Promise((resolve) => {
       dialog.addEventListener(

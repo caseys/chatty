@@ -10,6 +10,8 @@ export interface ChattySettings {
   chatModelId: string;
   codingModelId: string;
   voiceId: string;
+  /** Off: no mic, no voice, and the speech models (Piper, Whistle) aren't loaded; chat is typed */
+  speechEnabled: boolean;
   sidebarOpen: boolean;
 }
 
@@ -114,6 +116,7 @@ export const DEFAULT_SETTINGS: ChattySettings = {
   chatModelId: 'gemma-4-e2b-it-web',
   codingModelId: 'gemma-4-e2b-it-web',
   voiceId: 'en_US-hfc_female-medium',
+  speechEnabled: true,
   sidebarOpen: false,
 };
 
@@ -140,6 +143,7 @@ export function loadSettingsFromStorage(): ChattySettings {
         parsed.voiceId && SUPPORTED_PIPER_VOICES.some((v) => v.id === parsed.voiceId)
           ? parsed.voiceId
           : DEFAULT_SETTINGS.voiceId,
+      speechEnabled: loadSpeechChoice() ?? DEFAULT_SETTINGS.speechEnabled,
       sidebarOpen:
         typeof parsed.sidebarOpen === 'boolean'
           ? parsed.sidebarOpen
@@ -150,7 +154,28 @@ export function loadSettingsFromStorage(): ChattySettings {
   }
 }
 
+// Kept apart from the other settings: only the user's own choice is stored, so a phone that never
+// chose keeps its default (off)
+const SPEECH_CHOICE_KEY = 'chatty_speech';
+
+/** The user's speech on/off choice, or null if they never made one. */
+export function loadSpeechChoice(): boolean | null {
+  try {
+    const v = localStorage.getItem(SPEECH_CHOICE_KEY);
+    return v === 'on' ? true : v === 'off' ? false : null;
+  } catch {
+    return null;
+  }
+}
+
 export function saveSettingsToStorage(settings: Partial<ChattySettings>): ChattySettings {
+  if (typeof settings.speechEnabled === 'boolean') {
+    try {
+      localStorage.setItem(SPEECH_CHOICE_KEY, settings.speechEnabled ? 'on' : 'off');
+    } catch {
+      // Ignore storage errors in private browsing
+    }
+  }
   const current = loadSettingsFromStorage();
   const updated: ChattySettings = {
     ...current,

@@ -42,6 +42,7 @@ import {
   type ModelOptionItem,
   loadSettingsFromStorage,
   saveSettingsToStorage,
+  loadSpeechChoice,
 } from './settings.ts';
 import type {
   BrowserCapabilities,
@@ -185,6 +186,9 @@ export class VoiceAssistantEngine {
   private chatModelId: string = DEFAULT_SETTINGS.chatModelId;
   private codingModelId: string = DEFAULT_SETTINGS.codingModelId;
   private voiceId: string = DEFAULT_SETTINGS.voiceId;
+  private speechEnabled: boolean = DEFAULT_SETTINGS.speechEnabled;
+  // Pause between model loads (?gap=<ms>), set in initialize()
+  private loadGapMs = 250;
   private sidebarOpen: boolean = DEFAULT_SETTINGS.sidebarOpen;
   private codingLlmProvider: WorkerLlmProvider | null = null;
   private phoneModels: PhoneModelSet | null = null;
@@ -216,6 +220,7 @@ export class VoiceAssistantEngine {
     this.chatModelId = initialSettings.chatModelId;
     this.codingModelId = initialSettings.codingModelId;
     this.voiceId = initialSettings.voiceId;
+    this.speechEnabled = initialSettings.speechEnabled;
     this.sidebarOpen = initialSettings.sidebarOpen;
 
     this.jsRuntime = new JavascriptRuntime({
@@ -281,6 +286,7 @@ export class VoiceAssistantEngine {
       memoryStore: this.memoryStore,
       llmProvider: this.llmProvider,
       ttsProvider: this.ttsProvider,
+      enableSpeechOutput: this.speechEnabled,
       javascriptRuntime: this.jsRuntime,
       audioContextAccessor: () => this.audioSubsystem.ensureAudioContext(),
       tools: [],
@@ -454,6 +460,7 @@ export class VoiceAssistantEngine {
 
     const isConstrained = caps.deviceProfile === 'constrained_mobile';
     this.isPhone = isConstrained;
+    if (isConstrained && loadSpeechChoice() === null) this.speechEnabled = false;
     // Phones work like desktop with a phone-sized model: a mobile tab is killed long before
     // device RAM runs out, so Gemma 4 is never loaded there. ?pipeline=split keeps the older
     // router + chat + coder phone pipeline for comparison.
@@ -503,10 +510,11 @@ export class VoiceAssistantEngine {
     }
 
     this.ttsProvider.voiceId = this.voiceId;
+    this.orchestrator.setSpeechOutputEnabled(this.speechEnabled);
 
     this.stateCoordinator.setModelState('stt', 'ready');
     this.stateCoordinator.setModelState('llm', 'downloading');
-    this.stateCoordinator.setModelState('tts', 'downloading');
+    this.stateCoordinator.setModelState('tts', this.speechEnabled ? 'downloading' : 'unloaded');
 
     // Phone tuning, overridable from the URL for on-device testing:
     //   ?stt=native|whistle   ?chat=270m   ?gap=<ms between model loads>
@@ -514,7 +522,7 @@ export class VoiceAssistantEngine {
     const sttPref = params?.get('stt');
     // Short pause between model loads, the same on every device (?gap=<ms> to change)
     const loadGapMs = Number(params?.get('gap') ?? 250) || 0;
-    const gap = () => (loadGapMs > 0 ? new Promise<void>((r) => setTimeout(r, loadGapMs)) : Promise.resolve());
+    this.loadGapMs = loadGapMs;
     // Whistle on every device; the browser's own recognizer only on request (?stt=native)
     if (sttPref === 'native' && NativeSpeechRecognizer.isSupported()) {
       this.setupNativeStt();
@@ -570,6 +578,7 @@ export class VoiceAssistantEngine {
             if (ticket !== this.llmLoadTicket) return;
             clearLoadFailure();
             this.stateCoordinator.setModelState('llm', 'ready');
+            this.greetWithoutSpeech();
             const readinessMs = Math.max(1, Math.round(performance.now() - startInit));
             this.orchestrator.recordInitializationTiming(readinessMs, readinessMs);
             this.events.onStatusChange?.(null);
@@ -593,41 +602,13 @@ export class VoiceAssistantEngine {
 
     // 3 & 4. The LLM, then the speech models (Piper, then Whistle), one at a time, never
     // overlapping. The LLM goes first on every device: it is the big download, and the app
-    // can't answer without it.
-    const startSpeechModels = async () => {
-      writeLoadStage('Piper voice');
-      await this.ttsProvider
-        .initialize((loaded, total) => {
-          const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
-          const mb = (loaded / (1024 * 1024)).toFixed(0);
-          const totalMb = (total / (1024 * 1024)).toFixed(0);
-          this.events.onTtsProgress?.(loaded, total, pct, mb, totalMb);
-        })
-        .then(() => {
-          this.stateCoordinator.setModelState('tts', 'ready');
-        })
-        .catch((err) => {
-          console.warn('Piper ONNX init warning:', err);
-          this.stateCoordinator.setModelState('tts', 'failed');
-        });
-
-      // 4. Pre-warm Whistle STT WASM provider (skipped when the browser's recognizer is used)
-      if (this.nativeStt) {
-        this.events.onSttLoadSettled?.();
-        return;
-      }
-      await gap();
-      writeLoadStage('Whistle speech recognition');
-      await this.sttProvider
-        .initialize((loaded, total) => this.events.onSttProgress?.(loaded, total))
-        .catch((err) => {
-          console.warn('Whistle STT pre-warm warning:', err);
-        })
-        .finally(() => this.events.onSttLoadSettled?.());
-    };
+    // can't answer without it. With speech off, the speech models aren't loaded at all.
     void startLlm()
-      .then(gap)
-      .finally(() => startSpeechModels().finally(clearLoadStage));
+      .catch(() => {})
+      .then(() =>
+        this.speechEnabled ? this.loadGap().then(() => this.loadSpeechModels()) : this.events.onSttLoadSettled?.()
+      )
+      .finally(clearLoadStage);
 
     // 5. Visibility and lifecycle handlers
     if (typeof document !== 'undefined') {
@@ -649,6 +630,109 @@ export class VoiceAssistantEngine {
         void this.dispose();
       });
     }
+  }
+
+  private loadGap(): Promise<void> {
+    return this.loadGapMs > 0 ? new Promise((r) => setTimeout(r, this.loadGapMs)) : Promise.resolve();
+  }
+
+  /** Piper, then Whistle, one at a time. Stops (and frees them) if speech is turned off meanwhile. */
+  private async loadSpeechModels(): Promise<void> {
+    writeLoadStage('Piper voice');
+    this.stateCoordinator.setModelState('tts', 'downloading');
+    await this.ttsProvider
+      .initialize((loaded, total) => {
+        const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
+        const mb = (loaded / (1024 * 1024)).toFixed(0);
+        const totalMb = (total / (1024 * 1024)).toFixed(0);
+        this.events.onTtsProgress?.(loaded, total, pct, mb, totalMb);
+      })
+      .then(() => {
+        if (this.speechEnabled) this.stateCoordinator.setModelState('tts', 'ready');
+      })
+      .catch((err) => {
+        if (!this.speechEnabled) return; // disposed by turning speech off
+        console.warn('Piper ONNX init warning:', err);
+        this.stateCoordinator.setModelState('tts', 'failed');
+      });
+    if (!this.speechEnabled) {
+      await this.ttsProvider.dispose();
+      return;
+    }
+
+    // Whistle (skipped when the browser's recognizer is used)
+    if (this.nativeStt) {
+      this.events.onSttLoadSettled?.();
+      return;
+    }
+    await this.loadGap();
+    writeLoadStage('Whistle speech recognition');
+    await this.sttProvider
+      .initialize((loaded, total) => this.events.onSttProgress?.(loaded, total))
+      .catch((err) => {
+        console.warn('Whistle STT pre-warm warning:', err);
+      })
+      .finally(() => this.events.onSttLoadSettled?.());
+    if (!this.speechEnabled) await this.sttProvider.dispose();
+  }
+
+  isSpeechEnabled(): boolean {
+    return this.speechEnabled;
+  }
+
+  /**
+   * Speech on: load Piper and Whistle. Off: stop the mic and any voice, and free both models'
+   * memory; chat is typed.
+   */
+  async setSpeechEnabled(on: boolean): Promise<void> {
+    if (on === this.speechEnabled) return;
+    this.speechEnabled = on;
+    saveSettingsToStorage({ speechEnabled: on });
+    try {
+      await this.modelManager.db.saveSetting('user_settings', this.getSettings());
+    } catch {
+      // ignore
+    }
+    this.orchestrator.setSpeechOutputEnabled(on);
+    if (on) {
+      await this.loadSpeechModels().finally(clearLoadStage);
+      return;
+    }
+    if (this.isListening) {
+      this.nativeStt?.stop();
+      this.audioSubsystem.stopMicrophoneCapture();
+      this.isListening = false;
+      this.stateCoordinator.setMicrophoneState('stopped');
+      this.events.onStatusChange?.(null);
+    }
+    this.audioSubsystem.stopAllPlaybackImmediately();
+    await Promise.all([this.ttsProvider.dispose(), this.sttProvider.dispose()]);
+    this.stateCoordinator.setModelState('tts', 'unloaded');
+    this.greetWithoutSpeech();
+  }
+
+  /** Adds the welcome message to an empty chat, spoken too when speech is on. */
+  private greet(): void {
+    if (this.hasHistory()) return;
+    const turnId = `welcome_${Date.now()}`;
+    const greeting = takeWelcomeMessage();
+    const welcomeMsg: ConversationMessage = {
+      id: `msg_assistant_${turnId}`,
+      turnId,
+      role: 'assistant',
+      canonicalContent: greeting,
+      speechReadyContent: greeting,
+      timestamp: Date.now(),
+    };
+    this.memoryStore.addMessage(welcomeMsg);
+    this.events.onMessageCreated?.(welcomeMsg);
+    void this.persistState();
+    if (this.speechEnabled) void this.orchestrator.speakOutOfTurn(greeting);
+  }
+
+  /** With speech off there's no Start press to greet on: greet once the model is ready. */
+  private greetWithoutSpeech(): void {
+    if (!this.speechEnabled && this.stateCoordinator.getSnapshot().models.llm === 'ready') this.greet();
   }
 
   /** Routes the browser's speech recognizer into the same STT events Whistle produces. */
@@ -756,7 +840,11 @@ export class VoiceAssistantEngine {
       return;
     }
 
-    // 3. Start capture
+    // 3. Start capture (speech off: nothing to listen with; the UI hides Start)
+    if (!this.speechEnabled) {
+      this.greetWithoutSpeech();
+      return;
+    }
     try {
       this.stateCoordinator.setMicrophoneState('requesting_permission');
       if (this.nativeStt) {
@@ -771,22 +859,7 @@ export class VoiceAssistantEngine {
       this.events.onStatusChange?.(this.nativeStt ? 'Listening…' : this.listeningStatus());
 
       // Greet on Start when the chat is empty (audio system is now set up)
-      if (!this.hasHistory()) {
-        const turnId = `welcome_${Date.now()}`;
-        const greeting = takeWelcomeMessage();
-        const welcomeMsg: ConversationMessage = {
-          id: `msg_assistant_${turnId}`,
-          turnId,
-          role: 'assistant',
-          canonicalContent: greeting,
-          speechReadyContent: greeting,
-          timestamp: Date.now(),
-        };
-        this.memoryStore.addMessage(welcomeMsg);
-        this.events.onMessageCreated?.(welcomeMsg);
-        void this.persistState();
-        void this.orchestrator.speakOutOfTurn(greeting);
-      }
+      this.greet();
     } catch {
       this.isListening = false;
       this.stateCoordinator.setMicrophoneState('unavailable');
@@ -1077,6 +1150,7 @@ export class VoiceAssistantEngine {
     this.events.onConversationsChanged?.(this.getConversations());
     this.events.onActiveConversationSwitched?.(newChat);
     this.events.onStatusChange?.(null);
+    this.greetWithoutSpeech();
     return newChat;
   }
 
@@ -1220,6 +1294,7 @@ export class VoiceAssistantEngine {
       chatModelId: this.chatModelId,
       codingModelId: this.codingModelId,
       voiceId: this.voiceId,
+      speechEnabled: this.speechEnabled,
       sidebarOpen: this.sidebarOpen,
     };
   }
@@ -1389,6 +1464,8 @@ export class VoiceAssistantEngine {
     } catch {
       // ignore
     }
+    // Speech off: remembered for when it's turned back on
+    if (!this.speechEnabled) return;
 
     this.stateCoordinator.setModelState('tts', 'downloading');
     void this.ttsProvider
@@ -1435,6 +1512,8 @@ export class VoiceAssistantEngine {
     const caps = await this.modelManager.detectCapabilities();
     this.isPhone = caps.deviceProfile === 'constrained_mobile';
     if (this.isPhone && !findLocalChatModel(this.chatModelId)?.phone) this.chatModelId = DEFAULT_PHONE_CHAT_MODEL_ID;
+    // Speech starts off on phones (less memory); Settings can turn it on
+    if (this.isPhone && loadSpeechChoice() === null) this.speechEnabled = false;
   }
 
   async updateSettings(settings: Partial<ChattySettings>): Promise<void> {
@@ -1443,7 +1522,13 @@ export class VoiceAssistantEngine {
       if (settings.chatModelId) this.chatModelId = settings.chatModelId;
       if (settings.codingModelId) this.codingModelId = settings.codingModelId;
       if (settings.voiceId) this.voiceId = settings.voiceId;
-      saveSettingsToStorage({ chatModelId: this.chatModelId, codingModelId: this.codingModelId, voiceId: this.voiceId });
+      if (typeof settings.speechEnabled === 'boolean') this.speechEnabled = settings.speechEnabled;
+      saveSettingsToStorage({
+        chatModelId: this.chatModelId,
+        codingModelId: this.codingModelId,
+        voiceId: this.voiceId,
+        speechEnabled: this.speechEnabled,
+      });
       try {
         await this.modelManager.db.saveSetting('user_settings', this.getSettings());
       } catch {
@@ -1452,6 +1537,10 @@ export class VoiceAssistantEngine {
       return;
     }
     const promises: Promise<void>[] = [];
+    // First, so a voice change made with speech off doesn't load Piper
+    if (typeof settings.speechEnabled === 'boolean' && settings.speechEnabled !== this.speechEnabled) {
+      promises.push(this.setSpeechEnabled(settings.speechEnabled));
+    }
     if (settings.chatModelId && settings.chatModelId !== this.chatModelId) {
       promises.push(this.setChatModelId(settings.chatModelId));
     }
