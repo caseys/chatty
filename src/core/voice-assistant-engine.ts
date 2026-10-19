@@ -304,8 +304,11 @@ export class VoiceAssistantEngine {
 
     if (!hasExplicitStoredSettings) {
       this.chatModelId = recommended.llmModelId;
-      this.codingModelId = recommended.llmModelId;
     }
+    // The coder always shares the chat model (there's no separate picker). A stale divergent
+    // codingModelId from older settings would load a second multi-GB model onto the GPU
+    // alongside the chat model and crash the tab mid-load.
+    this.codingModelId = this.chatModelId;
 
     this.llmProvider.modelId = this.chatModelId;
     const chatManifest = MODEL_REGISTRY.find((m) => m.id === this.chatModelId);
@@ -329,9 +332,7 @@ export class VoiceAssistantEngine {
         this.codingLlmProvider = new WorkerLlmProvider(this.codingModelId);
         this.jsRuntime.setLlmProvider(this.codingLlmProvider);
       }
-      void this.codingLlmProvider.initialize().catch((err) => {
-        console.warn('Coding subagent provider pre-warm warning:', err);
-      });
+      // Loaded lazily on first use: pre-warming a second model during startup doubles GPU memory.
     }
 
     this.ttsProvider.voiceId = this.voiceId;
@@ -897,6 +898,8 @@ export class VoiceAssistantEngine {
   async setChatModelId(modelId: string): Promise<void> {
     if (this.chatModelId === modelId && this.llmProvider.modelId === modelId) return;
     this.chatModelId = modelId;
+    // The coder follows the chat model, so only one model is ever resident.
+    this.codingModelId = modelId;
     this.llmProvider.modelId = modelId;
     const manifest = MODEL_REGISTRY.find((m) => m.id === modelId);
     if (manifest) {

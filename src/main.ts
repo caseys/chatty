@@ -8,6 +8,8 @@ import { FluidAudioVisualizer } from './audio/visualizer.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
 import { createToolSummaryElement, parseStreamingToolCall, stripToolCallMarkup } from './tools/tool-formatter.ts';
 
+type WakeLockSentinelLike = { released: boolean; release: () => Promise<void> };
+
 export class MinimalVoiceApp {
   private engine: VoiceAssistantEngine;
   private micBtn = document.getElementById('btn-mic-toggle') as HTMLButtonElement | null;
@@ -27,6 +29,10 @@ export class MinimalVoiceApp {
 
   // Rootless Full-Window Visual Screen & HUD Elements
   private appInitializing = true;
+  private keepAwakeWanted = false;
+  private keepAwakeListenerAdded = false;
+  private wakeLockPending = false;
+  private wakeLockSentinel: WakeLockSentinelLike | null = null;
   private screenVisualLayer = document.getElementById('screen-visual-layer') as HTMLElement | null;
   private screenVisualHud = document.getElementById('screen-visual-hud') as HTMLElement | null;
   private hudClearBtn = document.getElementById('btn-hud-clear') as HTMLButtonElement | null;
@@ -332,7 +338,7 @@ export class MinimalVoiceApp {
 
       const current = this.engine.getSettings();
       const newChatModelId = this.selectChatModel?.value || current.chatModelId;
-      const newCodingModelId = current.codingModelId;
+      const newCodingModelId = newChatModelId; // coder follows the chat model
       const newVoiceId = this.selectPiperVoice?.value || current.voiceId;
 
       this.settingsDialog?.close();
@@ -651,6 +657,49 @@ export class MinimalVoiceApp {
       snap.turn === 'generating';
     bar.classList.toggle('busy', busy);
     bar.setAttribute('aria-busy', String(busy));
+    this.setKeepAwake(busy);
+  }
+
+  /**
+   * Holds a Screen Wake Lock while busy so mobile browsers don't sleep (and suspend the
+   * download / model init / tool run). The browser drops the lock when the page is hidden,
+   * so it is re-requested when the page becomes visible again.
+   */
+  private setKeepAwake(on: boolean): void {
+    this.keepAwakeWanted = on;
+    const wakeLock = (navigator as Navigator & { wakeLock?: { request: (type: 'screen') => Promise<WakeLockSentinelLike> } })
+      .wakeLock;
+    if (!wakeLock) return;
+
+    if (!this.keepAwakeListenerAdded) {
+      this.keepAwakeListenerAdded = true;
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') this.setKeepAwake(this.keepAwakeWanted);
+      });
+    }
+
+    if (on) {
+      if (this.wakeLockSentinel && !this.wakeLockSentinel.released) return;
+      if (this.wakeLockPending || document.visibilityState !== 'visible') return;
+      this.wakeLockPending = true;
+      wakeLock
+        .request('screen')
+        .then((sentinel) => {
+          this.wakeLockSentinel = sentinel;
+          // Became idle while the request was in flight
+          if (!this.keepAwakeWanted) void sentinel.release().catch(() => {});
+        })
+        .catch(() => {
+          // Denied (battery saver, unsupported context); not fatal
+        })
+        .finally(() => {
+          this.wakeLockPending = false;
+        });
+    } else if (this.wakeLockSentinel) {
+      const sentinel = this.wakeLockSentinel;
+      this.wakeLockSentinel = null;
+      void sentinel.release().catch(() => {});
+    }
   }
 
   private updateDownloadProgress(statusText: string, pct: number, meterText: string): void {
