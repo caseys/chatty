@@ -54,6 +54,8 @@ export interface JavascriptRuntimeOptions {
   getSharedAudioContext?: () => AudioContext | null;
   /** An error a program threw after it started (in a timer, event handler or async function) */
   onProgramError?: (message: string, line?: number) => void;
+  /** A program started making sound (true), or has been quiet for a few seconds (false) */
+  onProgramAudio?: (sounding: boolean) => void;
 }
 
 export const CODING_AGENT_SYSTEM_PROMPT = [
@@ -325,6 +327,9 @@ export class JavascriptRuntime {
   private pendingRuns = new Map<string, PendingIframeRun>();
   private getSharedAudioContext?: () => AudioContext | null;
   private onProgramError?: (message: string, line?: number) => void;
+  private onProgramAudio?: (sounding: boolean) => void;
+  private programSounding = false;
+  private quietWatch: { timer: ReturnType<typeof setInterval>; analyser: AnalyserNode } | null = null;
   private programOutput: GainNode | null = null;
 
   constructor(options?: JavascriptRuntimeOptions) {
@@ -336,6 +341,7 @@ export class JavascriptRuntime {
     this.iframeContainer = options?.iframeContainer ?? null;
     this.getSharedAudioContext = options?.getSharedAudioContext;
     this.onProgramError = options?.onProgramError;
+    this.onProgramAudio = options?.onProgramAudio;
     if (this.getSharedAudioContext && typeof window !== 'undefined') {
       // Read by the sandbox's AudioContext stand-in (same origin)
       (window as unknown as { __chattySharedAudio?: () => unknown }).__chattySharedAudio = () => this.programAudio();
@@ -354,11 +360,51 @@ export class JavascriptRuntime {
       this.programOutput = context.createGain();
       this.programOutput.connect(context.destination);
     }
+    this.watchProgramSound(this.programOutput);
     if (context.state !== 'running') void context.resume().catch(() => {});
     return { context, output: this.programOutput };
   }
 
+  /**
+   * A program is about to make sound: tells the host (which switches the audio session to
+   * playback), then reports when its output has been quiet for 3 seconds.
+   */
+  private watchProgramSound(output: GainNode): void {
+    if (!this.onProgramAudio) return;
+    if (!this.programSounding) {
+      this.programSounding = true;
+      this.onProgramAudio(true);
+    }
+    if (this.quietWatch) return;
+    const analyser = output.context.createAnalyser();
+    analyser.fftSize = 2048;
+    output.connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+    let quietChecks = 0;
+    const timer = setInterval(() => {
+      analyser.getFloatTimeDomainData(samples);
+      let peak = 0;
+      for (const v of samples) peak = Math.max(peak, Math.abs(v));
+      quietChecks = peak < 0.001 ? quietChecks + 1 : 0;
+      if (quietChecks >= 3) this.stopWatchingProgramSound();
+    }, 1000);
+    this.quietWatch = { timer, analyser };
+  }
+
+  private stopWatchingProgramSound(): void {
+    if (this.quietWatch) {
+      clearInterval(this.quietWatch.timer);
+      this.quietWatch.analyser.disconnect();
+      this.quietWatch = null;
+    }
+    if (this.programSounding) {
+      this.programSounding = false;
+      this.onProgramAudio?.(false);
+    }
+  }
+
   private silenceProgramAudio(): void {
+    this.stopWatchingProgramSound();
     try {
       this.programOutput?.disconnect();
     } catch {

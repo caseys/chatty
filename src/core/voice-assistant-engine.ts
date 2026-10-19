@@ -233,6 +233,10 @@ export class VoiceAssistantEngine {
       mode: 'iframe',
       getSharedAudioContext: () => this.audioSubsystem.getAudioContext(),
       onProgramError: (message, line) => this.orchestrator.reportProgramError(message, line),
+      // Speech off: 'playback' only while a program makes sound (see setAudioSessionType)
+      onProgramAudio: (sounding) => {
+        if (!this.speechEnabled) this.audioSubsystem.setAudioSessionType(sounding ? 'playback' : 'auto');
+      },
       onResult: (res) => {
         this.events.onJavascriptExecution?.(res);
       },
@@ -522,7 +526,7 @@ export class VoiceAssistantEngine {
 
     this.ttsProvider.voiceId = this.voiceId;
     this.orchestrator.setSpeechOutputEnabled(this.speechEnabled);
-    this.audioSubsystem.setAudioSessionType(this.speechEnabled ? 'play-and-record' : 'playback');
+    this.audioSubsystem.setAudioSessionType(this.speechEnabled ? 'play-and-record' : 'auto');
     if (!this.speechEnabled) this.evictSpeechModels();
 
     this.stateCoordinator.setModelState('stt', 'ready');
@@ -723,7 +727,7 @@ export class VoiceAssistantEngine {
       // ignore
     }
     this.orchestrator.setSpeechOutputEnabled(on);
-    this.audioSubsystem.setAudioSessionType(on ? 'play-and-record' : 'playback');
+    this.audioSubsystem.setAudioSessionType(on ? 'play-and-record' : 'auto');
     if (on) {
       await this.loadSpeechModels().finally(clearLoadStage);
       return;

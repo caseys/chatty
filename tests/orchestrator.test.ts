@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished } from 'vitest';
 import {
   computeRmsLevel,
   resampleTo16kHzMono,
@@ -1123,8 +1123,14 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
     });
 
     it('supports expandable sidebar open/close state and multi-channel chat management (create, switch, rename, compact, delete)', async () => {
+      // Speech off before construction: initialize() applies the stored choice, and with speech
+      // on it downloads Piper/Whistle from the network and compaction synthesizes "Hold on a sec."
+      saveSettingsToStorage({ speechEnabled: false });
       const engine = new VoiceAssistantEngine();
-      engine.setSpeechOutputEnabled(false);
+      onTestFinished(async () => {
+        await engine.dispose();
+        saveSettingsToStorage(DEFAULT_SETTINGS);
+      });
 
       // 1. Sidebar open/closed preference
       expect(engine.getSidebarOpen()).toBe(false);
@@ -1187,10 +1193,7 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
       expect(listAfterDelete.some((c) => c.id === chat2.id)).toBe(false);
       // Active ID automatically switched to remaining channel
       expect(engine.getActiveConversationId()).not.toBe(chat2.id);
-
-      // Clean up
-      await engine.dispose();
-    }, 15000);
+    });
 
     it('plays music and MIDI notes via play_music tool with note parsing and synthesis', async () => {
       const {

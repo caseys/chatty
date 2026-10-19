@@ -10,6 +10,8 @@ export interface VadConfig {
   maxUtteranceDurationMs: number;
 }
 
+export type AudioSessionType = 'play-and-record' | 'playback' | 'auto';
+
 export interface AudioSubsystemEvents {
   onSpeechStarted?: () => void;
   onSpeechEnded?: (utteranceSamples16k: Float32Array, durationMs: number) => void;
@@ -172,7 +174,7 @@ export class SharedAudioSubsystem {
   private mediaStream: MediaStream | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private processorNode: ScriptProcessorNode | null = null;
-  private sessionType: 'play-and-record' | 'playback' = 'play-and-record';
+  private sessionType: AudioSessionType = 'play-and-record';
   /** Zero-gain output for the mic processor: it must be pulled by the graph to run, but nothing it outputs may reach the speakers */
   private processorSink: GainNode | null = null;
   private vad: VoiceActivityDetector;
@@ -200,10 +202,11 @@ export class SharedAudioSubsystem {
   }
 
   /**
-   * iOS/WebKit audio session: 'play-and-record' when the mic may be used (speech on), 'playback'
-   * when it never is (speech off: no recording, speaker output, not muted by the silent switch).
+   * iOS/WebKit audio session: 'play-and-record' when the mic may be used (speech on). Speech off:
+   * 'auto' while nothing plays ('playback' then would put a player on the lock screen), and
+   * 'playback' while a program makes sound (speaker output, not muted by the silent switch).
    */
-  setAudioSessionType(type: 'play-and-record' | 'playback'): void {
+  setAudioSessionType(type: AudioSessionType): void {
     this.sessionType = type;
     this.configureAudioSession();
   }

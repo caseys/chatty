@@ -793,9 +793,12 @@ export class MinimalVoiceApp {
    */
   private setRawOutput(text: string): void {
     if (!this.rawOutputEl) return;
+    // Without speak() lines (they're in the chat) and without code fences: an unmatched ``` reads
+    // as an open template string and would turn everything after it into one green string
     const code = text
       .split('\n')
       .filter((line) => !/^\s*(?:await\s+)?speak\(.*\);?\s*$/.test(line))
+      .filter((line) => !/^\s*(?:(?:javascript|js|html|css)[ \t:]*)?(?:```|~~~|"""|''')[\w-]*\s*$/i.test(line))
       .join('\n')
       .trim();
     this.rawOutputEl.innerHTML = Prism.highlight(code, Prism.languages.javascript, 'javascript');
