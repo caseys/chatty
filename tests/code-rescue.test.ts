@@ -41,6 +41,20 @@ describe('running code the model wrapped or forgot to call', () => {
   });
 });
 
+describe('other code fences small models use', () => {
+  it.each([
+    ['Javascript """', '"""'],
+    ['"""javascript', '"""'],
+    ["'''js", "'''"],
+    ['~~~', '~~~'],
+  ])('runs code wrapped as %s ... %s', (open, close) => {
+    const out = inspectExecutableCode(`Here you go:\n${open}\nconst total = 2 * 3;\nspeak("Total " + total);\n${close}`);
+    expect(out.isProse).toBe(false);
+    expect(out.code).toContain('const total = 2 * 3;');
+    expect(out.code).not.toMatch(/"""|'''|~~~/);
+  });
+});
+
 describe('repeat-loop guard', () => {
   it('cuts a line repeated over and over, keeping the first copy', async () => {
     const { repetitionCutIndex } = await import('../src/core/orchestrator.ts');

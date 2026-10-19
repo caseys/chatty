@@ -668,7 +668,11 @@ export class MinimalVoiceApp {
     const speakMatches = Array.from(stripped.matchAll(/speak\(\s*(["'`])([\s\S]*?)\1\s*\)/g));
     let displayText = stripped;
     if (speakMatches.length > 0) {
-      displayText = speakMatches.map((m) => m[2]).join(' ');
+      // Text with ${...} still to fill in shows once the program has run and said it
+      displayText = speakMatches
+        .map((m) => m[2])
+        .filter((t) => !t.includes('${'))
+        .join(' ');
     } else if (
       stripped.includes('```') ||
       stripped.includes('MODE:') ||

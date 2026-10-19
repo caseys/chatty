@@ -181,8 +181,19 @@ function withLead(code: string, lead: string): string {
   return `speak(${JSON.stringify(lead.replace(/[\s:]+$/, '').slice(0, 200))});\n${code}`;
 }
 
+/**
+ * Other ways small models fence code (triple double or single quotes, ~~~, or a
+ * `Javascript """` line) rewritten as ``` fences, so extractProgram finds them.
+ */
+function normalizeFences(text: string): string {
+  return text.replace(
+    /^[ \t]*(?:(javascript|js|html|css)[ \t:]*)?(?:"""|'''|~~~)[ \t]*([\w-]*)[ \t]*$/gim,
+    (_line, label?: string, lang?: string) => '```' + (lang || label || '')
+  );
+}
+
 export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
-  let cleaned = (rawText || '').trim();
+  let cleaned = normalizeFences((rawText || '').trim());
 
   // 1. Take the program out of markdown fences if present
   let hadFences = false;
@@ -1008,7 +1019,9 @@ export class JavascriptRuntime {
     let runMode = 'eval';
     function stackLine(err) {
       const m = String((err && err.stack) || '').match(/chatty-program\\.js:(\\d+)/);
-      return m ? Number(m[1]) : null;
+      if (m) return Number(m[1]);
+      // Safari's stack may not name the program, but its errors carry the line
+      return err && typeof err.line === 'number' ? err.line : null;
     }
     function errorLine(err) {
       const line = stackLine(err);
@@ -1023,6 +1036,18 @@ export class JavascriptRuntime {
       await probe('fn', () => new ProgramFunction('speak', 'playNotes', 'searchWikipedia', 'root', '"use strict";\\nnull.probe' + SOURCE_TAG)());
       await probe('expr', () => new ProgramFunction('speak', 'playNotes', 'searchWikipedia', 'root', '"use strict"; return (null.probe);' + SOURCE_TAG)());
     })();
+
+    // Small models often fill an element they never made (getElementById('app').innerHTML = ...):
+    // a missing id gets an empty <div> on the page instead of null
+    const findElementById = document.getElementById.bind(document);
+    document.getElementById = (id) => {
+      const found = findElementById(id);
+      if (found || typeof id !== 'string' || !id) return found;
+      const made = document.createElement('div');
+      made.id = id;
+      document.body.appendChild(made);
+      return made;
+    };
 
     // Errors after the run started (timers, handlers, async code) would otherwise fail silently
     window.addEventListener('error', (event) => {
