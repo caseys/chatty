@@ -840,18 +840,34 @@ body {
   background: radial-gradient(circle at 50% 20%, rgba(56, 189, 248, 0.08) 0%, rgba(10, 13, 20, 0) 70%);
 }
 
+/* Top row: sidebar and New buttons, logo, settings, all centered on one line */
 .minimal-top-bar {
-  position: absolute;
-  top: max(10px, env(safe-area-inset-top));
-  left: 0;
-  right: 0;
-  padding: 0 max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
-  display: flex;
-  justify-content: space-between;
+  position: relative;
+  width: 100%;
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  pointer-events: none;
   z-index: 100;
-  box-sizing: border-box;
+}
+
+.minimal-top-bar > .minimal-top-left {
+  justify-self: start;
+}
+
+.minimal-top-bar > .minimal-top-right {
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-clear-screen[hidden] {
+  display: none;
+}
+
+.minimal-top-bar > .minimal-mascot-container {
+  margin-bottom: 0;
 }
 
 .minimal-top-bar > * {
@@ -975,6 +991,61 @@ body {
   }
   50% {
     transform: translateY(-6px);
+  }
+}
+
+/* Narrow status box (phones): label and token count each stay on one line, stacking if needed */
+.bottom-bar .context-meter-header {
+  flex-wrap: wrap;
+  column-gap: 8px;
+}
+
+.bottom-bar .context-meter-label,
+.bottom-bar .context-meter-value {
+  white-space: nowrap;
+}
+
+/* Bottom row: the status/context box under the chat panel (same columns as the workspace, so
+   it is exactly as wide), the start/stop button at the right */
+.bottom-bar {
+  width: 100%;
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.bottom-bar .context-meter-container {
+  max-width: none;
+  min-width: 0;
+}
+
+.bottom-right {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.bottom-right .minimal-control {
+  margin-left: auto;
+}
+
+/* Phones: one row, status box filling the space left of the button */
+@media (max-width: 760px) {
+  .bottom-bar {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .bottom-bar .context-meter-container {
+    flex: 1 1 auto;
+  }
+
+  .bottom-right {
+    flex-shrink: 0;
   }
 }
 
@@ -1145,6 +1216,48 @@ body {
   padding: 20px 24px 24px;
   gap: 18px;
   text-align: left;
+}
+
+/* Logo, name and tagline at the top of the settings dialog */
+.settings-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  text-align: center;
+}
+
+.settings-brand-logo {
+  width: 72px;
+  height: auto;
+  margin-bottom: 4px;
+  filter: drop-shadow(0 6px 16px rgba(56, 189, 248, 0.25));
+}
+
+.settings-brand-name {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.settings-brand-tagline {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* Under the model picker, on phone-size screens only */
+.settings-warning {
+  display: none;
+  margin-top: 6px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--warning);
+}
+
+@media (max-width: 760px) {
+  .settings-warning {
+    display: block;
+  }
 }
 
 .settings-header {
@@ -1674,19 +1787,65 @@ body {
   padding: 0 4px;
 }
 
-.chat-waveforms {
+/* Example phrases under the chat until the user first speaks */
+.chat-examples {
   flex-shrink: 0;
+  margin: 0 12px 10px;
+  padding: 10px 12px;
+  border: 1px dashed rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  color: var(--text-secondary);
+}
+
+.chat-examples[hidden] {
+  display: none;
+}
+
+.chat-examples-title {
+  margin-bottom: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chat-examples-list {
+  list-style: none;
   display: flex;
-  gap: 8px;
-  padding: 6px 12px 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chat-examples-list li {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+/* Mic and voice waveforms overlaid in one box; lighten keeps whichever bar is brighter.
+   Phones: full width under the chat. Desktop: in the bottom row (main.ts moves the box). */
+.chat-waveforms {
+  position: relative;
+  flex-shrink: 0;
+  height: 26px;
+  margin: 0 12px 8px;
 }
 
 .chat-waveform {
-  flex: 1 1 0;
-  min-width: 0;
-  height: 22px;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   display: block;
+  mix-blend-mode: lighten;
+}
+
+.bottom-right .chat-waveforms {
+  flex: 1 1 auto;
+  height: 36px;
+  margin: 0;
 }
 
 .raw-panel-title {
@@ -1712,6 +1871,56 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text-secondary);
+}
+
+/* Code colors in the model output panel (Prism tokens) */
+.raw-output {
+  color: #cbd5e1;
+}
+
+.raw-output .token.comment {
+  color: #64748b;
+  font-style: italic;
+}
+
+.raw-output .token.keyword {
+  color: #c084fc;
+}
+
+.raw-output .token.string,
+.raw-output .token.template-string {
+  color: #86efac;
+}
+
+.raw-output .token.interpolation {
+  color: #cbd5e1;
+}
+
+.raw-output .token.number,
+.raw-output .token.boolean {
+  color: #fbbf24;
+}
+
+.raw-output .token.function {
+  color: #60a5fa;
+}
+
+.raw-output .token.class-name {
+  color: #f9a8d4;
+}
+
+.raw-output .token.property,
+.raw-output .token.property-access {
+  color: #7dd3fc;
+}
+
+.raw-output .token.operator,
+.raw-output .token.punctuation {
+  color: #94a3b8;
+}
+
+.raw-output .token.regex {
+  color: #fdba74;
 }
 
 /* Phones and narrow windows: conversation on top, raw output below */
@@ -1940,92 +2149,4 @@ body {
   background: transparent !important;
   pointer-events: none;
   display: block;
-}
-
-/* Floating Screen Visual HUD */
-.screen-visual-hud {
-  position: fixed;
-  top: max(16px, env(safe-area-inset-top));
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 95;
-  pointer-events: auto;
-  user-select: none;
-  animation: hudFadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.screen-visual-hud[hidden] {
-  display: none !important;
-}
-
-.hud-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  height: 36px;
-  padding: 0 12px 0 14px;
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.85);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(56, 189, 248, 0.3);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 16px rgba(56, 189, 248, 0.2);
-  color: var(--text-primary);
-  font-size: 12.5px;
-  font-weight: 500;
-}
-
-.hud-status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #38bdf8;
-  box-shadow: 0 0 8px #38bdf8;
-  animation: pulse 1.8s infinite ease-in-out;
-}
-
-.hud-title {
-  color: var(--text-secondary);
-  font-size: 12px;
-  letter-spacing: 0.02em;
-  font-weight: 600;
-}
-
-.hud-btn {
-  height: 24px;
-  padding: 0 8px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--text-primary);
-  font-size: 11.5px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.hud-btn:hover {
-  background: rgba(56, 189, 248, 0.2);
-  border-color: #38bdf8;
-  color: #38bdf8;
-}
-
-.hud-btn.hud-close:hover {
-  background: rgba(239, 68, 68, 0.2);
-  border-color: rgba(239, 68, 68, 0.4);
-  color: #f87171;
-}
-
-@keyframes hudFadeIn {
-  from {
-    opacity: 0;
-    transform: translate(-50%, -8px);
-  }
-  to {
-    opacity: 1;
-    transform: translate(-50%, 0);
-  }
 }

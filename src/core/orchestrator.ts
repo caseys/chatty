@@ -109,6 +109,24 @@ export function repetitionCutIndex(text: string): number {
   return -1;
 }
 
+/** Speech recognizers often "hear" this in silence or noise; never treated as a request. */
+const IGNORED_TRANSCRIPT = /^\s*thank you[\s.!]*$/i;
+const STOP_PHRASE = /^(?:stop|wait|cancel|pause|quiet|enough)(?: please)?$/;
+
+/**
+ * What to do with a final transcript: drop it, stop the assistant, or send it as a request.
+ * While the assistant is busy, a stray word (or a noise the recognizer turned into one) doesn't
+ * interrupt it: that takes a stop word, or a request of two or more words.
+ */
+export function classifyTranscript(text: string, assistantBusy: boolean): 'ignore' | 'stop' | 'submit' {
+  if (IGNORED_TRANSCRIPT.test(text)) return 'ignore';
+  const words = text.toLowerCase().match(/[\p{L}\p{N}']+/gu) ?? [];
+  if (words.length === 0) return 'ignore';
+  if (!assistantBusy) return 'submit';
+  if (STOP_PHRASE.test(words.join(' '))) return 'stop';
+  return words.length >= 2 ? 'submit' : 'ignore';
+}
+
 export const CONCISE_VOICE_SYSTEM_PROMPT = [
   "You are Chatty, a voice assistant that acts by writing JavaScript. Your reply runs as a program in the user's browser, immediately and exactly as written.",
   'Rules:',
@@ -139,14 +157,15 @@ export const EXAMPLE_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content:
     content: [
       'const ctx = new AudioContext();',
       'await ctx.resume();',
-      '// MIDI note numbers: 60 is middle C, +1 per semitone',
+      '// Notes as MIDI numbers (60 is middle C); hz() turns one into a frequency',
+      'const hz = (midi) => 440 * 2 ** ((midi - 69) / 12);',
       'const tune = [64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62];',
       'const beat = 0.6;',
       'tune.forEach((note, i) => {',
       '  const start = ctx.currentTime + i * beat;',
       '  const osc = ctx.createOscillator();',
       '  const gain = ctx.createGain();',
-      '  osc.frequency.value = 440 * 2 ** ((note - 69) / 12);',
+      '  osc.frequency.value = hz(note);',
       '  gain.gain.setValueAtTime(0.2, start);',
       '  gain.gain.exponentialRampToValueAtTime(0.001, start + beat);',
       '  osc.connect(gain).connect(ctx.destination);',
@@ -337,21 +356,26 @@ export class ConversationOrchestrator {
   // STT Event Handling & Barge-In Interruption
   // --------------------------------------------------------------------------
 
+  /** True while the assistant is generating or talking. */
+  isAssistantBusy(): boolean {
+    const snapshot = this.stateCoordinator.getSnapshot();
+    return (
+      snapshot.interaction === 'generating' ||
+      snapshot.interaction === 'speaking' ||
+      snapshot.playback === 'playing' ||
+      snapshot.playback === 'buffering'
+    );
+  }
+
   handleSttEvent(event: SttEvent): void {
     const snapshot = this.stateCoordinator.getSnapshot();
+    const busy = this.isAssistantBusy();
 
     switch (event.type) {
       case 'speech_started': {
-        // If assistant is currently generating or speaking, trigger immediate barge-in interruption!
-        if (
-          snapshot.interaction === 'generating' ||
-          snapshot.interaction === 'speaking' ||
-          snapshot.playback === 'playing' ||
-          snapshot.playback === 'buffering'
-        ) {
-          this.interruptCurrentTurn('User started speaking');
-        }
-        this.stateCoordinator.transitionInteraction('listening', event.turnId);
+        // While the assistant is busy, sound alone doesn't interrupt it: the transcript decides
+        // (see classifyTranscript), so a cough or background noise can't cut it off
+        if (!busy) this.stateCoordinator.transitionInteraction('listening', event.turnId);
         break;
       }
 
@@ -365,21 +389,24 @@ export class ConversationOrchestrator {
 
       case 'speech_ended': {
         this.activeTurnSpeechEndedTime = event.timestamp || performance.now();
-        this.stateCoordinator.transitionInteraction('finalizing_input', event.turnId);
+        if (!busy) this.stateCoordinator.transitionInteraction('finalizing_input', event.turnId);
         break;
       }
 
       case 'final_transcript': {
-        if (event.text && event.text.trim().length > 0) {
+        const action = classifyTranscript(event.text ?? '', busy);
+        if (action === 'stop') {
+          this.interruptCurrentTurn('User said stop');
+        } else if (action === 'submit') {
           const sttLatencyMs =
             this.activeTurnSpeechEndedTime > 0
               ? Math.max(1, (event.timestamp || performance.now()) - this.activeTurnSpeechEndedTime)
               : event.durationMs ?? 0;
-          void this.submitUserInput(event.text, {
+          void this.submitUserInput(event.text ?? '', {
             isVoiceTranscript: true,
             sttFinalizationLatencyMs: sttLatencyMs,
           });
-        } else {
+        } else if (!busy) {
           this.stateCoordinator.transitionInteraction('idle', null);
         }
         break;

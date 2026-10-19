@@ -8,7 +8,7 @@
 import { SharedAudioSubsystem } from '../audio/audio-subsystem.ts';
 import { ConversationMemoryStore } from './memory-store.ts';
 import { ModelManager } from './model-manager.ts';
-import { ConversationOrchestrator } from './orchestrator.ts';
+import { classifyTranscript, ConversationOrchestrator } from './orchestrator.ts';
 import { StateMachineCoordinator, type CoordinatedStateSnapshot } from './state-machine.ts';
 import { WhistleSttProvider } from '../runtimes/stt-provider.ts';
 import { NativeSpeechRecognizer } from '../runtimes/native-stt.ts';
@@ -56,6 +56,20 @@ const WELCOME_MESSAGE =
   'Welcome to Chatty, I can do anything your browser can do. For example: ask me to make MIDI music, ' +
   'use oscillators and other Web Audio tools, draw 3D scenes, animate motion, ' +
   'look up things in Wikipedia or DuckDuckGo and more!';
+/** Returning users get the short greeting (set after the first full welcome) */
+const WELCOMED_KEY = 'chatty_welcomed';
+const WELCOME_BACK_MESSAGE = 'Welcome back, what would you like to do with this browser?';
+
+/** The full introduction the first time, a short greeting after that. */
+function takeWelcomeMessage(): string {
+  try {
+    if (localStorage.getItem(WELCOMED_KEY)) return WELCOME_BACK_MESSAGE;
+    localStorage.setItem(WELCOMED_KEY, '1');
+  } catch {
+    // No storage (private browsing): always introduce
+  }
+  return WELCOME_MESSAGE;
+}
 
 // Set while the LLM is loading; still present on the next start means the tab was killed mid-load.
 const LLM_LOAD_MARKER_KEY = 'chatty_llm_loading';
@@ -188,6 +202,7 @@ export class VoiceAssistantEngine {
 
     this.jsRuntime = new JavascriptRuntime({
       mode: 'iframe',
+      getSharedAudioContext: () => this.audioSubsystem.getAudioContext(),
       onResult: (res) => {
         this.events.onJavascriptExecution?.(res);
       },
@@ -614,7 +629,7 @@ export class VoiceAssistantEngine {
       onFinal: (text) => {
         if (!turnId) turnId = `voice_turn_${Date.now()}_${++this.speechTurnCounter}`;
         this.events.onStatusChange?.(null);
-        this.events.onTranscript?.(text, true);
+        this.showFinalTranscript(text);
         this.orchestrator.handleSttEvent({ type: 'final_transcript', turnId, sequence: 3, timestamp: performance.now(), text });
         turnId = '';
       },
@@ -725,18 +740,19 @@ export class VoiceAssistantEngine {
       // Greet on Start when the chat is empty (audio system is now set up)
       if (!this.hasHistory()) {
         const turnId = `welcome_${Date.now()}`;
+        const greeting = takeWelcomeMessage();
         const welcomeMsg: ConversationMessage = {
           id: `msg_assistant_${turnId}`,
           turnId,
           role: 'assistant',
-          canonicalContent: WELCOME_MESSAGE,
-          speechReadyContent: WELCOME_MESSAGE,
+          canonicalContent: greeting,
+          speechReadyContent: greeting,
           timestamp: Date.now(),
         };
         this.memoryStore.addMessage(welcomeMsg);
         this.events.onMessageCreated?.(welcomeMsg);
         void this.persistState();
-        void this.orchestrator.speakOutOfTurn(WELCOME_MESSAGE);
+        void this.orchestrator.speakOutOfTurn(greeting);
       }
     } catch {
       this.isListening = false;
@@ -752,6 +768,12 @@ export class VoiceAssistantEngine {
       // AudioContext unavailable in test/headless environments
     }
     return this.orchestrator.submitUserInput(text, { isVoiceTranscript: false });
+  }
+
+  /** Shows a final transcript only if it will be sent (ignored ones and stop words aren't). */
+  private showFinalTranscript(text: string): void {
+    const action = classifyTranscript(text, this.orchestrator.isAssistantBusy());
+    this.events.onTranscript?.(action === 'submit' ? text : '', true);
   }
 
   interrupt(reason = 'User stopped response'): void {
@@ -779,7 +801,7 @@ export class VoiceAssistantEngine {
 
       const text = result.text.trim();
       if (text) {
-        this.events.onTranscript?.(text, true);
+        this.showFinalTranscript(text);
         this.orchestrator.handleSttEvent({
           type: 'final_transcript',
           turnId,

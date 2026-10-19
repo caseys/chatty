@@ -8,6 +8,8 @@ export interface VisualizerConfig {
   barWidth?: number;
   gap?: number;
   minBarHeight?: number;
+  /** Display-only multiplier for the level (e.g. to make a quiet source read louder) */
+  gain?: number;
   gradientColors: [string, string, string];
   glowColor: string;
 }
@@ -27,6 +29,7 @@ export class FluidAudioVisualizer {
       barWidth: config.barWidth ?? 3.5,
       gap: config.gap ?? 4,
       minBarHeight: config.minBarHeight ?? 3.5,
+      gain: config.gain ?? 1,
       gradientColors: config.gradientColors,
       glowColor: config.glowColor,
     };
@@ -34,8 +37,10 @@ export class FluidAudioVisualizer {
     this.smoothedBars.fill(this.config.minBarHeight);
   }
 
-  render(pcm: Float32Array, rms: number, isActive: boolean): void {
+  render(pcm: Float32Array, rawRms: number, isActive: boolean): void {
     if (!this.ctx) return;
+    const gain = this.config.gain;
+    const rms = rawRms * gain;
 
     const dpr = Math.min(3, window.devicePixelRatio || 1);
     const rect = this.canvas.getBoundingClientRect();
@@ -57,7 +62,14 @@ export class FluidAudioVisualizer {
 
     this.phase += isActive ? 0.08 : 0.035;
 
-    const count = this.config.barCount;
+    // As many bars as fit, so the waveform spans the whole width
+    const step = this.config.barWidth + this.config.gap;
+    const count = Math.max(8, Math.floor((cssW + this.config.gap) / step));
+    if (count !== this.smoothedBars.length) {
+      const resized = new Float32Array(count).fill(this.config.minBarHeight);
+      resized.set(this.smoothedBars.subarray(0, Math.min(count, this.smoothedBars.length)));
+      this.smoothedBars = resized;
+    }
     const totalBarWidth = count * this.config.barWidth + (count - 1) * this.config.gap;
     const startX = (cssW - totalBarWidth) / 2;
     const centerY = cssH / 2;
@@ -86,7 +98,7 @@ export class FluidAudioVisualizer {
 
       // Map to audio sample slice
       const pcmIdx = Math.min(pcm.length - 1, Math.floor((i / count) * pcm.length));
-      const sampleMag = Math.abs(pcm[pcmIdx] ?? 0);
+      const sampleMag = Math.abs(pcm[pcmIdx] ?? 0) * gain;
 
       let targetHeight = this.config.minBarHeight;
       if (isActive && rms > 0.005) {

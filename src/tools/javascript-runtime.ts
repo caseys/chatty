@@ -47,6 +47,8 @@ export interface JavascriptRuntimeOptions {
   onResult?: JavascriptExecutionCallback;
   onVisualChange?: (hasVisual: boolean, iframe: HTMLIFrameElement | null) => void;
   iframeContainer?: HTMLElement | null;
+  /** The app's running audio context, shared with programs (see programAudio) */
+  getSharedAudioContext?: () => AudioContext | null;
 }
 
 export const CODING_AGENT_SYSTEM_PROMPT = [
@@ -305,6 +307,8 @@ export class JavascriptRuntime {
   private lastRunOptions: ExecutionContextOptions | undefined;
   private onIframeLoad?: (iframe: HTMLIFrameElement) => void;
   private pendingRuns = new Map<string, PendingIframeRun>();
+  private getSharedAudioContext?: () => AudioContext | null;
+  private programOutput: GainNode | null = null;
 
   constructor(options?: JavascriptRuntimeOptions) {
     this.mode = options?.mode ?? 'iframe';
@@ -313,6 +317,36 @@ export class JavascriptRuntime {
     this.onResult = options?.onResult;
     this.onVisualChange = options?.onVisualChange;
     this.iframeContainer = options?.iframeContainer ?? null;
+    this.getSharedAudioContext = options?.getSharedAudioContext;
+    if (this.getSharedAudioContext && typeof window !== 'undefined') {
+      // Read by the sandbox's AudioContext stand-in (same origin)
+      (window as unknown as { __chattySharedAudio?: () => unknown }).__chattySharedAudio = () => this.programAudio();
+    }
+  }
+
+  /**
+   * Audio for programs: the app's context, which the mic tap already unlocked (a context a
+   * program creates itself may stay silent, since browsers only start audio after a tap in the
+   * same document). Programs play into a gain node that the next screen wipe disconnects.
+   */
+  private programAudio(): { context: AudioContext; output: AudioNode } | null {
+    const context = this.getSharedAudioContext?.();
+    if (!context) return null;
+    if (!this.programOutput || this.programOutput.context !== context) {
+      this.programOutput = context.createGain();
+      this.programOutput.connect(context.destination);
+    }
+    if (context.state !== 'running') void context.resume().catch(() => {});
+    return { context, output: this.programOutput };
+  }
+
+  private silenceProgramAudio(): void {
+    try {
+      this.programOutput?.disconnect();
+    } catch {
+      // already disconnected
+    }
+    this.programOutput = null;
   }
 
   setMode(mode: JavascriptExecutionMode): void {
@@ -361,6 +395,7 @@ export class JavascriptRuntime {
   async resetVisual(): Promise<void> {
     const hadIframe = Boolean(this.activeIframe);
     this.abortPendingRuns('Visual screen was cleared');
+    this.silenceProgramAudio();
     if (this.activeIframe) {
       this.activeIframe.style.pointerEvents = 'none';
       this.activeIframe.remove();
@@ -917,6 +952,33 @@ export class JavascriptRuntime {
 
     window.root = document.getElementById('root');
 
+    // new AudioContext() gives programs the app's already-running audio (see programAudio).
+    // close() and suspend() would stop the app's own audio, so they do nothing here.
+    const NativeAudioContext = window.AudioContext || window.webkitAudioContext;
+    function SharedAudioContext(options) {
+      let shared = null;
+      try {
+        shared = window.parent.__chattySharedAudio ? window.parent.__chattySharedAudio() : null;
+      } catch {}
+      if (!shared) return new NativeAudioContext(options);
+      const local = {};
+      return new Proxy(shared.context, {
+        get(target, prop) {
+          if (prop in local) return local[prop];
+          if (prop === 'destination') return shared.output;
+          if (prop === 'close' || prop === 'suspend') return () => Promise.resolve();
+          const value = Reflect.get(target, prop, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+        set(_target, prop, value) {
+          local[prop] = value;
+          return true;
+        },
+      });
+    }
+    window.AudioContext = SharedAudioContext;
+    window.webkitAudioContext = SharedAudioContext;
+
     window.addEventListener('message', async (event) => {
       const data = event.data;
       if (!data) return;
@@ -1187,6 +1249,7 @@ export class JavascriptRuntime {
 
   dispose(): void {
     this.abortPendingRuns('Runtime disposed');
+    this.silenceProgramAudio();
     if (typeof window !== 'undefined') {
       window.removeEventListener('message', this.handleHostMessage);
     }

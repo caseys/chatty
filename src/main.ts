@@ -3,6 +3,7 @@
 // Powered by the unified VoiceAssistantEngine
 // ============================================================================
 
+import Prism from 'prismjs';
 import { VoiceAssistantEngine } from './core/voice-assistant-engine.ts';
 import { MODEL_REGISTRY } from './core/model-manager.ts';
 import { FluidAudioVisualizer } from './audio/visualizer.ts';
@@ -12,7 +13,6 @@ import { createToolSummaryElement, parseStreamingToolCall, stripToolCallMarkup }
 type LoadKind = 'llm' | 'tts' | 'stt';
 
 /** The app's own greeting (engine creates it with a welcome_ turn id). */
-const isWelcomeMessage = (m: ConversationMessage) => m.turnId.startsWith('welcome_');
 
 type WakeLockSentinelLike = {
   released: boolean;
@@ -21,6 +21,10 @@ type WakeLockSentinelLike = {
 };
 
 const SETTINGS_SEEN_KEY = 'chatty_settings_seen';
+/** Set once the user has spoken; until then the chat shows example phrases */
+const HAS_SPOKEN_KEY = 'chatty_has_spoken';
+/** Matches the CSS breakpoint where the chat and code panels stack */
+const NARROW_LAYOUT = '(max-width: 760px)';
 
 /** True on the very first visit (settings never saved or shown). */
 function isFirstVisit(): boolean {
@@ -38,6 +42,7 @@ export class MinimalVoiceApp {
   private newBtn = document.getElementById('btn-new-chat') as HTMLButtonElement | null;
   private statusEl = document.getElementById('minimal-status');
   private chatLogEl = document.getElementById('chat-log');
+  private chatExamplesEl = document.getElementById('chat-examples');
   private rawOutputEl = document.getElementById('raw-output');
   // Chat bubbles by message id and by turn (streamed text arrives before the reply is saved)
   private bubbles = new Map<string, HTMLElement>();
@@ -52,7 +57,7 @@ export class MinimalVoiceApp {
   private inputPcmBuffer = new Float32Array(64);
   private outputPcmBuffer = new Float32Array(64);
 
-  // Rootless Full-Window Visual Screen & HUD Elements
+  // Rootless Full-Window Visual Screen
   private appInitializing = true;
   // Startup download progress per model, combined into one progress bar
   private loadBytes: Record<LoadKind, { loaded: number; total: number }> = {
@@ -67,9 +72,7 @@ export class MinimalVoiceApp {
   private wakeLockSentinel: WakeLockSentinelLike | null = null;
   private keepAwakeRetryTimer = 0;
   private screenVisualLayer = document.getElementById('screen-visual-layer') as HTMLElement | null;
-  private screenVisualHud = document.getElementById('screen-visual-hud') as HTMLElement | null;
-  private hudClearBtn = document.getElementById('btn-hud-clear') as HTMLButtonElement | null;
-  private hudCloseBtn = document.getElementById('btn-hud-close') as HTMLButtonElement | null;
+  private clearScreenBtn = document.getElementById('btn-clear-screen') as HTMLButtonElement | null;
 
   private jsIframeContainer = document.getElementById('js-runtime-iframe-container');
 
@@ -106,24 +109,18 @@ export class MinimalVoiceApp {
         barCount: 18,
         barWidth: 2.5,
         gap: 3,
+        // Voice output reads quieter than the mic: show it 1.25x
+        gain: 1.25,
         gradientColors: ['#34d399', '#10b981', '#06b6d4'],
         glowColor: 'rgba(52, 211, 153, 0.45)',
       });
     }
     this.engine = new VoiceAssistantEngine({
       onJavascriptExecution: (res) => {
-        if (res.hasVisualOutput) {
-          if (this.screenVisualLayer) this.screenVisualLayer.hidden = false;
-          if (this.screenVisualHud) this.screenVisualHud.hidden = false;
-        }
+        if (res.hasVisualOutput) this.showScreenContent(true);
       },
       onJavascriptVisualChange: (hasVisual) => {
-        if (this.screenVisualHud) {
-          this.screenVisualHud.hidden = !hasVisual;
-        }
-        if (this.screenVisualLayer && hasVisual) {
-          this.screenVisualLayer.hidden = false;
-        }
+        this.showScreenContent(hasVisual);
       },
       onStatusChange: (statusText) => {
         if (!this.statusEl) return;
@@ -256,7 +253,20 @@ export class MinimalVoiceApp {
     this.updateUiState();
   }
 
+  /** Waveforms sit between the status box and the button on desktop, under the chat on phones. */
+  private placeWaveforms(): void {
+    const waves = document.querySelector('.chat-waveforms');
+    const narrow = window.matchMedia(NARROW_LAYOUT).matches;
+    const target = document.querySelector(narrow ? '.chat-panel' : '.bottom-right');
+    if (!waves || !target) return;
+    if (narrow) target.appendChild(waves);
+    else target.insertBefore(waves, target.firstChild);
+  }
+
   private bindEvents(): void {
+    this.updateChatExamples(false);
+    this.placeWaveforms();
+    window.matchMedia(NARROW_LAYOUT).addEventListener('change', () => this.placeWaveforms());
     // Stay on the newest text when the layout changes (rotation, desktop/mobile switch)
     if (typeof ResizeObserver !== 'undefined') {
       const keepAtBottom = new ResizeObserver(() => {
@@ -283,7 +293,6 @@ export class MinimalVoiceApp {
         // ignore haptic errors
       }
       this.resetVisualScreen();
-      if (this.screenVisualHud) this.screenVisualHud.hidden = true;
       await this.engine.createConversation('New Chat');
       this.clearChatLog();
       if (typeof document !== 'undefined') document.title = 'New Chat — Chatty';
@@ -295,7 +304,6 @@ export class MinimalVoiceApp {
         navigator.vibrate?.(15);
       } catch {}
       this.resetVisualScreen();
-      if (this.screenVisualHud) this.screenVisualHud.hidden = true;
       await this.engine.createConversation('New Chat');
       this.clearChatLog();
       if (typeof document !== 'undefined') document.title = 'New Chat — Chatty';
@@ -305,15 +313,8 @@ export class MinimalVoiceApp {
       }
     });
 
-    // Screen Visual HUD Controls
-    this.hudClearBtn?.addEventListener('click', () => {
+    this.clearScreenBtn?.addEventListener('click', () => {
       this.resetVisualScreen();
-      if (this.screenVisualHud) this.screenVisualHud.hidden = true;
-    });
-
-    this.hudCloseBtn?.addEventListener('click', () => {
-      if (this.screenVisualLayer) this.screenVisualLayer.hidden = true;
-      if (this.screenVisualHud) this.screenVisualHud.hidden = true;
     });
 
     this.toggleSidebarBtn?.addEventListener('click', () => {
@@ -417,7 +418,6 @@ export class MinimalVoiceApp {
 
   private onActiveChatSwitched(convo: StoredConversation): void {
     this.resetVisualScreen();
-    if (this.screenVisualHud) this.screenVisualHud.hidden = true;
     this.renderConversation(convo.messages ?? [], convo.summary);
 
     if (typeof document !== 'undefined') {
@@ -551,9 +551,7 @@ export class MinimalVoiceApp {
     target: HTMLElement,
     content: string,
     toolCall?: ConversationMessage['toolCall'],
-    isStreaming = false,
-    /** App-authored text (the welcome greeting), shown as a note rather than a model reply */
-    isAppNote = false
+    isStreaming = false
   ): void {
     target.innerHTML = '';
 
@@ -594,9 +592,7 @@ export class MinimalVoiceApp {
       displayText = '';
     }
 
-    if (displayText && isAppNote) {
-      target.appendChild(this.createSystemNote(displayText));
-    } else if (displayText) {
+    if (displayText) {
       const textDiv = document.createElement('div');
       textDiv.className = 'assistant-text-content';
       textDiv.textContent = displayText;
@@ -670,7 +666,20 @@ export class MinimalVoiceApp {
     this.scrollChatToBottom();
   }
 
+  /** Example phrases stay up until the user has spoken for the first time. */
+  private updateChatExamples(userHasSpoken: boolean): void {
+    let spoken = userHasSpoken;
+    try {
+      if (spoken) localStorage.setItem(HAS_SPOKEN_KEY, '1');
+      else spoken = localStorage.getItem(HAS_SPOKEN_KEY) !== null;
+    } catch {
+      // no storage: show examples until they speak in this visit
+    }
+    if (this.chatExamplesEl) this.chatExamplesEl.hidden = spoken;
+  }
+
   private addUserBubble(msg: ConversationMessage): void {
+    this.updateChatExamples(true);
     if (this.bubbles.has(msg.id)) return;
     const bubble = this.interimUserBubble ?? this.createBubble('user');
     this.interimUserBubble = null;
@@ -692,17 +701,21 @@ export class MinimalVoiceApp {
   private renderAssistantMessage(msg: ConversationMessage): void {
     const bubble = this.bubbles.get(msg.id) ?? this.bubbleForTurn(msg.turnId);
     this.bubbles.set(msg.id, bubble);
-    this.renderAssistantOutput(bubble, msg.canonicalContent, msg.toolCall, false, isWelcomeMessage(msg));
+    this.renderAssistantOutput(bubble, msg.canonicalContent, msg.toolCall);
   }
 
-  /** Shows the model's raw output, kept scrolled to the newest text. speak() lines are left out: what was said is in the chat. */
+  /**
+   * Shows the model's raw output as highlighted code, kept scrolled to the newest text.
+   * speak() lines are left out: what was said is in the chat.
+   */
   private setRawOutput(text: string): void {
     if (!this.rawOutputEl) return;
-    this.rawOutputEl.textContent = text
+    const code = text
       .split('\n')
       .filter((line) => !/^\s*(?:await\s+)?speak\(.*\);?\s*$/.test(line))
       .join('\n')
       .trim();
+    this.rawOutputEl.innerHTML = Prism.highlight(code, Prism.languages.javascript, 'javascript');
     this.rawOutputEl.scrollTop = this.rawOutputEl.scrollHeight;
   }
 
@@ -1074,7 +1087,14 @@ export class MinimalVoiceApp {
   }
 
   /** Fully resets the agent's visual screen (iframe document, timers, audio) and click capture. */
+  /** Shows the drawing layer, and the Clear button only while something is drawn on it. */
+  private showScreenContent(hasContent: boolean): void {
+    if (hasContent && this.screenVisualLayer) this.screenVisualLayer.hidden = false;
+    if (this.clearScreenBtn) this.clearScreenBtn.hidden = !hasContent;
+  }
+
   private resetVisualScreen(): void {
+    this.showScreenContent(false);
     const iframe = this.engine.getActiveIframe();
     if (iframe) iframe.style.pointerEvents = 'none';
     void this.engine.jsRuntime.resetVisual();
@@ -1103,7 +1123,7 @@ export class MinimalVoiceApp {
       iframe.style.pointerEvents = on ? 'auto' : 'none';
     };
 
-    // True when a Chatty host control (corner buttons, mic/start button, sidebar, settings, HUD)
+    // True when a Chatty host control (corner buttons, mic/start button, sidebar, settings)
     // sits under the point. elementsFromPoint is used so the iframe/layer is skipped even while
     // the iframe is 'auto' and would otherwise be the topmost element.
     const hostControlAt = (x: number, y: number): boolean => {
@@ -1114,8 +1134,7 @@ export class MinimalVoiceApp {
           (top.closest('.minimal-corner-btn') ||
             top.closest('.minimal-start-btn') ||
             top.closest('.chat-sidebar') ||
-            top.closest('.settings-dialog') ||
-            top.closest('.screen-visual-hud'))
+            top.closest('.settings-dialog'))
       );
     };
 

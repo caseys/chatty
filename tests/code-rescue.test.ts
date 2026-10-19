@@ -56,3 +56,20 @@ describe('repeat-loop guard', () => {
     expect(repetitionCutIndex('ctx.lineTo(1, 2);\nctx.lineTo(3, 4);\nctx.lineTo(5, 6);\nctx.lineTo(7, 8);')).toBe(-1);
   });
 });
+
+describe('spoken input filtering', () => {
+  it('drops "Thank you" and keeps busy-time interruptions deliberate', async () => {
+    const { classifyTranscript } = await import('../src/core/orchestrator.ts');
+    expect(classifyTranscript('Thank you.', false)).toBe('ignore');
+    expect(classifyTranscript('thank you', true)).toBe('ignore');
+    expect(classifyTranscript('Thank you, now draw a cat', false)).toBe('submit');
+    expect(classifyTranscript('...', false)).toBe('ignore');
+    expect(classifyTranscript('Hello', false)).toBe('submit');
+    // While the assistant is busy: one stray word is ignored, stop words stop it, requests replace it
+    expect(classifyTranscript('Hmm.', true)).toBe('ignore');
+    expect(classifyTranscript('Stop!', true)).toBe('stop');
+    expect(classifyTranscript('wait please', true)).toBe('stop');
+    expect(classifyTranscript('Draw a dog instead', true)).toBe('submit');
+    expect(classifyTranscript('Zeichne einen Hund', true)).toBe('submit');
+  });
+});

@@ -188,6 +188,11 @@ export class SharedAudioSubsystem {
     this.vad = new VoiceActivityDetector(vadConfig);
   }
 
+  /** The app's audio context if it exists yet (unlocked by the first mic tap). */
+  getAudioContext(): AudioContext | null {
+    return this.audioCtx;
+  }
+
   async ensureAudioContext(): Promise<AudioContext> {
     // 1. Configure iOS/WebKit AudioSession category for simultaneous full-duplex mic & speaker
     if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {

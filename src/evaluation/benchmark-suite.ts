@@ -204,11 +204,19 @@ export async function runConversationEvaluationSuite(
     const triggerBargeIn = () => {
       if (bargeInTriggered) return;
       bargeInTriggered = true;
+      // Sound alone no longer interrupts; a spoken stop word does
       orchestrator.handleSttEvent({
         type: 'speech_started',
         turnId: 'barge_in_turn',
         sequence: 1,
         timestamp: performance.now(),
+      });
+      orchestrator.handleSttEvent({
+        type: 'final_transcript',
+        turnId: 'barge_in_turn',
+        sequence: 3,
+        timestamp: performance.now(),
+        text: 'Stop.',
       });
     };
     const orchestrator = new ConversationOrchestrator({
