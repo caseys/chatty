@@ -41,7 +41,6 @@ export class MinimalVoiceApp {
   private closeSettingsXBtn = document.getElementById('btn-close-settings-x') as HTMLButtonElement | null;
   private cancelSettingsBtn = document.getElementById('btn-cancel-settings') as HTMLButtonElement | null;
   private selectChatModel = document.getElementById('select-chat-model') as HTMLSelectElement | null;
-  private selectCodingModel = document.getElementById('select-coding-model') as HTMLSelectElement | null;
   private selectPiperVoice = document.getElementById('select-piper-voice') as HTMLSelectElement | null;
 
   // Sidebar Elements
@@ -208,7 +207,6 @@ export class MinimalVoiceApp {
     // Populate settings dropdowns initially from engine
     const initialSettings = this.engine.getSettings();
     if (this.selectChatModel) this.selectChatModel.value = initialSettings.chatModelId;
-    if (this.selectCodingModel) this.selectCodingModel.value = initialSettings.codingModelId;
     if (this.selectPiperVoice) this.selectPiperVoice.value = initialSettings.voiceId;
 
     // Restore sidebar state from saved preferences
@@ -306,7 +304,6 @@ export class MinimalVoiceApp {
       }
       const current = this.engine.getSettings();
       if (this.selectChatModel) this.selectChatModel.value = current.chatModelId;
-      if (this.selectCodingModel) this.selectCodingModel.value = current.codingModelId;
       if (this.selectPiperVoice) this.selectPiperVoice.value = current.voiceId;
       this.settingsDialog?.showModal();
     });
@@ -335,7 +332,7 @@ export class MinimalVoiceApp {
 
       const current = this.engine.getSettings();
       const newChatModelId = this.selectChatModel?.value || current.chatModelId;
-      const newCodingModelId = this.selectCodingModel?.value || current.codingModelId;
+      const newCodingModelId = current.codingModelId;
       const newVoiceId = this.selectPiperVoice?.value || current.voiceId;
 
       this.settingsDialog?.close();
