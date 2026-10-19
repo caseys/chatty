@@ -1082,8 +1082,8 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         'qwen3-8b',
         'qwen3.5-9b',
       ]);
-      // Only ONNX models small enough for a phone tab are offered there
-      expect(SUPPORTED_CHAT_MODELS.filter((m) => m.phone).every((m) => !m.id.startsWith('gemma-4'))).toBe(true);
+      // Phones get the small WebLLM models and Gemma 4 E2B (LiteRT, like desktop), never E4B
+      expect(SUPPORTED_CHAT_MODELS.filter((m) => m.phone && m.id.startsWith('gemma-4')).map((m) => m.id)).toEqual(['gemma-4-e2b-it-web']);
       expect(SUPPORTED_CODING_MODELS.map((m) => m.id)).toEqual([
         'gemma-4-e2b-it-web',
         'gemma-4-e4b-it-web',

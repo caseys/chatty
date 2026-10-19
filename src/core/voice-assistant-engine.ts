@@ -43,6 +43,7 @@ import {
   loadSettingsFromStorage,
   saveSettingsToStorage,
   loadSpeechChoice,
+  isPhoneChatModel,
 } from './settings.ts';
 import type {
   BrowserCapabilities,
@@ -481,7 +482,7 @@ export class VoiceAssistantEngine {
     // router + chat + coder phone pipeline for comparison.
     const splitPipeline =
       isConstrained && typeof location !== 'undefined' && new URLSearchParams(location.search).get('pipeline') === 'split';
-    if (isConstrained && !findLocalChatModel(this.chatModelId)?.phone) {
+    if (isConstrained && !isPhoneChatModel(this.chatModelId)) {
       this.chatModelId = DEFAULT_PHONE_CHAT_MODEL_ID;
     }
 
@@ -1574,7 +1575,7 @@ export class VoiceAssistantEngine {
   async detectDevice(): Promise<void> {
     const caps = await this.modelManager.detectCapabilities();
     this.isPhone = caps.deviceProfile === 'constrained_mobile';
-    if (this.isPhone && !findLocalChatModel(this.chatModelId)?.phone) this.chatModelId = DEFAULT_PHONE_CHAT_MODEL_ID;
+    if (this.isPhone && !isPhoneChatModel(this.chatModelId)) this.chatModelId = DEFAULT_PHONE_CHAT_MODEL_ID;
     // Speech starts off on phones (less memory); Settings can turn it on
     if (this.isPhone && loadSpeechChoice() === null) this.speechEnabled = false;
   }

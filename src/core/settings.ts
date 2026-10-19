@@ -81,6 +81,11 @@ export const DEFAULT_PHONE_CHAT_MODEL_ID = 'qwen3-0.6b';
 /** Offered after a phone load dies (likely out of memory): the smallest memory footprint */
 export const SMALLEST_PHONE_CHAT_MODEL_ID = 'llama-3.2-1b';
 
+/** Whether phones offer (and keep) this chat model. */
+export function isPhoneChatModel(id: string): boolean {
+  return SUPPORTED_CHAT_MODELS.some((m) => m.id === id && m.phone);
+}
+
 export function findLocalChatModel(id: string): LocalChatModel | undefined {
   return LOCAL_CHAT_MODELS.find((m) => m.id === id);
 }
@@ -88,8 +93,10 @@ export function findLocalChatModel(id: string): LocalChatModel | undefined {
 export const SUPPORTED_CHAT_MODELS: ReadonlyArray<ModelOptionItem> = [
   {
     id: 'gemma-4-e2b-it-web',
-    name: 'Gemma 4 E2B (~1.95 GB, Fast)',
+    name: 'Gemma 4 E2B (~1.95 GB, Fast, Phone: may crash)',
     description: 'Fast, efficient WebGPU inference',
+    // Same Google LiteRT runtime as desktop; ~2 GB is near a phone tab's memory limit
+    phone: true,
   },
   {
     id: 'gemma-4-e4b-it-web',
