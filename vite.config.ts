@@ -2,6 +2,8 @@ import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+  // Deployed at https://www.mudberry.com/chatty/
+  base: '/chatty/',
   build: {
     rollupOptions: {
       input: {

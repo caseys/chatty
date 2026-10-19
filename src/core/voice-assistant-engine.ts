@@ -37,6 +37,11 @@ import type {
   SystemTelemetry,
 } from '../types/index.ts';
 
+const WELCOME_MESSAGE =
+  'Welcome to Chatty, I can do anything your browser can do. For example: ask me to make MIDI music, ' +
+  'use oscillators and other Web Audio tools, draw 3D scenes, animate motion, ' +
+  'look up things in Wikipedia or DuckDuckGo and more!';
+
 export interface VoiceAssistantEngineEvents {
   onStatusChange?: (statusText: string | null) => void;
   onStateChange?: (snapshot: CoordinatedStateSnapshot) => void;
@@ -455,6 +460,23 @@ export class VoiceAssistantEngine {
       this.isListening = true;
       this.stateCoordinator.setMicrophoneState('listening');
       this.events.onStatusChange?.('Listening for speech (VAD active)...');
+
+      // Greet on Start when the chat is empty (audio system is now set up)
+      if (!this.hasHistory()) {
+        const turnId = `welcome_${Date.now()}`;
+        const welcomeMsg: ConversationMessage = {
+          id: `msg_assistant_${turnId}`,
+          turnId,
+          role: 'assistant',
+          canonicalContent: WELCOME_MESSAGE,
+          speechReadyContent: WELCOME_MESSAGE,
+          timestamp: Date.now(),
+        };
+        this.memoryStore.addMessage(welcomeMsg);
+        this.events.onMessageCreated?.(welcomeMsg);
+        void this.persistState();
+        void this.orchestrator.speakOutOfTurn(WELCOME_MESSAGE);
+      }
     } catch {
       this.isListening = false;
       this.stateCoordinator.setMicrophoneState('unavailable');

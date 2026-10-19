@@ -593,7 +593,7 @@ export class ChattyAppController {
     roleSpan.className = 'msg-role';
     if (msg.role === 'assistant') {
       const avatarImg = document.createElement('img');
-      avatarImg.src = '/mascott.png';
+      avatarImg.src = `${import.meta.env.BASE_URL}mascott.png`;
       avatarImg.alt = 'Chatty';
       avatarImg.className = 'msg-avatar-mascot';
       roleSpan.appendChild(avatarImg);
@@ -962,7 +962,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   if ('serviceWorker' in navigator) {
     const registerSw = () => {
       navigator.serviceWorker
-        .register('/sw.js', { scope: '/' })
+        .register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL })
         .then((reg) => {
           console.debug('[Chatty PWA] Service Worker registered:', reg.scope);
         })

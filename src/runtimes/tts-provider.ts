@@ -185,8 +185,10 @@ async function ensureOpfsWorkerWritableSupport(): Promise<void> {
 }
 
 async function resolveOnnxWasmBase(): Promise<string> {
-  if (typeof self !== 'undefined' && self.location?.origin) {
-    const localCandidate = `${self.location.origin}/node_modules/onnxruntime-web/dist/`;
+  // Dev server only: production builds don't ship node_modules, and an SPA fallback answers
+  // the probe with index.html (200), which then fails to import as a module.
+  if (import.meta.env.DEV && typeof self !== 'undefined' && self.location?.origin) {
+    const localCandidate = `${self.location.origin}${import.meta.env.BASE_URL}node_modules/onnxruntime-web/dist/`;
     try {
       const check = await fetch(`${localCandidate}ort-wasm-simd-threaded.jsep.mjs`, {
         method: 'HEAD',

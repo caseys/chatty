@@ -66,7 +66,7 @@ async function ensureLiteRtLmWasmLoaded(fallbackCdnUrl = WASM_CDN_BASE): Promise
     // answers that probe with index.html (200), which then fails to import as a module.
     let resolvedBaseUrl = fallbackCdnUrl;
     if (import.meta.env.DEV && typeof self !== 'undefined' && self.location?.origin) {
-      const localCandidate = `${self.location.origin}/node_modules/@litert-lm/core/wasm`;
+      const localCandidate = `${self.location.origin}${import.meta.env.BASE_URL}node_modules/@litert-lm/core/wasm`;
       try {
         const check = await fetch(`${localCandidate}/${jsFileName}`, { method: 'HEAD' });
         if (check.ok) {

@@ -6,22 +6,25 @@
 
 const CACHE_NAME_APP = 'chatty-app-v3';
 
+// Base path the app is served from (e.g. '/chatty/'), derived from this worker's own URL.
+const BASE = new URL('./', self.location).pathname;
+
 const APP_SHELL_URLS = [
-  '/',
-  '/index.html',
-  '/debug.html',
-  '/manifest.webmanifest',
-  '/manifest.json',
-  '/mascott.png',
-  '/apple-touch-icon.png',
-  '/icons/icon.svg',
-  '/icons/icon-192.png',
-  '/icons/icon-512.png',
-  '/icons/icon-192-maskable.png',
-  '/icons/icon-512-maskable.png',
-  '/screenshots/screenshot-wide.png',
-  '/screenshots/screenshot-narrow.png',
-];
+  '',
+  'index.html',
+  'debug.html',
+  'manifest.webmanifest',
+  'manifest.json',
+  'mascott.png',
+  'apple-touch-icon.png',
+  'icons/icon.svg',
+  'icons/icon-192.png',
+  'icons/icon-512.png',
+  'icons/icon-192-maskable.png',
+  'icons/icon-512-maskable.png',
+  'screenshots/screenshot-wide.png',
+  'screenshots/screenshot-narrow.png',
+].map((path) => BASE + path);
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
@@ -88,16 +91,16 @@ self.addEventListener('fetch', (event) => {
           const cached = await cache.match(request);
           if (cached) return cached;
           if (url.pathname.includes('debug')) {
-            return (await cache.match('/debug.html')) || (await cache.match('/index.html'));
+            return (await cache.match(BASE + 'debug.html')) || (await cache.match(BASE + 'index.html'));
           }
-          return (await cache.match('/index.html')) || (await cache.match('/')) || Response.error();
+          return (await cache.match(BASE + 'index.html')) || (await cache.match(BASE)) || Response.error();
         })
     );
     return;
   }
 
-  // 4. Static Hashed Assets in /assets/ (Immutable Vite production chunks): Cache-First
-  if (url.pathname.startsWith('/assets/')) {
+  // 4. Static Hashed Assets in <base>/assets/ (Immutable Vite production chunks): Cache-First
+  if (url.pathname.startsWith(BASE + 'assets/')) {
     event.respondWith(
       caches.open(CACHE_NAME_APP).then(async (cache) => {
         const cached = await cache.match(request);
