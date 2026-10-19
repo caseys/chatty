@@ -187,7 +187,7 @@ export class VoiceAssistantEngine {
   private llmLoadTicket = 0;
   // Set once initialize() runs; settings saved before then only take effect when it does
   private started = false;
-  // Browser speech recognition instead of Whistle (phones, or ?stt=native)
+  // Browser speech recognition instead of Whistle (only with ?stt=native)
   private nativeStt: NativeSpeechRecognizer | null = null;
   /** Model that was loading when the previous page load died (likely out of memory), if any */
   previousLoadFailure: string | null = null;
@@ -505,7 +505,8 @@ export class VoiceAssistantEngine {
     const sttPref = params?.get('stt');
     const loadGapMs = Number(params?.get('gap') ?? (isConstrained ? 1500 : 0)) || 0;
     const gap = () => (loadGapMs > 0 ? new Promise<void>((r) => setTimeout(r, loadGapMs)) : Promise.resolve());
-    if ((sttPref ? sttPref === 'native' : isConstrained) && NativeSpeechRecognizer.isSupported()) {
+    // Whistle on every device; the browser's own recognizer only on request (?stt=native)
+    if (sttPref === 'native' && NativeSpeechRecognizer.isSupported()) {
       this.setupNativeStt();
     }
 
