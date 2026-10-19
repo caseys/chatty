@@ -165,6 +165,9 @@ export class VoiceActivityDetector {
 
 export class SharedAudioSubsystem {
   private audioCtx: AudioContext | null = null;
+  // Created before the mic was ever opened (typed input, a program): rebuilt once capture starts
+  private contextPredatesCapture = false;
+  private audioListenersInstalled = false;
   private outputAnalyser: AnalyserNode | null = null;
   private mediaStream: MediaStream | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
@@ -193,8 +196,8 @@ export class SharedAudioSubsystem {
     return this.audioCtx;
   }
 
-  async ensureAudioContext(): Promise<AudioContext> {
-    // 1. Configure iOS/WebKit AudioSession category for simultaneous full-duplex mic & speaker
+  /** iOS/WebKit: one audio session for simultaneous mic and speaker (set before mic or context). */
+  private configureAudioSession(): void {
     if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
       try {
         (navigator as any).audioSession.type = 'play-and-record';
@@ -202,6 +205,22 @@ export class SharedAudioSubsystem {
         console.debug('[AudioSubsystem] audioSession.type play-and-record not supported or failed:', err);
       }
     }
+  }
+
+  /** Closes the shared context so the next ensureAudioContext() makes a fresh one. */
+  private async replaceAudioContext(): Promise<void> {
+    const old = this.audioCtx;
+    if (!old) return;
+    this.stopAllPlaybackImmediately();
+    this.audioCtx = null;
+    this.outputAnalyser = null;
+    this.nextScheduledPlayTime = 0;
+    await old.close().catch(() => {});
+  }
+
+  async ensureAudioContext(): Promise<AudioContext> {
+    // 1. Configure iOS/WebKit AudioSession category for simultaneous full-duplex mic & speaker
+    this.configureAudioSession();
 
     if (!this.audioCtx) {
       const AudioContextCtor =
@@ -216,6 +235,7 @@ export class SharedAudioSubsystem {
       this.audioCtx = new AudioContextCtor({
         latencyHint: 'interactive',
       });
+      this.contextPredatesCapture = !this.mediaStream;
 
       // 3. Monitor audio hardware state transitions and mobile interruptions
       this.audioCtx.onstatechange = () => {
@@ -229,7 +249,10 @@ export class SharedAudioSubsystem {
       };
 
       // 4. Handle mobile device route changes (e.g. connecting / disconnecting AirPods/Bluetooth headsets)
-      if (typeof navigator !== 'undefined' && navigator.mediaDevices?.addEventListener) {
+      // (listeners use whichever context is current, so they're installed once)
+      const installListeners = !this.audioListenersInstalled;
+      this.audioListenersInstalled = true;
+      if (installListeners && typeof navigator !== 'undefined' && navigator.mediaDevices?.addEventListener) {
         navigator.mediaDevices.addEventListener('devicechange', async () => {
           console.debug('[AudioSubsystem] Audio devices changed (Bluetooth / headset route switch)');
           if (
@@ -242,7 +265,7 @@ export class SharedAudioSubsystem {
       }
 
       // 5. Handle app foregrounding on mobile (Safari/Chrome suspend AudioContext on screen lock/background)
-      if (typeof document !== 'undefined') {
+      if (installListeners && typeof document !== 'undefined') {
         document.addEventListener('visibilitychange', async () => {
           if (!document.hidden && this.audioCtx) {
             if (
@@ -318,7 +341,11 @@ export class SharedAudioSubsystem {
   }
 
   private async doStartMicrophoneCapture(): Promise<void> {
-    const ctx = await this.ensureAudioContext();
+    // Mic first, then the shared audio context, on every device. On iOS, opening the mic switches
+    // the audio session to voice processing (echo cancellation, often a new sample rate), and a
+    // context created before that can play silently. The mic, Whistle, Piper and programs all
+    // reuse one context.
+    this.configureAudioSession();
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -333,6 +360,9 @@ export class SharedAudioSubsystem {
       return;
     }
     this.mediaStream = stream;
+    // Same on every device: a context from before the mic opened is rebuilt once, then reused
+    if (this.audioCtx && this.contextPredatesCapture) await this.replaceAudioContext();
+    const ctx = await this.ensureAudioContext();
 
     // Track mute/unmute/ended handlers for mobile phone calls and OS interruptions
     const audioTrack = this.mediaStream.getAudioTracks()[0];
