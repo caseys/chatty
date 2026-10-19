@@ -5,6 +5,11 @@
 // ============================================================================
 
 const CACHE_NAME_APP = 'chatty-app-v3';
+// Version-pinned runtime code (LiteRT-LM, onnxruntime-web, piper-phonemize WASM/JS) from jsdelivr.
+// Pinned URLs never change, so cache-first keeps them available offline. Model weights are NOT here.
+const CACHE_NAME_CDN = 'chatty-cdn-v1';
+const isPinnedCdnRuntime = (url) =>
+  url.hostname === 'cdn.jsdelivr.net' && /^\/npm\/(@[^/]+\/)?[^/@]+@\d[^/]*\//.test(url.pathname);
 
 // Base path the app is served from (e.g. '/chatty/'), derived from this worker's own URL.
 const BASE = new URL('./', self.location).pathname;
@@ -44,7 +49,7 @@ self.addEventListener('activate', (event) => {
       caches.keys().then((keys) => {
         return Promise.all(
           keys
-            .filter((k) => k !== CACHE_NAME_APP)
+            .filter((k) => k !== CACHE_NAME_APP && k !== CACHE_NAME_CDN)
             .map((k) => caches.delete(k))
         );
       }),
@@ -58,7 +63,21 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
 
-  // 1. Never intercept cross-origin requests (e.g. HuggingFace, CDNs, external APIs)
+  // 0. Version-pinned runtime code from jsdelivr: Cache-First (needed for offline use)
+  if (isPinnedCdnRuntime(url)) {
+    event.respondWith(
+      caches.open(CACHE_NAME_CDN).then(async (cache) => {
+        const cached = await cache.match(request);
+        if (cached) return cached;
+        const response = await fetch(request);
+        if (response.ok) cache.put(request, response.clone()).catch(() => {});
+        return response;
+      })
+    );
+    return;
+  }
+
+  // 1. Never intercept other cross-origin requests (e.g. HuggingFace, external APIs)
   // Large model weights are streamed directly to OPFS / IndexedDB by Web Workers.
   // Buffering or cloning gigabyte-sized responses in a Service Worker causes severe memory bloat and reload stalls.
   if (url.origin !== self.location.origin) {
