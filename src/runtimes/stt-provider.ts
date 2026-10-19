@@ -8,6 +8,7 @@ import type {
   SupportedLanguage,
   TranscriptWord,
 } from '../types/index.ts';
+import { withActivity } from '../core/activity-breadcrumbs.ts';
 
 const WHISTLE_MODEL_URL =
   'https://huggingface.co/Cactus-Compute/whistle/resolve/b358ddadd89b7a713b5aa131f23032d3cca1b251/whistle.cact';
@@ -131,9 +132,23 @@ export class WhistleSttProvider implements SttRuntimeProvider {
     }
   }
 
-  async transcribe(
+  transcribe(
     samples: Float32Array,
     sampleRate = 16000,
+    language?: SupportedLanguage,
+    signal?: AbortSignal
+  ): Promise<{
+    text: string;
+    language: SupportedLanguage | '';
+    words?: TranscriptWord[];
+    latencyMs: number;
+  }> {
+    return withActivity('transcribing speech (Whistle)', () => this.transcribeNow(samples, sampleRate, language, signal));
+  }
+
+  private async transcribeNow(
+    samples: Float32Array,
+    sampleRate: number,
     language?: SupportedLanguage,
     signal?: AbortSignal
   ): Promise<{

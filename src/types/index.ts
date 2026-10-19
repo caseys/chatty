@@ -145,6 +145,8 @@ export interface SttEvent {
   durationMs?: number;
   rmsLevel?: number;
   error?: string;
+  /** Speech overlapped Chatty's own audio, so it may be its voice coming back through the mic */
+  heardDuringPlayback?: boolean;
 }
 
 // ============================================================================

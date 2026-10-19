@@ -14,6 +14,7 @@ import type {
 import { MODEL_REGISTRY } from '../core/model-manager.ts';
 import { LiteRtLlmProvider } from './llm-provider.ts';
 import { PiperTtsProvider } from './tts-provider.ts';
+import { withActivity } from '../core/activity-breadcrumbs.ts';
 
 const MAX_WORKER_RESPAWNS = 3;
 const RESPAWN_BACKOFF_BASE_MS = 500;
@@ -543,7 +544,21 @@ export class WorkerTtsProvider implements TtsRuntimeProvider {
     }
   }
 
-  async synthesize(
+  synthesize(
+    text: string,
+    turnId: string,
+    sequence: number,
+    signal?: AbortSignal
+  ): Promise<{
+    samples: Float32Array;
+    sampleRate: number;
+    synthesisTimeMs: number;
+    audioDurationMs: number;
+  }> {
+    return withActivity('speaking (Piper voice)', () => this.synthesizeNow(text, turnId, sequence, signal));
+  }
+
+  private async synthesizeNow(
     text: string,
     turnId: string,
     sequence: number,

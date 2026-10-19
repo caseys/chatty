@@ -172,6 +172,8 @@ export class SharedAudioSubsystem {
   private mediaStream: MediaStream | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private processorNode: ScriptProcessorNode | null = null;
+  /** Zero-gain output for the mic processor: it must be pulled by the graph to run, but nothing it outputs may reach the speakers */
+  private processorSink: GainNode | null = null;
   private vad: VoiceActivityDetector;
   private events: AudioSubsystemEvents;
 
@@ -417,8 +419,24 @@ export class SharedAudioSubsystem {
     };
 
     this.sourceNode.connect(this.processorNode);
-    this.processorNode.connect(ctx.destination);
+    this.processorSink = ctx.createGain();
+    this.processorSink.gain.value = 0;
+    this.processorNode.connect(this.processorSink).connect(ctx.destination);
     this.isCapturing = true;
+  }
+
+  /** What the browser actually applied to the mic (iOS can quietly ignore a requested setting). */
+  getMicrophoneSettings(): { echoCancellation?: boolean; noiseSuppression?: boolean; sampleRate?: number; contextRate?: number } | null {
+    const track = this.mediaStream?.getAudioTracks()[0];
+    if (!track) return null;
+    const settings = track.getSettings?.() ?? {};
+    return {
+      // Newer browsers may report "all" or "remote-only" instead of true
+      echoCancellation: settings.echoCancellation === undefined ? undefined : settings.echoCancellation !== false,
+      noiseSuppression: settings.noiseSuppression,
+      sampleRate: settings.sampleRate,
+      contextRate: this.audioCtx?.sampleRate,
+    };
   }
 
   stopMicrophoneCapture(): Float32Array | null {
@@ -451,6 +469,8 @@ export class SharedAudioSubsystem {
       this.processorNode.onaudioprocess = null;
       this.processorNode = null;
     }
+    this.processorSink?.disconnect();
+    this.processorSink = null;
     if (this.sourceNode) {
       this.sourceNode.disconnect();
       this.sourceNode = null;

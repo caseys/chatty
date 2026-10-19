@@ -8,6 +8,7 @@ import type { LlmRuntimeProvider, ToolDefinition } from '../types/index.ts';
 import { loopProtect } from './loop-protect.ts';
 import { playNotesHelper } from './music-tool.ts';
 import { fetchWikipediaSummary } from './web-tools.ts';
+import { withActivity } from '../core/activity-breadcrumbs.ts';
 
 export type JavascriptExecutionMode = 'iframe' | 'worker' | 'eval';
 
@@ -392,7 +393,11 @@ export class JavascriptRuntime {
    * Fully resets the visual screen: kills timers, rAF loops, audio and body-appended elements by
    * recreating the iframe document. Pending runs are settled with an error.
    */
-  async resetVisual(): Promise<void> {
+  resetVisual(): Promise<void> {
+    return withActivity('clearing the screen', () => this.resetVisualNow());
+  }
+
+  private async resetVisualNow(): Promise<void> {
     const hadIframe = Boolean(this.activeIframe);
     this.abortPendingRuns('Visual screen was cleared');
     this.silenceProgramAudio();
@@ -542,7 +547,16 @@ export class JavascriptRuntime {
    * Executes code using the active mode ('iframe', 'worker', or 'eval').
    * Supports an optional callback and ExecutionContextOptions (for speak, playNotes, etc.).
    */
-  async execute(
+  execute(
+    code: string,
+    callback?: JavascriptExecutionCallback,
+    execOptions?: ExecutionContextOptions,
+    modeOverride?: JavascriptExecutionMode
+  ): Promise<JavascriptExecutionResult> {
+    return withActivity('running the program', () => this.executeNow(code, callback, execOptions, modeOverride));
+  }
+
+  private async executeNow(
     code: string,
     callback?: JavascriptExecutionCallback,
     execOptions?: ExecutionContextOptions,

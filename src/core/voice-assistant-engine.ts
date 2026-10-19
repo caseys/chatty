@@ -26,6 +26,7 @@ import { createWikipediaTool, createInstantAnswersTool } from '../tools/web-tool
 import { NEEDLE_LABEL } from '../runtimes/needle-router.ts';
 import { MODEL_REGISTRY } from './model-manager.ts';
 import { WebLlmProvider } from '../runtimes/webllm-provider.ts';
+import { clearActivity, readInterruptedActivity } from './activity-breadcrumbs.ts';
 import {
   PHONE_CHAT_SYSTEM_PROMPT,
   PhoneModelSet,
@@ -193,6 +194,10 @@ export class VoiceAssistantEngine {
   // Every model load takes the next ticket; only the newest may mark the model ready or report
   // an error (a model switch in Settings supersedes a load that is still running)
   private llmLoadTicket = 0;
+  // Echo guard: when Chatty's audio last played, and when the current utterance began
+  private playbackActive = false;
+  private playbackLastActiveAt = 0;
+  private utteranceStartedAt = 0;
   // Set once initialize() runs; settings saved before then only take effect when it does
   private started = false;
   // Browser speech recognition instead of Whistle (only with ?stt=native)
@@ -241,6 +246,7 @@ export class VoiceAssistantEngine {
 
     this.audioSubsystem = new SharedAudioSubsystem({
       onSpeechStarted: () => {
+        this.utteranceStartedAt = performance.now();
         const turnId = `voice_turn_${Date.now()}_${++this.speechTurnCounter}`;
         this.events.onStatusChange?.('Speech detected — listening...');
         this.orchestrator.handleSttEvent({
@@ -260,7 +266,7 @@ export class VoiceAssistantEngine {
           timestamp: performance.now(),
           durationMs,
         });
-        void this.transcribeRecordedUtterance(turnId, utterance16k);
+        void this.transcribeRecordedUtterance(turnId, utterance16k, this.utteranceOverlappedPlayback());
       },
       onInputLevel: (rms) => {
         this.currentInputRms = rms;
@@ -350,6 +356,15 @@ export class VoiceAssistantEngine {
   async initialize(): Promise<void> {
     const startInit = performance.now();
     this.started = true;
+    // Track when Chatty's audio plays, for the echo guard (utteranceOverlappedPlayback)
+    this.stateCoordinator.subscribe((snap) => {
+      const playing = snap.playback === 'playing' || snap.playback === 'buffering';
+      if (playing) this.playbackActive = true;
+      else if (this.playbackActive) {
+        this.playbackActive = false;
+        this.playbackLastActiveAt = performance.now();
+      }
+    });
 
     // 1. Restore persisted memories & conversations from IndexedDB
     try {
@@ -456,6 +471,7 @@ export class VoiceAssistantEngine {
     // where the user chose what to load now; clear the record
     clearLlmLoadMarker();
     clearLoadFailure();
+    clearActivity();
     // The coder always shares the chat model (there's no separate picker). A stale divergent
     // codingModelId from older settings would load a second multi-GB model onto the GPU
     // alongside the chat model and crash the tab mid-load.
@@ -626,9 +642,10 @@ export class VoiceAssistantEngine {
 
     if (typeof window !== 'undefined') {
       window.addEventListener('pagehide', () => {
-        // A normal close/reload mid-load isn't an out-of-memory crash
+        // A normal close/reload mid-load (or mid-reply) isn't an out-of-memory crash
         clearLlmLoadMarker();
         clearLoadStage();
+        clearActivity();
         void this.dispose();
       });
     }
@@ -751,7 +768,7 @@ export class VoiceAssistantEngine {
       }
       this.isListening = true;
       this.stateCoordinator.setMicrophoneState('listening');
-      this.events.onStatusChange?.(this.nativeStt ? 'Listening…' : 'Listening for speech (VAD active)...');
+      this.events.onStatusChange?.(this.nativeStt ? 'Listening…' : this.listeningStatus());
 
       // Greet on Start when the chat is empty (audio system is now set up)
       if (!this.hasHistory()) {
@@ -786,9 +803,30 @@ export class VoiceAssistantEngine {
     return this.orchestrator.submitUserInput(text, { isVoiceTranscript: false });
   }
 
+  /** "Listening (echo cancellation on, mic 48 kHz)", from what the browser actually applied. */
+  private listeningStatus(): string {
+    const mic = this.audioSubsystem.getMicrophoneSettings();
+    console.info('[Chatty] microphone settings', mic);
+    if (!mic) return 'Listening…';
+    const echo =
+      mic.echoCancellation === undefined
+        ? 'echo cancellation unknown'
+        : `echo cancellation ${mic.echoCancellation ? 'on' : 'OFF'}`;
+    const rate = mic.sampleRate ?? mic.contextRate;
+    return `Listening (${echo}${rate ? `, mic ${Math.round(rate / 1000)} kHz` : ''})`;
+  }
+
+  /**
+   * True when Chatty's audio played during the utterance, or ended just before it began: what
+   * the mic heard may be Chatty's own voice (phone speakers defeat echo cancellation).
+   */
+  private utteranceOverlappedPlayback(): boolean {
+    return this.playbackActive || this.playbackLastActiveAt > this.utteranceStartedAt - 800;
+  }
+
   /** Shows a final transcript only if it will be sent (ignored ones and stop words aren't). */
-  private showFinalTranscript(text: string): void {
-    const action = classifyTranscript(text, this.orchestrator.isAssistantBusy());
+  private showFinalTranscript(text: string, heardDuringPlayback = false): void {
+    const action = classifyTranscript(text, this.orchestrator.isAssistantBusy(), heardDuringPlayback);
     this.events.onTranscript?.(action === 'submit' ? text : '', true);
   }
 
@@ -803,7 +841,8 @@ export class VoiceAssistantEngine {
 
   private async transcribeRecordedUtterance(
     turnId: string,
-    samples16k: Float32Array
+    samples16k: Float32Array,
+    heardDuringPlayback = false
   ): Promise<void> {
     try {
       this.stateCoordinator.setModelState('stt', 'initializing');
@@ -817,7 +856,7 @@ export class VoiceAssistantEngine {
 
       const text = result.text.trim();
       if (text) {
-        this.showFinalTranscript(text);
+        this.showFinalTranscript(text, heardDuringPlayback);
         this.orchestrator.handleSttEvent({
           type: 'final_transcript',
           turnId,
@@ -827,6 +866,7 @@ export class VoiceAssistantEngine {
           language: result.language,
           words: result.words,
           durationMs: result.latencyMs,
+          heardDuringPlayback,
         });
       } else {
         this.stateCoordinator.transitionInteraction('idle', null);
@@ -1372,8 +1412,8 @@ export class VoiceAssistantEngine {
   }
 
   /**
-   * Why the last visit's model load didn't finish, if it didn't: the page stopped mid-load
-   * (probably out of memory) or the load failed. Read before initialize(), which clears it.
+   * Why the last visit ended badly, if it did: the page stopped mid-load or mid-reply (probably
+   * out of memory), or a model load failed. Read before initialize(), which clears it.
    */
   getLastLoadProblem(): string | null {
     try {
@@ -1382,7 +1422,9 @@ export class VoiceAssistantEngine {
         return `Last time, loading ${stage ?? 'the model'} stopped the page (probably out of memory).`;
       }
       const failed = localStorage.getItem(LAST_LOAD_FAILED_KEY);
-      return failed ? `Last time, ${failed}.` : null;
+      if (failed) return `Last time, ${failed}.`;
+      const activity = readInterruptedActivity();
+      return activity ? `Last time, the page stopped while ${activity} (probably out of memory).` : null;
     } catch {
       return null;
     }

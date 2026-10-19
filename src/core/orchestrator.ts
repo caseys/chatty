@@ -36,6 +36,7 @@ import {
   JavascriptRuntime,
   inspectExecutableCode,
 } from '../tools/javascript-runtime.ts';
+import { withActivity } from './activity-breadcrumbs.ts';
 
 export interface OrchestratorEvents {
   onMessageCreated?: (message: ConversationMessage) => void;
@@ -116,14 +117,22 @@ const STOP_PHRASE = /^(?:stop|wait|cancel|pause|quiet|enough)(?: please)?$/;
 /**
  * What to do with a final transcript: drop it, stop the assistant, or send it as a request.
  * While the assistant is busy, a stray word (or a noise the recognizer turned into one) doesn't
- * interrupt it: that takes a stop word, or a request of two or more words.
+ * interrupt it: that takes a stop word, or a request of two or more words. Speech heard while
+ * Chatty's own audio was playing may be its voice coming back through the mic (phone speakers
+ * defeat echo cancellation), so then only a stop word counts.
  */
-export function classifyTranscript(text: string, assistantBusy: boolean): 'ignore' | 'stop' | 'submit' {
+export function classifyTranscript(
+  text: string,
+  assistantBusy: boolean,
+  heardDuringPlayback = false
+): 'ignore' | 'stop' | 'submit' {
   if (IGNORED_TRANSCRIPT.test(text)) return 'ignore';
   const words = text.toLowerCase().match(/[\p{L}\p{N}']+/gu) ?? [];
   if (words.length === 0) return 'ignore';
+  const isStop = STOP_PHRASE.test(words.join(' '));
+  if (heardDuringPlayback) return isStop ? 'stop' : 'ignore';
   if (!assistantBusy) return 'submit';
-  if (STOP_PHRASE.test(words.join(' '))) return 'stop';
+  if (isStop) return 'stop';
   return words.length >= 2 ? 'submit' : 'ignore';
 }
 
@@ -394,7 +403,7 @@ export class ConversationOrchestrator {
       }
 
       case 'final_transcript': {
-        const action = classifyTranscript(event.text ?? '', busy);
+        const action = classifyTranscript(event.text ?? '', busy, !!event.heardDuringPlayback);
         if (action === 'stop') {
           this.interruptCurrentTurn('User said stop');
         } else if (action === 'submit') {
@@ -774,7 +783,7 @@ export class ConversationOrchestrator {
         let stoppedRepeating = false;
         let repeatCheckedAt = 0;
 
-        const genResult = await generationProvider.generate({
+        const genResult = await withActivity('generating a reply', () => generationProvider.generate({
           turnId,
           systemPrompt,
           messages: promptMessages,
@@ -873,7 +882,7 @@ export class ConversationOrchestrator {
               }
             }
           },
-        });
+        }));
 
         if (generationProvider !== this.llmProvider) this.events.onStatusChange?.(null);
 

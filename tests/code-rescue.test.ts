@@ -84,3 +84,13 @@ describe('WebLLM thinking filter', () => {
     expect(withoutThinking('<b>bold</b>')).toBe('<b>bold</b>');
   });
 });
+
+describe('echo guard', () => {
+  it('only a stop word counts when speech overlapped Chatty speaking', async () => {
+    const { classifyTranscript } = await import('../src/core/orchestrator.ts');
+    expect(classifyTranscript('Here is a red circle on your screen.', true, true)).toBe('ignore');
+    expect(classifyTranscript('Here is a red circle on your screen.', false, true)).toBe('ignore');
+    expect(classifyTranscript('Stop!', true, true)).toBe('stop');
+    expect(classifyTranscript('Draw a dog', false, false)).toBe('submit');
+  });
+});
