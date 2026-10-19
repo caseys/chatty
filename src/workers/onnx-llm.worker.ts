@@ -31,6 +31,7 @@ type InboundMessage =
         temperature?: number;
         topP?: number;
         keepSpecialTokens?: boolean;
+        templateOptions?: Record<string, unknown>;
       };
     }
   | { id: string; type: 'interrupt' }
@@ -73,8 +74,9 @@ self.onmessage = async (ev: MessageEvent<InboundMessage>) => {
 
       case 'generate': {
         if (!tokenizer || !model) throw new Error('Model not initialized');
-        const { messages, tools, maxNewTokens, temperature, topP, keepSpecialTokens } = msg.payload;
+        const { messages, tools, maxNewTokens, temperature, topP, keepSpecialTokens, templateOptions } = msg.payload;
         const inputs = tokenizer.apply_chat_template(messages as never, {
+          ...templateOptions,
           tools: tools as never,
           add_generation_prompt: true,
           return_dict: true,

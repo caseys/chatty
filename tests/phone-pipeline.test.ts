@@ -4,18 +4,20 @@ import {
   detectActionIntent,
   isFollowUpEdit,
   parseDurationSeconds,
-  parseFunctionGemmaCall,
   PHONE_CHAT_SYSTEM_PROMPT,
+  PhoneModelSet,
   TurnRouter,
 } from '../src/core/phone-pipeline.ts';
 import { ConversationOrchestrator, programDraws } from '../src/core/orchestrator.ts';
 import { StateMachineCoordinator } from '../src/core/state-machine.ts';
+import type { PickedCall } from '../src/runtimes/needle-router.ts';
 import type { LlmGenerationOptions, LlmGenerationResult, LlmRuntimeProvider } from '../src/types/index.ts';
 
-/** Stand-in for the FunctionGemma OnnxLlmProvider: returns a canned raw completion. */
-function fakeRouterModel(text: string) {
-  return { generateRaw: async () => ({ text, tokens: 1, timeToFirstTokenMs: 1, totalTimeMs: 1, aborted: false }) } as never;
+/** Stand-in for the Needle tool picker: returns a canned pick (null = no tool). */
+function fakeRouterModel(pick: PickedCall | null) {
+  return { pick: async () => pick };
 }
+const shouldNotRun = { pick: async (): Promise<PickedCall | null> => { throw new Error('should not run'); } };
 
 class RecordingLlm implements LlmRuntimeProvider {
   readonly id = 'recording';
@@ -36,20 +38,6 @@ class RecordingLlm implements LlmRuntimeProvider {
   async reset(): Promise<void> {}
   async dispose(): Promise<void> {}
 }
-
-describe('FunctionGemma output parsing', () => {
-  it('parses escaped strings and numbers', () => {
-    expect(parseFunctionGemmaCall('<start_function_call>call:set_timer{message:<escape>Call mom<escape>,seconds:600}<end_function_call>')).toEqual({
-      name: 'set_timer',
-      args: { message: 'Call mom', seconds: 600 },
-    });
-  });
-
-  it('parses calls without arguments and rejects prose', () => {
-    expect(parseFunctionGemmaCall('<start_function_call>call:chat{}<end_function_call>')).toEqual({ name: 'chat', args: {} });
-    expect(parseFunctionGemmaCall('I cannot help with that.')).toBeNull();
-  });
-});
 
 describe('duration parsing', () => {
   it('reads durations from the user’s words', () => {
@@ -99,7 +87,7 @@ describe('follow-ups', () => {
     }
   });
   it('continues the previous action', async () => {
-    const router = new TurnRouter({ generateRaw: async () => { throw new Error('should not run'); } } as never);
+    const router = new TurnRouter(shouldNotRun);
     const lastCode = { kind: 'code' as const, task: 'draw a red circle', code: 'speak("ok")' };
     expect(await router.route('make it bigger', undefined, lastCode)).toEqual({ kind: 'code', task: 'make it bigger', edit: true });
     const lastLookup = { kind: 'tool' as const, name: 'search_wikipedia', args: { query: 'Lima' } };
@@ -113,7 +101,7 @@ describe('follow-ups', () => {
 
 describe('TurnRouter validation', () => {
   it('trusts the spoken duration over the model’s arithmetic', async () => {
-    const router = new TurnRouter(fakeRouterModel('call:set_timer{message:<escape>Oven<escape>,seconds:600}<end_function_call>'));
+    const router = new TurnRouter(fakeRouterModel({ name: 'set_timer', args: { message: 'Oven', seconds: 600 } }));
     expect(await router.route('Set a timer for 2 minutes to check the oven')).toEqual({
       kind: 'tool',
       name: 'set_timer',
@@ -123,32 +111,32 @@ describe('TurnRouter validation', () => {
 
   it('uses the user’s words when the coder task echoes the tool description', async () => {
     const router = new TurnRouter(
-      fakeRouterModel('call:coder_agent{task:<escape>write and run JavaScript for drawings, games, animations<escape>}<end_function_call>')
+      fakeRouterModel({ name: 'coder_agent', args: { task: 'write and run JavaScript for drawings, games, animations' } })
     );
     expect(await router.route('make a snake game')).toEqual({ kind: 'code', task: 'make a snake game' });
   });
 
   it('keeps the intent and uses the user’s words when the router misfires', async () => {
-    expect(await new TurnRouter(fakeRouterModel('text: "garbled"')).route('Who was Ada Lovelace?')).toEqual({
+    expect(await new TurnRouter(fakeRouterModel(null)).route('Who was Ada Lovelace?')).toEqual({
       kind: 'tool',
-      name: 'search_wikipedia',
+      name: 'web_search',
       args: { query: 'Ada Lovelace' },
     });
-    // Argument copied from a few-shot example, not from the request
-    expect(await new TurnRouter(fakeRouterModel('call:coder_agent{task:<escape>play a happy tune<escape>}')).route('play twinkle twinkle little star')).toEqual({
+    // Argument not taken from the request
+    expect(await new TurnRouter(fakeRouterModel({ name: 'coder_agent', args: { task: 'play a happy tune' } })).route('play twinkle twinkle little star')).toEqual({
       kind: 'code',
       task: 'play twinkle twinkle little star',
     });
   });
 
   it('never calls the router model for plain chat', async () => {
-    const router = new TurnRouter({ generateRaw: async () => { throw new Error('should not run'); } } as never);
+    const router = new TurnRouter(shouldNotRun);
     expect(await router.route('how are you')).toEqual({ kind: 'chat' });
   });
 });
 
 describe('Orchestrator phone pipeline', () => {
-  const makeOrchestrator = (routerOutput: string) => {
+  const makeOrchestrator = (routerPick: PickedCall | null) => {
     const chat = new RecordingLlm('chat', 'Doing great, thanks for asking!');
     const coder = new RecordingLlm('coder', 'speak("Here is your drawing.");');
     const orchestrator = new ConversationOrchestrator({
@@ -162,14 +150,14 @@ describe('Orchestrator phone pipeline', () => {
     orchestrator.configurePhonePipeline({
       chat,
       coder,
-      router: new TurnRouter(fakeRouterModel(routerOutput)),
+      router: new TurnRouter(fakeRouterModel(routerPick)),
       chatSystemPrompt: PHONE_CHAT_SYSTEM_PROMPT,
     });
     return { orchestrator, chat, coder };
   };
 
   it('chat turns use the prose prompt on the chat model', async () => {
-    const { orchestrator, chat, coder } = makeOrchestrator('call:chat{}');
+    const { orchestrator, chat, coder } = makeOrchestrator(null);
     const msg = await orchestrator.submitUserInput('how are you?');
     expect(chat.calls).toHaveLength(1);
     expect(chat.calls[0].systemPrompt).toContain('plain text');
@@ -178,7 +166,7 @@ describe('Orchestrator phone pipeline', () => {
   });
 
   it('timer turns answer without any model generation', async () => {
-    const { orchestrator, chat, coder } = makeOrchestrator('call:set_timer{seconds:600}');
+    const { orchestrator, chat, coder } = makeOrchestrator({ name: 'set_timer', args: { seconds: 600 } });
     const msg = await orchestrator.submitUserInput('set a timer for 2 minutes');
     expect(chat.calls).toHaveLength(0);
     expect(coder.calls).toHaveLength(0);
@@ -192,7 +180,7 @@ describe('Orchestrator phone pipeline', () => {
   });
 
   it('coder_agent turns send the task to the coder model', async () => {
-    const { orchestrator, chat, coder } = makeOrchestrator('call:coder_agent{task:<escape>draw a red circle<escape>}');
+    const { orchestrator, chat, coder } = makeOrchestrator({ name: 'coder_agent', args: { task: 'draw a red circle' } });
     const msg = await orchestrator.submitUserInput('draw a red circle');
     expect(chat.calls).toHaveLength(0);
     expect(coder.calls).toHaveLength(1);
@@ -214,7 +202,7 @@ describe('Orchestrator phone pipeline', () => {
     orchestrator.configurePhonePipeline({
       chat,
       coder,
-      router: new TurnRouter(fakeRouterModel('call:coder_agent{task:<escape>draw a red circle<escape>}')),
+      router: new TurnRouter(fakeRouterModel({ name: 'coder_agent', args: { task: 'draw a red circle' } })),
       chatSystemPrompt: PHONE_CHAT_SYSTEM_PROMPT,
     });
     await orchestrator.submitUserInput('draw a red circle');
@@ -225,5 +213,33 @@ describe('Orchestrator phone pipeline', () => {
       { role: 'assistant', content: 'root.innerHTML = "<b>circle</b>"; speak("Done.");' },
       { role: 'user', content: 'make it bigger' },
     ]);
+  });
+});
+
+describe('PhoneModelSet', () => {
+  it('keeps Needle loaded and never holds chat and coder at once', async () => {
+    const set = new PhoneModelSet();
+    const loaded = new Set<string>();
+    const order: string[] = [];
+    let gpuPeak = 0;
+    for (const key of ['needle', 'chat', 'coder'] as const) {
+      const model = set[key] as unknown as { isLoaded: boolean; initialize: () => Promise<void>; dispose: () => Promise<void> };
+      let isLoaded = false;
+      Object.defineProperty(model, 'isLoaded', { get: () => isLoaded });
+      model.initialize = async () => {
+        isLoaded = true;
+        loaded.add(key);
+        order.push(key);
+        gpuPeak = Math.max(gpuPeak, ['chat', 'coder'].filter((k) => loaded.has(k)).length);
+      };
+      model.dispose = async () => { isLoaded = false; loaded.delete(key); };
+    }
+    await set.activate('chat');
+    expect(order).toEqual(['needle', 'chat']);
+    await set.activate('coder');
+    expect([...loaded].sort()).toEqual(['coder', 'needle']);
+    await set.activate('chat');
+    expect([...loaded].sort()).toEqual(['chat', 'needle']);
+    expect(gpuPeak).toBe(1);
   });
 });

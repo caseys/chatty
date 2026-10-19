@@ -18,6 +18,23 @@ export function isTalkOnly(code: string): boolean {
 }
 
 /**
+ * One line describing a past program for the system prompt, or null for replies that only talk
+ * (those stay in the message history as they were). Programs are described instead of shown:
+ * small models copy whatever their past replies look like, so a summary line in the history
+ * teaches them to reply with a summary line instead of a program.
+ */
+export function describePastProgram(msg: ConversationMessage, userAsk: string): string | null {
+  const code = msg.rawCode || msg.rawLlmOutput || '';
+  if (!code || isTalkOnly(code)) return null;
+  const said = (msg.canonicalContent || '').trim();
+  // Short programs that don't draw stay in the history as they were (they are good examples)
+  if (!programDraws(code) && code.length <= Math.max(200, said.length * 2 + 20)) return null;
+  const did = programDraws(code) ? 'built something on screen' : 'ran a program';
+  const ask = userAsk ? `"${userAsk.slice(0, 120)}"` : 'a request';
+  return `- ${ask}: you ${did} (${code.split('\n').length} lines)${said ? ` and said "${said.slice(0, 120)}"` : ''}.`;
+}
+
+/**
  * A past assistant reply as the code-writing model should see it: what it said, as a speak()
  * call (keeping the code-only reply format), plus a summary line instead of any program body.
  */

@@ -4,6 +4,8 @@
 // and Piper ONNX Voice choice with localStorage & IndexedDB persistence.
 // ============================================================================
 
+import type { OnnxModelSpec } from '../runtimes/onnx-llm-provider.ts';
+
 export interface ChattySettings {
   chatModelId: string;
   codingModelId: string;
@@ -15,6 +17,98 @@ export interface ModelOptionItem {
   id: string;
   name: string;
   description: string;
+  /** Small enough for a phone browser tab */
+  phone?: boolean;
+}
+
+/** Chat models run with Transformers.js (ONNX on WebGPU) instead of LiteRT; the only ones phones get. */
+export interface OnnxChatModel extends ModelOptionItem, OnnxModelSpec {
+  label: string;
+  sizeBytes: number;
+}
+
+export const ONNX_CHAT_MODELS: ReadonlyArray<OnnxChatModel> = [
+  {
+    id: 'qwen2.5-coder-0.5b',
+    label: 'Qwen2.5-Coder 0.5B',
+    name: 'Qwen2.5-Coder 0.5B (~555 MB, Phone)',
+    description: 'Smallest model tuned for JavaScript',
+    repo: 'onnx-community/Qwen2.5-Coder-0.5B-Instruct',
+    dtype: 'q4f16',
+    contextLimit: 8192,
+    maxOutputTokens: 1536,
+    sizeBytes: 555_000_000,
+    phone: true,
+  },
+  {
+    id: 'qwen3-0.6b',
+    label: 'Qwen3 0.6B',
+    name: 'Qwen3 0.6B (~570 MB, Phone)',
+    description: 'Newer general model that also codes',
+    repo: 'onnx-community/Qwen3-0.6B-ONNX',
+    dtype: 'q4f16',
+    contextLimit: 8192,
+    maxOutputTokens: 1536,
+    sizeBytes: 570_000_000,
+    phone: true,
+    // Answer directly instead of writing a <think> block first
+    templateOptions: { enable_thinking: false },
+  },
+  {
+    id: 'qwen2.5-0.5b',
+    label: 'Qwen2.5 0.5B',
+    name: 'Qwen2.5 0.5B (~483 MB, Phone)',
+    description: 'Smallest general model',
+    repo: 'onnx-community/Qwen2.5-0.5B-Instruct',
+    dtype: 'q4f16',
+    contextLimit: 8192,
+    maxOutputTokens: 1536,
+    sizeBytes: 483_000_000,
+    phone: true,
+  },
+  {
+    id: 'lfm2-1.2b',
+    label: 'LFM2 1.2B',
+    name: 'LFM2 1.2B (~760 MB, Phone)',
+    description: 'Liquid AI on-device model',
+    repo: 'onnx-community/LFM2-1.2B-ONNX',
+    dtype: 'q4f16',
+    contextLimit: 8192,
+    maxOutputTokens: 1536,
+    sizeBytes: 760_000_000,
+    phone: true,
+  },
+  {
+    id: 'gemma-3-1b',
+    label: 'Gemma 3 1B',
+    name: 'Gemma 3 1B (~763 MB, Phone)',
+    description: 'Google on-device chat model',
+    repo: 'onnx-community/gemma-3-1b-it-ONNX',
+    dtype: 'q4f16',
+    contextLimit: 8192,
+    maxOutputTokens: 1536,
+    sizeBytes: 763_000_000,
+    phone: true,
+  },
+  {
+    id: 'qwen2.5-coder-1.5b',
+    label: 'Qwen2.5-Coder 1.5B',
+    name: 'Qwen2.5-Coder 1.5B (~1.34 GB, Code-focused)',
+    description: 'Strong at JavaScript, plainer conversation',
+    repo: 'onnx-community/Qwen2.5-Coder-1.5B-Instruct',
+    dtype: 'q4f16',
+    contextLimit: 8192,
+    maxOutputTokens: 1536,
+    sizeBytes: 1_344_000_000,
+  },
+];
+
+export const DEFAULT_PHONE_CHAT_MODEL_ID = 'qwen2.5-0.5b';
+/** Tried after a phone load dies (likely out of memory) */
+export const SMALLEST_PHONE_CHAT_MODEL_ID = 'qwen2.5-0.5b';
+
+export function findOnnxChatModel(id: string): OnnxChatModel | undefined {
+  return ONNX_CHAT_MODELS.find((m) => m.id === id);
 }
 
 export const SUPPORTED_CHAT_MODELS: ReadonlyArray<ModelOptionItem> = [
@@ -28,6 +122,7 @@ export const SUPPORTED_CHAT_MODELS: ReadonlyArray<ModelOptionItem> = [
     name: 'Gemma 4 E4B (~2.89 GB, High Quality)',
     description: 'High quality, larger context reasoning',
   },
+  ...ONNX_CHAT_MODELS.map(({ id, name, description, phone }) => ({ id, name, description, phone })),
 ];
 
 export const SUPPORTED_CODING_MODELS: ReadonlyArray<ModelOptionItem> = [

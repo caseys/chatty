@@ -24,7 +24,7 @@ import {
   stripToolCallMarkup,
 } from './speech-normalizer.ts';
 import { StateMachineCoordinator } from './state-machine.ts';
-import { compactAssistantContent, isTalkOnly, programDraws } from './history-format.ts';
+import { describePastProgram, isTalkOnly, programDraws } from './history-format.ts';
 import {
   isFollowUpEdit,
   runReadyTool,
@@ -41,6 +41,8 @@ export interface OrchestratorEvents {
   onMessageCreated?: (message: ConversationMessage) => void;
   onMessageUpdated?: (message: ConversationMessage) => void;
   onTokenStream?: (turnId: string, token: string, canonicalSoFar: string) => void;
+  /** The model's raw output so far for this turn, exactly as generated */
+  onRawOutput?: (turnId: string, rawSoFar: string) => void;
   onPhraseReadyForPlayback?: (phrase: PhraseSegment) => Promise<void> | void;
   onInterruption?: (canceledTurnId: string, preservedCanonicalText: string) => void;
   onTelemetryUpdated?: (telemetry: SystemTelemetry) => void;
@@ -89,81 +91,124 @@ export const COMPACTION_SYSTEM_PROMPT = [
 
 export { programDraws } from './history-format.ts';
 
+/**
+ * Where a degenerate repeat loop starts in streamed output (keeping the first copy), or -1:
+ * the same line four times in a row, or the same phrase four times back to back.
+ */
+export function repetitionCutIndex(text: string): number {
+  const start = Math.max(0, text.length - 600);
+  const tail = text.slice(start);
+  const byLine = tail.match(/(^|\n)([^\n]*[A-Za-z][^\n]*)(?:\n+\2){3,}\n?[^\n]*$/);
+  if (byLine && byLine.index !== undefined && byLine[2].trim().length >= 6) {
+    return start + byLine.index + byLine[1].length + byLine[2].length;
+  }
+  const inline = tail.match(/([^\n]{8,120}?)\1{3,}[^\n]*$/);
+  if (inline && inline.index !== undefined && /[A-Za-z]/.test(inline[1])) {
+    return start + inline.index + inline[1].length;
+  }
+  return -1;
+}
+
 export const CONCISE_VOICE_SYSTEM_PROMPT = [
-  'You are Chatty, an autonomous AI voice and browser assistant whose ONLY output is executable JavaScript.',
-  'UNIVERSAL BROWSER CAPABILITY: You interact with the user and the browser through code execution.',
-  'CRITICAL INSTRUCTIONS:',
-  '1. Your ENTIRE response must be valid, executable JavaScript. Never output raw markdown, conversational chatter, or explanations outside of JavaScript.',
-  '2. To speak or show text to the user in the chat, call: speak("your response message");',
-  '   You can call speak() multiple times or with computed values: speak(`The result is ${answer}`);',
-  '3. DRAWING & SCREEN VISUALS: You have a transparent, full-window screen layer (root and document.body). You can render ANY valid HTML or browser-parsable element:',
-  '   - Canvas 2D & WebGL: <canvas> for drawings, 2D art, 3D scenes, animations, and simulations.',
-  '   - SVG Vector Graphics: <svg> with <path>, <circle>, <rect>, <polygon>, <linearGradient> for crisp scalable diagrams, icons, and vector illustrations.',
-  '   - Any HTML/DOM elements: <div>, <section>, <table>, <progress>, <meter>, <button>, <input>, <h1>-<h6>, <p>, <span> with modern CSS for cards, sticky notes, banners, gauges, dashboards, or interactive widgets.',
-  '   - To clear the screen when asked: root.innerHTML = ""; speak("Cleared your screen.");',
-  '   - The screen is wiped before each new program runs. To change something already on screen, output the complete updated program, not just the change.',
-  '4. To play sound, music melodies, or MIDI chords, call: await playNotes("C4 E4 G4 C5", 200);',
-  '5. To look up factual encyclopedia topics, call: const info = await searchWikipedia("topic"); speak(info.summary);',
-  '6. NEVER mention code, JavaScript, or programming to the user in speak(). Never ask "would you like that code?". Fulfill every request directly as a live working browser application.',
-  '7. Output ONLY JavaScript code. Never wrap in markdown code blocks unless writing pure JS.',
-  '',
-  'FEW-SHOT EXAMPLES:',
-  '',
-  'Example 1 - Conversation / Chit-Chat:',
-  'User: Hello! How are you today?',
-  'Assistant:',
-  'speak("Hello! I am doing well, ready to help you with anything in your browser.");',
-  '',
-  'Example 2 - Playing Music / MIDI notes:',
-  'User: Play 20 random MIDI notes',
-  'Assistant:',
-  'speak("Playing 20 random notes for you.");',
-  'const scale = ["C4", "D4", "E4", "F4", "G4", "A4", "B4", "C5", "D5", "E5"];',
-  'const notes = Array.from({ length: 20 }, () => scale[Math.floor(Math.random() * scale.length)]).join(" ");',
-  'await playNotes(notes, 200);',
-  '',
-  'Example 3 - Visual graphics / Canvas:',
-  'User: Draw a colorful spiral on screen',
-  'Assistant:',
-  'speak("I drew that on your screen.");',
-  'const canvas = document.createElement("canvas");',
-  'canvas.width = 400;',
-  'canvas.height = 300;',
-  'canvas.style.cssText = "border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,0.4);background:rgba(15,23,42,0.8);";',
-  'root.innerHTML = "";',
-  'root.appendChild(canvas);',
-  'const ctx = canvas.getContext("2d");',
-  'for (let i = 0; i < 200; i++) {',
-  '  const angle = 0.1 * i;',
-  '  const x = 200 + (1 + angle) * Math.cos(angle) * 1.5;',
-  '  const y = 150 + (1 + angle) * Math.sin(angle) * 1.5;',
-  '  ctx.beginPath();',
-  '  ctx.arc(x, y, 3, 0, Math.PI * 2);',
-  '  ctx.fillStyle = `hsl(${i * 2}, 80%, 60%)`;',
-  '  ctx.fill();',
-  '}',
-  '',
-  'Example 4 - Drawing a DOM div / card on screen:',
-  'User: Put a floating sticky note on screen reminding me to buy groceries',
-  'Assistant:',
-  'speak("I added a sticky note to your screen.");',
-  'const note = document.createElement("div");',
-  'note.style.cssText = "position:fixed;top:80px;right:40px;background:#fef08a;color:#713f12;padding:16px 20px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.3);font-family:sans-serif;font-weight:600;max-width:240px;z-index:10;";',
-  'note.innerHTML = "📌 Reminder<br><span style=\'font-weight:400;font-size:14px;display:block;margin-top:6px;\'>• Buy groceries</span>";',
-  'root.appendChild(note);',
-  '',
-  'Example 5 - Clearing the screen:',
-  'User: Clear the screen',
-  'Assistant:',
-  'root.innerHTML = "";',
-  'speak("Cleared your screen.");',
-  '',
-  'Example 6 - Knowledge Lookup:',
-  'User: Who was Ada Lovelace?',
-  'Assistant:',
-  'const info = await searchWikipedia("Ada Lovelace");',
-  'speak(info.summary);',
+  "You are Chatty, a voice assistant that acts by writing JavaScript. Your reply runs as a program in the user's browser, immediately and exactly as written.",
+  'Rules:',
+  '1. Reply with JavaScript only: no markdown fences, no explanation before or after it.',
+  '2. Act first: do what was asked (draw, build, play, compute, look up) as a live, working browser app, then tell the user what you did with speak("...").',
+  '3. speak(text) talks to the user; plain conversation is just speak(). It accepts computed values: speak(`The total is ${total}.`). Never mention code, JavaScript or programming in what you say, and never offer code.',
+  '4. The page (document.body) is a transparent, full-window layer. Use <canvas> for visuals: drawings, art, animations, games and simulations (2D or WebGL). Use HTML and CSS for interfaces: buttons, forms, cards, notes, tables, gauges, dashboards and widgets. <svg> works for diagrams and icons.',
+  '   The screen is wiped before each new program runs: to change something already on screen, write the complete updated program, not just the change. To clear it: document.body.innerHTML = "";',
+  '5. For sound and music, use the Web Audio API: create an AudioContext and await ctx.resume() before scheduling notes.',
+  '6. Answer what you know directly. To look up facts you don\'t know, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it, not the whole text.',
+  '7. Calculate numbers in code instead of guessing them.',
+  '8. If you define a function, call it.',
 ].join('\n');
+
+/**
+ * Example exchanges sent as real chat turns before the conversation (small models follow the
+ * chat format far better than examples written into the instructions). Requests are specific
+ * so they aren't copied word for word, and each reply acts before it speaks.
+ */
+export const EXAMPLE_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content: string }> = [
+  { role: 'user', content: 'Good morning! Any tips for staying focused today?' },
+  { role: 'assistant', content: 'speak("Morning! Work in short focused bursts with a quick break in between, and keep your phone out of reach.");' },
+  { role: 'user', content: "What's 15 percent of 2,340?" },
+  { role: 'assistant', content: 'const result = 2340 * 0.15;\nspeak(`15 percent of 2,340 is ${result}.`);' },
+  { role: 'user', content: 'Play the opening of Ode to Joy, slowly' },
+  {
+    role: 'assistant',
+    content: [
+      'const ctx = new AudioContext();',
+      'await ctx.resume();',
+      '// MIDI note numbers: 60 is middle C, +1 per semitone',
+      'const tune = [64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62];',
+      'const beat = 0.6;',
+      'tune.forEach((note, i) => {',
+      '  const start = ctx.currentTime + i * beat;',
+      '  const osc = ctx.createOscillator();',
+      '  const gain = ctx.createGain();',
+      '  osc.frequency.value = 440 * 2 ** ((note - 69) / 12);',
+      '  gain.gain.setValueAtTime(0.2, start);',
+      '  gain.gain.exponentialRampToValueAtTime(0.001, start + beat);',
+      '  osc.connect(gain).connect(ctx.destination);',
+      '  osc.start(start);',
+      '  osc.stop(start + beat);',
+      '});',
+      'speak("Playing the opening of Ode to Joy.");',
+    ].join('\n'),
+  },
+  { role: 'user', content: 'Draw a night sky with a crescent moon' },
+  {
+    role: 'assistant',
+    content: [
+      'const canvas = document.createElement("canvas");',
+      'canvas.width = 480;',
+      'canvas.height = 320;',
+      'canvas.style.cssText = "border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,0.4);";',
+      'document.body.appendChild(canvas);',
+      'const ctx = canvas.getContext("2d");',
+      'ctx.fillStyle = "#0b1026";',
+      'ctx.fillRect(0, 0, canvas.width, canvas.height);',
+      'for (let i = 0; i < 120; i++) {',
+      '  ctx.fillStyle = `rgba(255,255,255,${Math.random()})`;',
+      '  ctx.fillRect(Math.random() * canvas.width, Math.random() * canvas.height, 2, 2);',
+      '}',
+      'ctx.fillStyle = "#fde68a";',
+      'ctx.beginPath();',
+      'ctx.arc(360, 90, 40, 0, Math.PI * 2);',
+      'ctx.fill();',
+      'ctx.fillStyle = "#0b1026";',
+      'ctx.beginPath();',
+      'ctx.arc(378, 80, 36, 0, Math.PI * 2);',
+      'ctx.fill();',
+      'speak("Here is a starry night with a crescent moon.");',
+    ].join('\n'),
+  },
+  { role: 'user', content: 'Show a ten second countdown' },
+  {
+    role: 'assistant',
+    content: [
+      'const box = document.createElement("div");',
+      'box.style.cssText = "position:fixed;top:80px;right:40px;padding:16px 28px;border-radius:12px;background:#1e293b;color:#f8fafc;font:600 40px sans-serif;box-shadow:0 10px 30px rgba(0,0,0,0.3);";',
+      'document.body.appendChild(box);',
+      'let left = 10;',
+      'box.textContent = left;',
+      'const tick = setInterval(() => {',
+      '  left -= 1;',
+      '  box.textContent = left;',
+      '  if (left === 0) {',
+      '    clearInterval(tick);',
+      '    speak("Time is up!");',
+      '  }',
+      '}, 1000);',
+      'speak("Counting down from ten.");',
+    ].join('\n'),
+  },
+  { role: 'user', content: 'Tell me about the Eiffel Tower' },
+  {
+    role: 'assistant',
+    content: 'const res = await fetch("https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent("Eiffel Tower"));\nconst page = await res.json();\nspeak(page.extract.split(". ").slice(0, 2).join(". "));',
+  },
+];
 
 export class ConversationOrchestrator {
   readonly stateCoordinator: StateMachineCoordinator;
@@ -235,7 +280,7 @@ export class ConversationOrchestrator {
   }
 
   /**
-   * Switches to the phone pipeline: `chat` writes prose replies, `router` (FunctionGemma) picks
+   * Switches to the phone pipeline: `chat` writes prose replies, `router` (Needle) picks
    * a ready-made tool, coder_agent (JavaScript written by `coder`) or plain chat for each turn.
    */
   configurePhonePipeline(config: {
@@ -478,7 +523,7 @@ export class ConversationOrchestrator {
     this.events.onMessageCreated?.(userMsg);
 
     // Stage 4: Choose a response mode (direct, clarification, verification, tool_execution)
-    // Phone pipeline routes with FunctionGemma instead of keyword-matched tool execution
+    // Phone pipeline routes with Needle instead of keyword-matched tool execution
     const responseMode = this.phonePipeline
       ? 'direct'
       : this.selectResponseMode(normalized, resolvedContext.workingMessages);
@@ -695,6 +740,12 @@ export class ConversationOrchestrator {
         // Phone chat model replies in prose only; only the coder's output is run as code
         const forceProse = !!this.phonePipeline && generationProvider !== this.phonePipeline.coder;
         let streamMode: 'unknown' | 'code' | 'prose' = forceProse ? 'prose' : 'unknown';
+        // Small models can fall into repeating one line forever: stop generating when they do
+        const generationAbort = new AbortController();
+        const abortGeneration = () => generationAbort.abort();
+        signal.addEventListener('abort', abortGeneration, { once: true });
+        let stoppedRepeating = false;
+        let repeatCheckedAt = 0;
 
         const genResult = await generationProvider.generate({
           turnId,
@@ -702,13 +753,28 @@ export class ConversationOrchestrator {
           messages: promptMessages,
           temperature: 0.1,
           maxOutputTokens: generationProvider.maxOutputTokens,
-          signal,
+          signal: generationAbort.signal,
           tools: Array.from(this.tools.values()),
           onToken: (chunk) => {
-            if (!this.scheduler.isTurnValid(turnId)) return;
+            if (!this.scheduler.isTurnValid(turnId) || stoppedRepeating) return;
 
             rawAccumulatedTokens += chunk;
+            if (rawAccumulatedTokens.length - repeatCheckedAt >= 40) {
+              repeatCheckedAt = rawAccumulatedTokens.length;
+              const cut = repetitionCutIndex(rawAccumulatedTokens);
+              if (cut >= 0) {
+                stoppedRepeating = true;
+                rawAccumulatedTokens = rawAccumulatedTokens.slice(0, cut);
+                if (streamMode === 'prose') {
+                  assistantMsg.canonicalContent = rawAccumulatedTokens;
+                  this.events.onMessageUpdated?.({ ...assistantMsg });
+                }
+                generationAbort.abort();
+                return;
+              }
+            }
             const currentFull = rawAccumulatedTokens;
+            this.events.onRawOutput?.(turnId, currentFull);
 
             if (streamMode === 'unknown') {
               const hasCodeSignature =
@@ -732,6 +798,11 @@ export class ConversationOrchestrator {
               }
             }
 
+            if (streamMode === 'prose' && currentFull.includes('```')) {
+              // Explanation followed by a code block: the code runs once the reply is complete;
+              // stop voicing here so it isn't read aloud
+              streamMode = 'code';
+            }
             if (streamMode === 'prose') {
               assistantMsg.canonicalContent += chunk;
               this.events.onTokenStream?.(turnId, chunk, assistantMsg.canonicalContent);
@@ -779,8 +850,9 @@ export class ConversationOrchestrator {
 
         if (generationProvider !== this.llmProvider) this.events.onStatusChange?.(null);
 
+        signal.removeEventListener('abort', abortGeneration);
         // Discard stale results if turn was canceled during generation
-        if (!this.scheduler.isTurnValid(turnId) || genResult.aborted) {
+        if (!this.scheduler.isTurnValid(turnId) || (genResult.aborted && !stoppedRepeating)) {
           return assistantMsg;
         }
 
@@ -1618,19 +1690,31 @@ export class ConversationOrchestrator {
       );
     }
 
-    const systemPrompt = systemParts.join('\n');
-    const promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
+    // Code-writing models see the example exchanges first (the phone chat model writes prose)
+    const promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> =
+      this.phonePipeline ? [] : EXAMPLE_TURNS.map((t) => ({ ...t }));
+    const pastPrograms: string[] = [];
 
     for (const msg of context.workingMessages) {
       if (msg.role === 'assistant') {
-        // Phone chat model sees what was said, not generated code (it would imitate the code).
-        // Desktop sees past programs summarized, except the one being edited, in full.
+        // Past programs leave the message history (with the request that asked for them) and are
+        // described in the system prompt, except the one being edited, which is shown in full.
+        // Phone chat model (split pipeline) sees only what was said.
+        if (!this.phonePipeline && !(programBeingEdited && msg.rawCode === programBeingEdited)) {
+          const prev = promptMessages[promptMessages.length - 1];
+          const described = describePastProgram(msg, prev?.role === 'user' ? prev.content : '');
+          if (described) {
+            if (prev?.role === 'user') promptMessages.pop();
+            pastPrograms.push(described);
+            continue;
+          }
+        }
         const content = (
           this.phonePipeline
             ? msg.canonicalContent || ''
             : programBeingEdited && msg.rawCode === programBeingEdited
               ? msg.rawCode
-              : compactAssistantContent(msg)
+              : msg.rawCode || msg.canonicalContent || ''
         )
           .replace(/\s*\[Interrupted\]\s*$/, '')
           .trim();
@@ -1660,6 +1744,12 @@ export class ConversationOrchestrator {
       content: userMessage,
     });
 
+    if (pastPrograms.length > 0) {
+      systemParts.push(
+        `Programs you ran earlier in this conversation (write a complete new program for each request):\n${pastPrograms.slice(-8).join('\n')}`
+      );
+    }
+    const systemPrompt = systemParts.join('\n');
     return { systemPrompt, promptMessages };
   }
 

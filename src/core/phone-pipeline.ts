@@ -1,28 +1,22 @@
 // ============================================================================
 // Phone pipeline: small ONNX models that fit a mobile browser tab.
 //
-//   FunctionGemma 270M  routes every turn: a ready-made tool, coder_agent, or chat
-//   Gemma 3 1B          writes spoken replies (prose only)
-//   Qwen2.5-Coder 1.5B  writes JavaScript for coder_agent tasks
+//   Needle 3 (35 MB, CPU)  picks a ready-made tool or coder_agent on turns that ask for an action
+//   Gemma 3 1B             writes spoken replies (prose only)
+//   Qwen2.5-Coder 1.5B     writes JavaScript for coder_agent tasks
 //
-// Router + chat stay resident together (~1.35 GB). The coder is swapped in alone: the
-// conversation models are unloaded first and reloaded (from the browser cache) on the
-// next turn, so the tab never holds more than one large model's worth of memory.
+// Safari kills tabs near ~1.5 GB, so only one WebGPU model is in memory at a time: the coder
+// is swapped in alone (chat is unloaded first) and chat reloads from the browser cache on the
+// next turn. Needle is small and runs on the CPU, so it stays loaded throughout.
 // ============================================================================
 
+import type { JsonSchema, Tool } from 'cactus-needle/browser';
 import { OnnxLlmProvider, type OnnxModelSpec } from '../runtimes/onnx-llm-provider.ts';
+import { NEEDLE_LABEL, NeedleToolPicker, type PickedCall } from '../runtimes/needle-router.ts';
 import { fetchWikipediaSummary } from '../tools/web-tools.ts';
 import type { LlmGenerationOptions, LlmGenerationResult, LlmRuntimeProvider } from '../types/index.ts';
 
-export const PHONE_MODEL_SPECS: Record<'router' | 'chat' | 'chatSmall' | 'coder', OnnxModelSpec & { label: string }> = {
-  router: {
-    label: 'FunctionGemma 270M',
-    repo: 'onnx-community/functiongemma-270m-it-ONNX',
-    // 4-bit weights garble this tiny model; fp16 keeps its tool calls well-formed
-    dtype: 'fp16',
-    contextLimit: 4096,
-    maxOutputTokens: 64,
-  },
+export const PHONE_MODEL_SPECS: Record<'chat' | 'chatSmall' | 'coder', OnnxModelSpec & { label: string }> = {
   chat: {
     label: 'Gemma 3 1B',
     repo: 'onnx-community/gemma-3-1b-it-ONNX',
@@ -34,7 +28,7 @@ export const PHONE_MODEL_SPECS: Record<'router' | 'chat' | 'chatSmall' | 'coder'
   chatSmall: {
     label: 'Gemma 3 270M',
     repo: 'onnx-community/gemma-3-270m-it-ONNX',
-    // Like FunctionGemma (same 270M base), 4-bit weights degrade it badly
+    // 4-bit weights degrade this tiny model badly
     dtype: 'fp16',
     contextLimit: 8192,
     maxOutputTokens: 256,
@@ -54,7 +48,7 @@ export const PHONE_CHAT_SYSTEM_PROMPT = [
   'No markdown, lists, code, emojis or stage directions.',
 ].join(' ');
 
-type Group = 'conversation' | 'coder';
+type Group = 'chat' | 'coder';
 
 /** Progress summed across a group's models, plus the model currently loading and its own bytes. */
 export type PhoneProgress = (
@@ -63,9 +57,9 @@ export type PhoneProgress = (
   current?: { label: string; loaded: number; total: number }
 ) => void;
 
-/** Owns the three phone models and keeps only one group in memory at a time. */
+/** Owns the phone models: Needle stays loaded; chat and coder take turns on the GPU. */
 export class PhoneModelSet {
-  readonly router = new OnnxLlmProvider('functiongemma-270m', PHONE_MODEL_SPECS.router);
+  readonly needle = new NeedleToolPicker(ROUTER_TOOLS);
   readonly chat: OnnxLlmProvider;
   readonly chatSpec: (typeof PHONE_MODEL_SPECS)['chat'];
   readonly coder = new OnnxLlmProvider('qwen2.5-coder-1.5b', PHONE_MODEL_SPECS.coder);
@@ -74,7 +68,7 @@ export class PhoneModelSet {
 
   /**
    * @param options.smallChat use Gemma 3 270M instead of 1B for chat
-   * @param options.loadGapMs pause between model loads, giving the browser time to settle memory
+   * @param options.loadGapMs pause between unloading one model and loading the next
    * @param options.onModelLoadStart called as each model starts loading (crash diagnostics)
    */
   constructor(
@@ -94,40 +88,32 @@ export class PhoneModelSet {
   }
 
   /**
-   * Loads a group, unloading the other first. Models within a group load one after another.
-   * onProgress reports bytes summed across the group's models.
+   * Loads chat or coder, unloading the other first. The first chat load also loads Needle
+   * (before chat, one at a time); onProgress reports bytes summed across both.
    */
   activate(group: Group, onProgress?: PhoneProgress): Promise<void> {
     const run = async () => {
-      if (group === 'coder') {
-        await this.router.dispose();
-        await this.chat.dispose();
-        this.active = 'coder';
-        await this.gap();
-        this.options.onModelLoadStart?.(PHONE_MODEL_SPECS.coder.label);
-        await this.coder.initialize((loaded, total) =>
-          onProgress?.(loaded, total, { label: PHONE_MODEL_SPECS.coder.label, loaded, total })
-        );
-        return;
+      const model = group === 'chat' ? this.chat : this.coder;
+      const other = group === 'chat' ? this.coder : this.chat;
+      const freed = other.isLoaded;
+      await other.dispose();
+      this.active = group;
+      let needleBytes = 0;
+      if (group === 'chat' && !this.needle.isLoaded) {
+        this.options.onModelLoadStart?.(NEEDLE_LABEL);
+        await this.needle.initialize((loaded, total) => {
+          needleBytes = total;
+          onProgress?.(loaded, total, { label: NEEDLE_LABEL, loaded, total });
+        });
+        if (!model.isLoaded) await this.gap();
       }
-      await this.coder.dispose();
-      this.active = 'conversation';
-      let routerBytes = { loaded: 0, total: 0 };
-      if (!this.router.isLoaded) this.options.onModelLoadStart?.(PHONE_MODEL_SPECS.router.label);
-      await this.router.initialize((loaded, total) => {
-        routerBytes = { loaded, total };
-        onProgress?.(loaded, total, { label: PHONE_MODEL_SPECS.router.label, loaded, total });
-      });
-      if (!this.chat.isLoaded) {
-        await this.gap();
-        this.options.onModelLoadStart?.(this.chatSpec.label);
-      }
-      await this.chat.initialize((loaded, total) =>
-        onProgress?.(routerBytes.total + loaded, routerBytes.total + total, {
-          label: this.chatSpec.label,
-          loaded,
-          total,
-        })
+      if (model.isLoaded) return;
+      // Give the browser a moment to reclaim the unloaded model's memory
+      if (freed) await this.gap();
+      const label = group === 'chat' ? this.chatSpec.label : PHONE_MODEL_SPECS.coder.label;
+      this.options.onModelLoadStart?.(label);
+      await model.initialize((loaded, total) =>
+        onProgress?.(needleBytes + loaded, needleBytes + total, { label, loaded, total })
       );
     };
     const next = this.switching.then(run, run);
@@ -140,7 +126,7 @@ export class PhoneModelSet {
   }
 
   async dispose(): Promise<void> {
-    await Promise.all([this.router.dispose(), this.chat.dispose(), this.coder.dispose()]);
+    await Promise.all([this.needle.dispose(), this.chat.dispose(), this.coder.dispose()]);
     this.active = null;
   }
 }
@@ -182,7 +168,6 @@ export class SwappingLlmProvider implements LlmRuntimeProvider {
   }
 
   cancel(turnId?: string): void {
-    this.set.router.cancel();
     this.set.chat.cancel();
     this.set.coder.cancel();
     void turnId;
@@ -196,7 +181,7 @@ export class SwappingLlmProvider implements LlmRuntimeProvider {
 }
 
 // ----------------------------------------------------------------------------
-// FunctionGemma router
+// Needle router
 // ----------------------------------------------------------------------------
 
 export type RouteDecision =
@@ -205,57 +190,25 @@ export type RouteDecision =
   | { kind: 'code'; task: string; edit?: boolean }
   | { kind: 'tool'; name: 'set_timer' | 'search_wikipedia' | 'web_search'; args: Record<string, unknown> };
 
-// No "chat" tool: base FunctionGemma always calls *something*, so plain chat is decided by
-// detectActionIntent() before the router runs.
-const ROUTER_TOOLS = [
-  fn('set_timer', 'Start a countdown timer or reminder', {
+// Tools Needle picks from. Plain chat is decided by detectActionIntent() before Needle runs.
+const ROUTER_TOOLS = {
+  set_timer: tool('Start a countdown timer or reminder', {
     seconds: { type: 'number', description: 'Duration in seconds' },
     message: { type: 'string', description: 'Reminder text' },
   }, ['seconds']),
-  fn('search_wikipedia', 'Look up facts about a specific named person, place, organization or event', {
+  search_wikipedia: tool('Look up facts about a specific named person, place, organization or event', {
     query: { type: 'string', description: 'Name to look up' },
   }, ['query']),
-  fn('web_search', 'Look up a quick fact, unit conversion or definition', {
+  web_search: tool('Look up a quick fact, unit conversion or definition', {
     query: { type: 'string', description: 'Search query' },
   }, ['query']),
-  fn('coder_agent', 'Draw, make a game, animate, build a widget or chart, or play music or sounds', {
+  coder_agent: tool('Draw, make a game, animate, build a widget or chart, or play music or sounds', {
     task: { type: 'string', description: "The user's request" },
   }, ['task']),
-];
+};
 
-function fn(name: string, description: string, properties: Record<string, unknown>, required: string[]) {
-  return { type: 'function', function: { name, description, parameters: { type: 'object', properties, required } } };
-}
-
-const call = (s: string) => ({ role: 'assistant', content: `<start_function_call>${s}<end_function_call>` });
-// Few-shot examples steer the base model (it is meant to be fine-tuned; this is the cheap substitute)
-const ROUTER_SHOTS = [
-  { role: 'user', content: 'remind me in 10 minutes to call mom' },
-  call('call:set_timer{message:<escape>Call mom<escape>,seconds:600}'),
-  { role: 'user', content: 'who is Taylor Swift' },
-  call('call:search_wikipedia{query:<escape>Taylor Swift<escape>}'),
-  { role: 'user', content: 'draw a red spiral' },
-  call('call:coder_agent{task:<escape>draw a red spiral<escape>}'),
-  { role: 'user', content: 'how many ounces in a pound' },
-  call('call:web_search{query:<escape>ounces in a pound<escape>}'),
-  { role: 'user', content: 'play a happy tune' },
-  call('call:coder_agent{task:<escape>play a happy tune<escape>}'),
-]
-
-/** Parses FunctionGemma's `call:name{key:<escape>text<escape>,key:42}` output. */
-export function parseFunctionGemmaCall(text: string): { name: string; args: Record<string, unknown> } | null {
-  const m = text.match(/call:(\w+)\{([\s\S]*?)\}(?:<end_function_call>|$)/);
-  if (!m) return null;
-  const args: Record<string, unknown> = {};
-  const body = m[2];
-  const re = /(\w+):(?:<escape>([\s\S]*?)<escape>|([^,}]*))/g;
-  let a: RegExpExecArray | null;
-  while ((a = re.exec(body))) {
-    const raw = a[2] ?? a[3] ?? '';
-    const num = Number(raw);
-    args[a[1]] = a[2] === undefined && raw.trim() !== '' && Number.isFinite(num) ? num : raw.trim();
-  }
-  return { name: m[1], args };
+function tool(description: string, properties: Record<string, JsonSchema>, required: string[]): Tool {
+  return { description, inputSchema: { type: 'object', properties, required } };
 }
 
 /** Duration spoken in the user's words ("2 minutes", "an hour and 30 seconds"), in seconds. */
@@ -299,8 +252,8 @@ export function isFollowUpEdit(text: string): boolean {
 }
 
 /**
- * Cheap keyword gate run before FunctionGemma. Requests with no action words are plain chat
- * (the base model can't decline to call a tool), which also skips the router's latency.
+ * Cheap keyword gate run before Needle. Requests with no action words are plain chat, and the
+ * intent it finds is a safety net for Needle's pick (see TurnRouter.validate).
  */
 export function detectActionIntent(text: string): ActionIntent | null {
   const t = text.toLowerCase();
@@ -341,10 +294,10 @@ function queryFromText(text: string): string {
 }
 
 export class TurnRouter {
-  constructor(private readonly router: OnnxLlmProvider) {}
+  constructor(private readonly picker: Pick<NeedleToolPicker, 'pick'>) {}
 
   async route(userText: string, signal?: AbortSignal, last?: LastAction | null): Promise<RouteDecision> {
-    // Follow-ups continue the previous action (FunctionGemma sees only the current message)
+    // Follow-ups continue the previous action (Needle sees only the current message)
     if (last?.kind === 'code' && isFollowUpEdit(userText)) {
       return { kind: 'code', task: userText, edit: true };
     }
@@ -355,32 +308,24 @@ export class TurnRouter {
 
     const intent = detectActionIntent(userText);
     if (!intent) return { kind: 'chat' };
-    let decision: { name: string; args: Record<string, unknown> } | null = null;
-    try {
-      const res = await this.router.generateRaw({
-        messages: [
-          { role: 'developer', content: 'You are a model that can do function calling with the following functions' },
-          ...ROUTER_SHOTS,
-          { role: 'user', content: userText },
-        ],
-        tools: ROUTER_TOOLS,
-        keepSpecialTokens: true,
-        maxNewTokens: 64,
-        signal,
-      });
-      decision = parseFunctionGemmaCall(res.text);
-    } catch (err) {
-      console.warn('[Chatty Router] FunctionGemma failed; falling back to chat:', err);
+    let decision: PickedCall | null = null;
+    // Needle can't be cancelled mid-call, but it answers in well under a second
+    if (!signal?.aborted) {
+      try {
+        decision = await this.picker.pick(userText);
+      } catch (err) {
+        console.warn('[Chatty Router] Needle failed; using the keyword intent:', err);
+      }
     }
     return this.validate(decision, userText, intent);
   }
 
   /**
    * Repairs the router's pick using the user's own words: the keyword intent decides the tool
-   * family, FunctionGemma only refines it (Wikipedia vs web search, timer message, cleaned query).
+   * family, Needle only refines it (Wikipedia vs web search, timer message, cleaned query).
    */
   private validate(
-    decision: { name: string; args: Record<string, unknown> } | null,
+    decision: PickedCall | null,
     userText: string,
     intent: ActionIntent
   ): RouteDecision {
@@ -398,7 +343,9 @@ export class TurnRouter {
         return { kind: 'code', task: fromUser(task) ? task : userText };
       }
       case 'lookup': {
-        const name = decision?.name === 'web_search' ? 'web_search' : 'search_wikipedia';
+        // Needle reliably picks Wikipedia for named people and places; anything else goes to
+        // web search (instant answers for conversions and quick facts, then Wikipedia)
+        const name = decision?.name === 'search_wikipedia' ? 'search_wikipedia' : 'web_search';
         const query = decision && (decision.name === 'web_search' || decision.name === 'search_wikipedia')
           ? str(decision.args.query)
           : '';

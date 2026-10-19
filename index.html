@@ -104,13 +104,14 @@
               <!-- Chat Model Selection -->
               <div class="settings-field">
                 <label for="select-chat-model" class="settings-label">
-                  <span class="settings-label-title">Chat Gemma Model</span>
+                  <span class="settings-label-title">Chat Model</span>
                   <span class="settings-label-desc">Primary conversational model</span>
                 </label>
                 <div class="settings-select-wrapper">
                   <select id="select-chat-model" class="settings-select">
                     <option value="gemma-4-e2b-it-web">Gemma 4 E2B (~1.95 GB, Fast)</option>
                     <option value="gemma-4-e4b-it-web">Gemma 4 E4B (~2.89 GB, High Quality)</option>
+                    <option value="qwen2.5-coder-1.5b">Qwen2.5-Coder 1.5B (~1.34 GB, Code-focused)</option>
                   </select>
                 </div>
               </div>
@@ -150,27 +151,19 @@
         </dialog>
       </div>
 
-      <section class="minimal-section" aria-label="Voice Input">
-        <canvas
-          id="input-waveform"
-          class="minimal-waveform"
-          width="360"
-          height="48"
-          aria-label="Input waveform preview"
-        ></canvas>
-        <div id="input-result-text" class="minimal-input-text scroller" aria-live="polite"></div>
-      </section>
-
-      <section class="minimal-section" aria-label="Voice Output">
-        <canvas
-          id="output-waveform"
-          class="minimal-waveform"
-          width="360"
-          height="48"
-          aria-label="Output waveform preview"
-        ></canvas>
-        <div id="output-text" class="minimal-output-text scroller" aria-live="polite"></div>
-      </section>
+      <div class="chat-workspace">
+        <section class="chat-panel" aria-label="Conversation">
+          <div id="chat-log" class="chat-log scroller" aria-live="polite"></div>
+          <div class="chat-waveforms">
+            <canvas id="input-waveform" class="chat-waveform" width="160" height="24" aria-label="Microphone level"></canvas>
+            <canvas id="output-waveform" class="chat-waveform" width="160" height="24" aria-label="Voice output level"></canvas>
+          </div>
+        </section>
+        <section class="raw-panel" aria-label="Raw model output">
+          <div class="raw-panel-title">Model output</div>
+          <pre id="raw-output" class="raw-output scroller"></pre>
+        </section>
+      </div>
 
       <footer class="context-meter-container" aria-label="Status and Resource Usage">
         <div id="minimal-status" class="minimal-status" aria-live="polite">Pulling local models…</div>
@@ -183,7 +176,6 @@
           <div id="context-meter-threshold" class="context-meter-threshold" title="Auto-compaction threshold (85%)"></div>
         </div>
         <p id="load-failure-note" class="keep-awake-hint" role="status" hidden></p>
-        <p id="keep-awake-hint" class="keep-awake-hint" role="status" hidden>Keep this screen on until loading finishes — the phone sleeping can stop it.</p>
       </footer>
 
       <!-- Full-window rootless drawing & visual DOM layer (transparent, click-through) -->

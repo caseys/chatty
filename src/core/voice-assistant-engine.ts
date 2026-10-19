@@ -23,10 +23,11 @@ import {
 import { createPlayMusicTool } from '../tools/music-tool.ts';
 import { createDrawGraphicsTool } from '../tools/draw-tool.ts';
 import { createWikipediaTool, createInstantAnswersTool } from '../tools/web-tools.ts';
+import { NEEDLE_LABEL } from '../runtimes/needle-router.ts';
 import { MODEL_REGISTRY } from './model-manager.ts';
+import { OnnxLlmProvider } from '../runtimes/onnx-llm-provider.ts';
 import {
   PHONE_CHAT_SYSTEM_PROMPT,
-  PHONE_MODEL_SPECS,
   PhoneModelSet,
   SwappingLlmProvider,
   TurnRouter,
@@ -34,6 +35,11 @@ import {
 import {
   type ChattySettings,
   DEFAULT_SETTINGS,
+  DEFAULT_PHONE_CHAT_MODEL_ID,
+  findOnnxChatModel,
+  SMALLEST_PHONE_CHAT_MODEL_ID,
+  SUPPORTED_CHAT_MODELS,
+  type ModelOptionItem,
   loadSettingsFromStorage,
   saveSettingsToStorage,
 } from './settings.ts';
@@ -106,6 +112,7 @@ export interface VoiceAssistantEngineEvents {
   onStateChange?: (snapshot: CoordinatedStateSnapshot) => void;
   onTranscript?: (text: string, isFinal: boolean) => void;
   onTokenStream?: (turnId: string, chunk: string, fullText: string) => void;
+  onRawOutput?: (turnId: string, rawSoFar: string) => void;
   onMessageCreated?: (message: ConversationMessage) => void;
   onMessageUpdated?: (message: ConversationMessage) => void;
   onTelemetryUpdated?: (telemetry: SystemTelemetry) => void;
@@ -156,6 +163,11 @@ export class VoiceAssistantEngine {
   private sidebarOpen: boolean = DEFAULT_SETTINGS.sidebarOpen;
   private codingLlmProvider: WorkerLlmProvider | null = null;
   private phoneModels: PhoneModelSet | null = null;
+  // Chat model when an ONNX model is picked (always on phones); else Gemma 4 via llmProvider
+  private onnxChat: OnnxLlmProvider | null = null;
+  private isPhone = false;
+  // Set once initialize() runs; settings saved before then only take effect when it does
+  private started = false;
   // Browser speech recognition instead of Whistle (phones, or ?stt=native)
   private nativeStt: NativeSpeechRecognizer | null = null;
   /** Model that was loading when the previous page load died (likely out of memory), if any */
@@ -255,6 +267,9 @@ export class VoiceAssistantEngine {
         onTokenStream: (turnId, chunk, fullText) => {
           this.events.onTokenStream?.(turnId, chunk, fullText);
         },
+        onRawOutput: (turnId, raw) => {
+          this.events.onRawOutput?.(turnId, raw);
+        },
         onPhraseReadyForPlayback: async (phrase) => {
           if (phrase.audioSamples && phrase.sampleRate) {
             await this.audioSubsystem.schedulePcmPlayback(phrase.audioSamples, phrase.sampleRate);
@@ -306,6 +321,7 @@ export class VoiceAssistantEngine {
 
   async initialize(): Promise<void> {
     const startInit = performance.now();
+    this.started = true;
 
     // 1. Restore persisted memories & conversations from IndexedDB
     try {
@@ -335,14 +351,26 @@ export class VoiceAssistantEngine {
         this.conversations.set(initialChat.id, initialChat);
         await this.modelManager.db.saveConversation(initialChat);
       } else {
-        const storedActiveId =
-          typeof localStorage !== 'undefined'
-            ? localStorage.getItem('chatty_active_chat_id')
-            : null;
-        if (storedActiveId && this.conversations.has(storedActiveId)) {
-          this.activeConversationId = storedActiveId;
-        } else {
-          this.activeConversationId = savedConvos[0].id;
+        // Every page load starts a fresh chat (earlier ones stay in the sidebar); an empty
+        // chat left from a previous load is reused instead of piling up new ones
+        let fresh = savedConvos.find((c) => c.messages.length === 0 && !c.summary);
+        if (!fresh) {
+          fresh = {
+            id: `chat_${Date.now()}`,
+            title: 'New Chat',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            messages: [],
+            summary: null,
+          };
+          this.conversations.set(fresh.id, fresh);
+          await this.modelManager.db.saveConversation(fresh);
+        }
+        this.activeConversationId = fresh.id;
+        try {
+          localStorage.setItem('chatty_active_chat_id', fresh.id);
+        } catch {
+          // ignore
         }
       }
 
@@ -382,9 +410,14 @@ export class VoiceAssistantEngine {
     }
 
     const isConstrained = caps.deviceProfile === 'constrained_mobile';
-    // Phones can't hold E4B: a mobile tab is killed long before device RAM runs out.
-    if (isConstrained && this.chatModelId !== recommended.llmModelId) {
-      this.chatModelId = recommended.llmModelId;
+    this.isPhone = isConstrained;
+    // Phones work like desktop with a phone-sized model: a mobile tab is killed long before
+    // device RAM runs out, so Gemma 4 is never loaded there. ?pipeline=split keeps the older
+    // router + chat + coder phone pipeline for comparison.
+    const splitPipeline =
+      isConstrained && typeof location !== 'undefined' && new URLSearchParams(location.search).get('pipeline') === 'split';
+    if (isConstrained && !findOnnxChatModel(this.chatModelId)?.phone) {
+      this.chatModelId = DEFAULT_PHONE_CHAT_MODEL_ID;
     }
 
     // Crash-loop guard: the marker is set while the LLM loads and cleared once it settles. If it
@@ -393,9 +426,7 @@ export class VoiceAssistantEngine {
     this.previousLoadFailure = takeLoadStage();
     const crashedLoad = readLlmLoadMarker();
     if (crashedLoad) {
-      if (this.chatModelId !== recommended.fallbackLlmModelId) {
-        this.chatModelId = recommended.fallbackLlmModelId;
-      }
+      this.chatModelId = isConstrained ? SMALLEST_PHONE_CHAT_MODEL_ID : recommended.fallbackLlmModelId;
       this.events.onStatusChange?.(
         'The last model load ran out of memory; retrying with the smaller model.'
       );
@@ -456,20 +487,22 @@ export class VoiceAssistantEngine {
         'WebGPU is required for Gemma 4 local inference. Please use Chrome, Edge, or Safari with WebGPU enabled.'
       );
     } else {
-      // Phones run small ONNX models (FunctionGemma router + Gemma 3 1B chat, Qwen coder on demand)
-      let startupLlm: LlmRuntimeProvider = this.llmProvider;
-      if (isConstrained) {
-        this.phoneModels = new PhoneModelSet({
+      this.useOnnxChat(splitPipeline ? null : this.chatModelId);
+      let startupLlm: LlmRuntimeProvider = this.chatLlm;
+      // ?pipeline=split: Needle router (CPU) + Gemma 3 1B chat, Qwen coder swapped in
+      if (splitPipeline) {
+        const phoneModels = new PhoneModelSet({
           smallChat: params?.get('chat') === '270m',
           loadGapMs,
           onModelLoadStart: writeLoadStage,
         });
-        const chat = new SwappingLlmProvider(this.phoneModels, this.phoneModels.chat, 'conversation');
-        const coder = new SwappingLlmProvider(this.phoneModels, this.phoneModels.coder, 'coder');
+        this.phoneModels = phoneModels;
+        const chat = new SwappingLlmProvider(phoneModels, phoneModels.chat, 'chat');
+        const coder = new SwappingLlmProvider(phoneModels, phoneModels.coder, 'coder');
         this.orchestrator.configurePhonePipeline({
           chat,
           coder,
-          router: new TurnRouter(this.phoneModels.router),
+          router: new TurnRouter(phoneModels.needle),
           chatSystemPrompt: PHONE_CHAT_SYSTEM_PROMPT,
         });
         startupLlm = chat;
@@ -610,20 +643,23 @@ export class VoiceAssistantEngine {
 
   /** Approximate startup LLM download size (bytes), before the download reports its own total. */
   getStartupLlmExpectedBytes(): number {
-    if (this.phoneModels) return 570_000_000 + (this.phoneModels.chatSpec.dtype === 'fp16' ? 570_000_000 : 784_000_000);
+    if (this.onnxChat) return findOnnxChatModel(this.onnxChat.modelId)?.sizeBytes ?? 600_000_000;
+    if (this.phoneModels) return 35_300_000 + (this.phoneModels.chatSpec.dtype === 'fp16' ? 570_000_000 : 764_000_000);
     return MODEL_REGISTRY.find((m) => m.id === this.chatModelId)?.expectedSizeBytes ?? 2_008_432_640;
   }
 
   /** Startup models in load order, as the UI labels them ("Loading model N of M"). */
   getStartupModelOrder(): string[] {
     const speech = this.nativeStt ? ['Piper voice'] : ['Piper voice', 'Whistle speech recognition'];
-    if (this.phoneModels) return [...speech, PHONE_MODEL_SPECS.router.label, this.phoneModels.chatSpec.label];
+    if (this.phoneModels) return [...speech, NEEDLE_LABEL, this.phoneModels.chatSpec.label];
+    if (this.isPhone) return [...speech, this.getLlmDisplayName()];
     return [this.getLlmDisplayName(), ...speech];
   }
 
   /** Name of the model(s) loading/answering, for status text. */
   getLlmDisplayName(): string {
-    if (this.phoneModels) return `${PHONE_MODEL_SPECS.router.label} + ${this.phoneModels.chatSpec.label}`;
+    if (this.phoneModels) return this.phoneModels.chatSpec.label;
+    if (this.onnxChat) return findOnnxChatModel(this.onnxChat.modelId)?.label ?? this.onnxChat.modelId;
     return this.chatModelId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B';
   }
 
@@ -799,7 +835,7 @@ export class VoiceAssistantEngine {
   }
 
   getContextUsage(): { usedTokens: number; contextLimit: number; percentage: number } {
-    const limit = this.llmProvider.contextLimit || 8192;
+    const limit = this.chatLlm.contextLimit || 8192;
     const used = this.memoryStore.getCurrentContextTokens();
     const percentage = Math.min(100, Math.round((used / limit) * 100));
     return { usedTokens: used, contextLimit: limit, percentage };
@@ -1119,6 +1155,28 @@ export class VoiceAssistantEngine {
     saveSettingsToStorage({ sidebarOpen: open });
   }
 
+  /** The model answering turns on desktop: Gemma 4 (LiteRT), or Qwen2.5-Coder when picked. */
+  private get chatLlm(): LlmRuntimeProvider {
+    return this.onnxChat ?? this.llmProvider;
+  }
+
+  /** Points the conversation and the JS runtime at an ONNX chat model, or at Gemma 4 (null). */
+  private useOnnxChat(modelId: string | null): void {
+    const model = modelId ? findOnnxChatModel(modelId) : undefined;
+    if (this.onnxChat && this.onnxChat.modelId !== model?.id) {
+      void this.onnxChat.dispose();
+      this.onnxChat = null;
+    }
+    if (model && !this.onnxChat) this.onnxChat = new OnnxLlmProvider(model.id, model);
+    this.orchestrator.setLlmProvider(this.chatLlm);
+    this.jsRuntime.setLlmProvider(this.chatLlm);
+  }
+
+  /** Chat models the settings picker offers on this device (phones get phone-sized ones only). */
+  getChatModelOptions(): ModelOptionItem[] {
+    return SUPPORTED_CHAT_MODELS.filter((m) => !this.isPhone || m.phone);
+  }
+
   async setChatModelId(modelId: string): Promise<void> {
     if (this.chatModelId === modelId && this.llmProvider.modelId === modelId) return;
     this.chatModelId = modelId;
@@ -1137,12 +1195,19 @@ export class VoiceAssistantEngine {
       // ignore
     }
 
+    const onnxModel = findOnnxChatModel(modelId);
+    if (onnxModel || this.onnxChat) {
+      // One chat model in GPU memory: unload Gemma 4 before an ONNX model loads
+      if (onnxModel) await this.llmProvider.dispose();
+      this.useOnnxChat(onnxModel?.id ?? null);
+    }
+
     if (this.codingModelId === modelId) {
       if (this.codingLlmProvider) {
         await this.codingLlmProvider.dispose();
         this.codingLlmProvider = null;
       }
-      this.jsRuntime.setLlmProvider(this.llmProvider);
+      this.jsRuntime.setLlmProvider(this.chatLlm);
     } else if (!this.codingLlmProvider) {
       // Coder shared the chat provider and the models now diverge: pin it to its own provider
       this.codingLlmProvider = new WorkerLlmProvider(this.codingModelId);
@@ -1165,8 +1230,8 @@ export class VoiceAssistantEngine {
     }
 
     this.stateCoordinator.setModelState('llm', 'downloading');
-    const modelName = modelId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B';
-    void this.llmProvider
+    const modelName = this.getLlmDisplayName();
+    void this.chatLlm
       .initialize((loaded, total) => {
         const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
         const mb = (loaded / (1024 * 1024)).toFixed(0);
@@ -1183,7 +1248,7 @@ export class VoiceAssistantEngine {
       .catch((err) => {
         this.stateCoordinator.setModelState('llm', 'failed');
         this.events.onStatusChange?.(
-          `Gemma 4 initialization error: ${err instanceof Error ? err.message : String(err)}`
+          `${modelName} initialization error: ${err instanceof Error ? err.message : String(err)}`
         );
       });
   }
@@ -1252,7 +1317,27 @@ export class VoiceAssistantEngine {
       });
   }
 
+  /** Detects the device class early (before initialize), so the settings picker lists the right models. */
+  async detectDevice(): Promise<void> {
+    const caps = await this.modelManager.detectCapabilities();
+    this.isPhone = caps.deviceProfile === 'constrained_mobile';
+    if (this.isPhone && !findOnnxChatModel(this.chatModelId)?.phone) this.chatModelId = DEFAULT_PHONE_CHAT_MODEL_ID;
+  }
+
   async updateSettings(settings: Partial<ChattySettings>): Promise<void> {
+    if (!this.started) {
+      // Picked before startup (first-visit settings): just remember them; initialize() loads them
+      if (settings.chatModelId) this.chatModelId = settings.chatModelId;
+      if (settings.codingModelId) this.codingModelId = settings.codingModelId;
+      if (settings.voiceId) this.voiceId = settings.voiceId;
+      saveSettingsToStorage({ chatModelId: this.chatModelId, codingModelId: this.codingModelId, voiceId: this.voiceId });
+      try {
+        await this.modelManager.db.saveSetting('user_settings', this.getSettings());
+      } catch {
+        // ignore
+      }
+      return;
+    }
     const promises: Promise<void>[] = [];
     if (settings.chatModelId && settings.chatModelId !== this.chatModelId) {
       promises.push(this.setChatModelId(settings.chatModelId));
@@ -1275,6 +1360,7 @@ export class VoiceAssistantEngine {
       await this.codingLlmProvider.dispose();
     }
     await this.llmProvider.dispose();
+    await this.onnxChat?.dispose();
     await this.phoneModels?.dispose();
     await this.ttsProvider.dispose();
   }

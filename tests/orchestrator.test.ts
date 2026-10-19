@@ -8,7 +8,7 @@ import {
 import { BoundedQueue, TurnResourceScheduler } from '../src/core/bounded-queue.ts';
 import { ConversationMemoryStore } from '../src/core/memory-store.ts';
 import { computeSha256Hex, ModelManager } from '../src/core/model-manager.ts';
-import { ConversationOrchestrator } from '../src/core/orchestrator.ts';
+import { ConversationOrchestrator, EXAMPLE_TURNS } from '../src/core/orchestrator.ts';
 import {
   IncrementalPhraseSegmenter,
   normalizeTextForSpeech,
@@ -1062,7 +1062,15 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
       expect(SUPPORTED_CHAT_MODELS.map((m) => m.id)).toEqual([
         'gemma-4-e2b-it-web',
         'gemma-4-e4b-it-web',
+        'qwen2.5-coder-0.5b',
+        'qwen3-0.6b',
+        'qwen2.5-0.5b',
+        'lfm2-1.2b',
+        'gemma-3-1b',
+        'qwen2.5-coder-1.5b',
       ]);
+      // Only ONNX models small enough for a phone tab are offered there
+      expect(SUPPORTED_CHAT_MODELS.filter((m) => m.phone).every((m) => !m.id.startsWith('gemma-4'))).toBe(true);
       expect(SUPPORTED_CODING_MODELS.map((m) => m.id)).toEqual([
         'gemma-4-e2b-it-web',
         'gemma-4-e4b-it-web',
@@ -1304,8 +1312,8 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         },
         'standard'
       );
-      expect(built.systemPrompt).toContain('NEVER mention code, JavaScript, or programming');
-      expect(built.systemPrompt).toContain('Never ask "would you like that code?"');
+      expect(built.systemPrompt).toContain('Never mention code, JavaScript or programming');
+      expect(built.systemPrompt).toContain('never offer code');
     });
 
     it('implements universal browser tasks via agent for games, widgets, and browser capabilities', async () => {
@@ -1388,7 +1396,7 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         { workingMessages: [], relevantMemories: [] },
         'standard'
       );
-      expect(promptData.systemPrompt).toContain('UNIVERSAL BROWSER CAPABILITY');
+      expect(promptData.systemPrompt).toContain('acts by writing JavaScript');
       expect(promptData.systemPrompt).toContain('coder_agent(task)');
       expect(promptData.systemPrompt).toContain('Never leave "arguments" empty');
 
@@ -1483,9 +1491,10 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         (orchestrator as any).memoryStore.resolveContextForQuery('Can you play another?', 4000),
         'direct'
       );
-      const assistantPromptTurn = promptData.promptMessages.find(
-        (m: { role: string }) => m.role === 'assistant'
-      );
+      // After the example exchanges, the conversation's own turns
+      const assistantPromptTurn = promptData.promptMessages
+        .slice(EXAMPLE_TURNS.length)
+        .find((m: { role: string }) => m.role === 'assistant');
       expect(assistantPromptTurn).toBeDefined();
       expect(assistantPromptTurn.content).toBe(jsCodeFromModel);
     });
@@ -1701,8 +1710,10 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
       const result = await (runtime as any).executeInIframe('while(true) {}');
       const duration = performance.now() - start;
 
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/timed out after 40ms/i);
+      // The wait ends but the program is still running: not a failure
+      expect(result.success).toBe(true);
+      expect(result.stillRunning).toBe(true);
+      expect(result.error).toBeUndefined();
       expect(result.mode).toBe('iframe');
       expect(duration).toBeGreaterThanOrEqual(35);
     });

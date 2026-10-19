@@ -22,6 +22,8 @@ export interface JavascriptExecutionResult {
   code: string;
   mode: JavascriptExecutionMode;
   task?: string;
+  /** Still running when the wait ended (a long song, a slow fetch): not a failure */
+  stillRunning?: boolean;
 }
 
 export interface ExecutionContextOptions {
@@ -95,18 +97,94 @@ export interface PreparedExecutableCode {
  * Inspects raw text from the model into executable JavaScript and classifies
  * whether it is an executable JavaScript code action or conversational prose.
  */
+const AsyncFunctionCtor = Object.getPrototypeOf(async function () {}).constructor;
+
+function parsesAsJs(code: string): boolean {
+  try {
+    new AsyncFunctionCtor('speak', 'playNotes', 'searchWikipedia', 'root', `"use strict";\n${code}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** An ```html block as code: its markup goes on screen, then its inline scripts run. */
+function htmlToCode(html: string): string {
+  const scripts = Array.from(html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi), (m) => m[1]);
+  const markup = html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<!doctype[^>]*>|<\/?(?:html|head|body)[^>]*>/gi, '')
+    .trim();
+  return [markup ? `document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(markup)});` : '', ...scripts].join('\n');
+}
+
+const CODE_LINE =
+  /^\s*(?:const |let |var |(?:async\s+)?function\b|class |await |speak\(|playNotes\(|root\.|document\.|window\.|canvas\.|ctx\.|for\s*\(|\/\/)/;
+
+/**
+ * Pulls the program out of a reply that wraps it in markdown or explanation (small models often
+ * do, despite the prompt), so it runs instead of being read aloud. `lead` is the prose before it.
+ */
+function extractProgram(text: string): { code: string; lead: string } | null {
+  const blocks = Array.from(text.matchAll(/```([\w-]*)[^\n]*\n([\s\S]*?)(?:```|$)/g));
+  if (blocks.length > 0) {
+    const parts: string[] = [];
+    for (const [, lang, body] of blocks) {
+      const l = lang.toLowerCase();
+      if (l === 'html') parts.push(htmlToCode(body));
+      else if (l === 'css') parts.push(`document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ${JSON.stringify(body)} }));`);
+      else if (!l || /^(?:js|javascript|jsx|mjs)$/.test(l)) parts.push(body);
+    }
+    const code = parts.join('\n').trim();
+    return code ? { code, lead: text.slice(0, blocks[0].index).trim() } : null;
+  }
+  // Unfenced: explanation, then code, then maybe more explanation
+  const lines = text.split('\n');
+  const start = lines.findIndex((l) => CODE_LINE.test(l));
+  if (start < 0) return null;
+  for (let end = lines.length; end > start && lines.length - end < 40; end--) {
+    const code = lines.slice(start, end).join('\n').trim();
+    if (parsesAsJs(code)) return { code, lead: lines.slice(0, start).join(' ').trim() };
+  }
+  return null;
+}
+
+/**
+ * Code runs exactly as written, so a program that only defines its functions does nothing.
+ * Calls the zero-argument top-level functions nothing else refers to (draw(), main(), ...).
+ */
+export function callUncalledFunctions(code: string): string {
+  const declared = [
+    ...Array.from(code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(\s*\)/gm), (m) => m[1]),
+    ...Array.from(code.matchAll(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(\s*\)\s*=>/gm), (m) => m[1]),
+  ];
+  if (declared.length === 0) return code;
+  const refs = (name: string) => code.match(new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}(?![\\w$])`, 'g'))?.length ?? 0;
+  const roots = declared.filter((name) => refs(name) === 1);
+  let toCall = roots.filter((name) => /^(?:main|init|start|run|setup|draw|play|render|animate|create|build|show|make)/i.test(name));
+  if (toCall.length === 0 && roots.length === declared.length) toCall = [declared[declared.length - 1]];
+  return toCall.length ? `${code}\n${toCall.map((name) => `await ${name}();`).join('\n')}` : code;
+}
+
+/** Speaks the explanation that came before extracted code when the code says nothing itself. */
+function withLead(code: string, lead: string): string {
+  if (!lead || /\bspeak\(/.test(code) || /\b(?:code|javascript|js|script|snippet|program|html|function)\b/i.test(lead)) {
+    return code;
+  }
+  return `speak(${JSON.stringify(lead.replace(/[\s:]+$/, '').slice(0, 200))});\n${code}`;
+}
+
 export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
   let cleaned = (rawText || '').trim();
 
-  // 1. Strip markdown fences if present
+  // 1. Take the program out of markdown fences if present
   let hadFences = false;
-  const fenced = cleaned.match(/```(?:javascript|js)?\s*\n([\s\S]*?)(?:\n```|$)/i);
-  if (fenced) {
-    cleaned = fenced[1].trim();
-    hadFences = true;
-  } else if (cleaned.startsWith('```') && cleaned.endsWith('```')) {
-    cleaned = cleaned.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/, '').trim();
-    hadFences = true;
+  if (cleaned.includes('```')) {
+    const program = extractProgram(cleaned);
+    if (program) {
+      cleaned = withLead(program.code, program.lead);
+      hadFences = true;
+    }
   }
 
   // 2. Remove any rogue <|...|> or <tool_call> tags
@@ -124,14 +202,10 @@ export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
   }
 
   // 4. Test if cleaned is syntactically valid JavaScript code
-  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-  let isValidJs = false;
-  try {
-    new AsyncFunction('speak', 'playNotes', 'searchWikipedia', 'root', `"use strict";\n${cleaned}`);
-    isValidJs = true;
-  } catch {
+  let isValidJs = parsesAsJs(cleaned);
+  if (!isValidJs) {
     try {
-      new AsyncFunction('speak', 'playNotes', 'searchWikipedia', 'root', `"use strict"; return (${cleaned.replace(/;\s*$/, '')});`);
+      new AsyncFunctionCtor('speak', 'playNotes', 'searchWikipedia', 'root', `"use strict"; return (${cleaned.replace(/;\s*$/, '')});`);
       isValidJs = true;
     } catch {
       isValidJs = false;
@@ -149,7 +223,13 @@ export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
   }
 
   if (isValidJs) {
-    return { code: cleaned, isProse: false };
+    return { code: callUncalledFunctions(cleaned), isProse: false };
+  }
+
+  // 4b. Explanation wrapped around unfenced code: run the code part
+  const program = extractProgram(cleaned);
+  if (program) {
+    return { code: callUncalledFunctions(withLead(program.code, program.lead)), isProse: false };
   }
 
   // 5. If it's a simple arithmetic expression or number (e.g. 42 or 3 * 7), compute and speak it
@@ -744,6 +824,14 @@ export class JavascriptRuntime {
       justify-content: center;
       padding: 24px;
     }
+    /* Programs draw on document.body (root is an alias): same centered layout */
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
     #root > *, body > *:not(#root):not(script):not(style) {
       pointer-events: auto;
     }
@@ -1073,9 +1161,23 @@ export class JavascriptRuntime {
         });
       };
 
+      // Stop waiting after timeoutMs, but the program keeps running and this isn't a failure:
+      // anything it says later is spoken outside the turn (via lastRunOptions). Hangs are caught
+      // separately by the loop guard.
       const timer = setTimeout(() => {
-        console.error(`[JavascriptRuntime] IFrame execution timed out after ${this.timeoutMs}ms`);
-        settle(null, `IFrame execution timed out after ${this.timeoutMs}ms`);
+        this.pendingRuns.delete(reqId);
+        const hasVisual = this.hasVisualContent();
+        this.onVisualChange?.(hasVisual, this.activeIframe);
+        resolve({
+          success: true,
+          stillRunning: true,
+          logs: [],
+          spokenTexts,
+          hasVisualOutput: hasVisual,
+          executionTimeMs: this.timeoutMs,
+          code,
+          mode: 'iframe',
+        });
       }, this.timeoutMs);
 
       this.pendingRuns.set(reqId, { options, spokenTexts, timer, finish: settle });

@@ -14,6 +14,8 @@ export interface OnnxModelSpec {
   dtype: string;
   contextLimit: number;
   maxOutputTokens: number;
+  /** Extra chat-template variables (e.g. Qwen3's enable_thinking) */
+  templateOptions?: Record<string, unknown>;
 }
 
 export interface OnnxRawGenerateOptions {
@@ -154,6 +156,7 @@ export class OnnxLlmProvider implements LlmRuntimeProvider {
           temperature: options.temperature,
           topP: options.topP,
           keepSpecialTokens: options.keepSpecialTokens,
+          templateOptions: this.spec.templateOptions,
         },
         { onToken: options.onToken }
       );

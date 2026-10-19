@@ -20,14 +20,29 @@ type WakeLockSentinelLike = {
   addEventListener?: (type: 'release', listener: () => void) => void;
 };
 
+const SETTINGS_SEEN_KEY = 'chatty_settings_seen';
+
+/** True on the very first visit (settings never saved or shown). */
+function isFirstVisit(): boolean {
+  try {
+    return localStorage.getItem(SETTINGS_SEEN_KEY) === null && localStorage.getItem('chatty_user_settings') === null;
+  } catch {
+    return false;
+  }
+}
+
 export class MinimalVoiceApp {
   private engine: VoiceAssistantEngine;
   private micBtn = document.getElementById('btn-mic-toggle') as HTMLButtonElement | null;
   private micLabel = document.getElementById('mic-btn-label');
   private newBtn = document.getElementById('btn-new-chat') as HTMLButtonElement | null;
   private statusEl = document.getElementById('minimal-status');
-  private inputTextEl = document.getElementById('input-result-text');
-  private outputTextEl = document.getElementById('output-text');
+  private chatLogEl = document.getElementById('chat-log');
+  private rawOutputEl = document.getElementById('raw-output');
+  // Chat bubbles by message id and by turn (streamed text arrives before the reply is saved)
+  private bubbles = new Map<string, HTMLElement>();
+  private turnBubbles = new Map<string, HTMLElement>();
+  private interimUserBubble: HTMLElement | null = null;
   private inputCanvas = document.getElementById('input-waveform') as HTMLCanvasElement | null;
   private outputCanvas = document.getElementById('output-waveform') as HTMLCanvasElement | null;
 
@@ -78,9 +93,9 @@ export class MinimalVoiceApp {
   constructor() {
     if (this.inputCanvas) {
       this.inputVisualizer = new FluidAudioVisualizer(this.inputCanvas, {
-        barCount: 28,
-        barWidth: 3.5,
-        gap: 4,
+        barCount: 18,
+        barWidth: 2.5,
+        gap: 3,
         gradientColors: ['#38bdf8', '#3b82f6', '#6366f1'],
         glowColor: 'rgba(56, 189, 248, 0.45)',
       });
@@ -88,9 +103,9 @@ export class MinimalVoiceApp {
 
     if (this.outputCanvas) {
       this.outputVisualizer = new FluidAudioVisualizer(this.outputCanvas, {
-        barCount: 28,
-        barWidth: 3.5,
-        gap: 4,
+        barCount: 18,
+        barWidth: 2.5,
+        gap: 3,
         gradientColors: ['#34d399', '#10b981', '#06b6d4'],
         glowColor: 'rgba(52, 211, 153, 0.45)',
       });
@@ -122,18 +137,17 @@ export class MinimalVoiceApp {
         this.updateUiState();
       },
       onTranscript: (text) => {
-        if (this.inputTextEl) {
-          this.inputTextEl.textContent = text;
-          this.inputTextEl.scrollTop = this.inputTextEl.scrollHeight;
-        }
+        this.showInterimTranscript(text);
       },
-      onTokenStream: (_turnId, _chunk, fullText) => {
-        this.renderAssistantOutput(fullText, undefined, true);
+      onTokenStream: (turnId, _chunk, fullText) => {
+        this.renderAssistantOutput(this.bubbleForTurn(turnId), fullText, undefined, true);
+      },
+      onRawOutput: (_turnId, raw) => {
+        this.setRawOutput(raw);
       },
       onMessageCreated: (msg) => {
-        if (msg.role === 'user' && this.inputTextEl && msg.canonicalContent) {
-          this.inputTextEl.textContent = msg.canonicalContent;
-          this.inputTextEl.scrollTop = this.inputTextEl.scrollHeight;
+        if (msg.role === 'user' && msg.canonicalContent) {
+          this.addUserBubble(msg);
           try {
             navigator.vibrate?.([8, 20, 8]);
           } catch {
@@ -141,13 +155,13 @@ export class MinimalVoiceApp {
           }
         }
         if (msg.role === 'assistant' && (msg.canonicalContent || msg.toolCall)) {
-          this.renderAssistantOutput(msg.canonicalContent, msg.toolCall, false, isWelcomeMessage(msg));
+          this.renderAssistantMessage(msg);
         }
         this.updateUiState();
       },
       onMessageUpdated: (msg) => {
         if (msg.role === 'assistant' && (msg.canonicalContent || msg.toolCall)) {
-          this.renderAssistantOutput(msg.canonicalContent, msg.toolCall, false, isWelcomeMessage(msg));
+          this.renderAssistantMessage(msg);
         }
         this.updateUiState();
       },
@@ -192,6 +206,11 @@ export class MinimalVoiceApp {
     this.updateBusyIndicator();
     this.updateDownloadProgress('Loading models…', 0, '0%');
     try {
+      // First visit: choose the model and voice before anything downloads
+      if (isFirstVisit()) {
+        await this.engine.detectDevice();
+        await this.showSettingsAndWait();
+      }
       await this.engine.initialize();
       // The page died mid-load last time: say which model, so on-device testing can pinpoint it
       const failedStage = this.engine.previousLoadFailure;
@@ -221,23 +240,11 @@ export class MinimalVoiceApp {
     if (summary?.title && typeof document !== 'undefined') {
       document.title = `${summary.title} — Chatty`;
     }
-    if (messages.length > 0) {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const m = messages[i];
-        if (m.role === 'assistant' && this.outputTextEl && !this.outputTextEl.textContent && (m.canonicalContent || m.toolCall)) {
-          this.renderAssistantOutput(m.canonicalContent, m.toolCall, false, isWelcomeMessage(m));
-        }
-        if (m.role === 'user' && this.inputTextEl && !this.inputTextEl.textContent && m.canonicalContent) {
-          this.inputTextEl.textContent = m.canonicalContent;
-        }
-      }
-    } else if (summary && this.outputTextEl) {
-      this.showSummaryNote(summary.summaryText);
-    }
+    this.renderConversation(messages, summary);
 
     // Populate settings dropdowns initially from engine
     const initialSettings = this.engine.getSettings();
-    if (this.selectChatModel) this.selectChatModel.value = initialSettings.chatModelId;
+    this.fillChatModelOptions(initialSettings.chatModelId);
     if (this.selectPiperVoice) this.selectPiperVoice.value = initialSettings.voiceId;
 
     // Restore sidebar state from saved preferences
@@ -250,6 +257,15 @@ export class MinimalVoiceApp {
   }
 
   private bindEvents(): void {
+    // Stay on the newest text when the layout changes (rotation, desktop/mobile switch)
+    if (typeof ResizeObserver !== 'undefined') {
+      const keepAtBottom = new ResizeObserver(() => {
+        this.scrollChatToBottom();
+        if (this.rawOutputEl) this.rawOutputEl.scrollTop = this.rawOutputEl.scrollHeight;
+      });
+      if (this.chatLogEl) keepAtBottom.observe(this.chatLogEl);
+      if (this.rawOutputEl) keepAtBottom.observe(this.rawOutputEl);
+    }
     this.micBtn?.addEventListener('click', async () => {
       try {
         navigator.vibrate?.(15);
@@ -269,8 +285,7 @@ export class MinimalVoiceApp {
       this.resetVisualScreen();
       if (this.screenVisualHud) this.screenVisualHud.hidden = true;
       await this.engine.createConversation('New Chat');
-      if (this.inputTextEl) this.inputTextEl.textContent = '';
-      this.renderAssistantOutput('');
+      this.clearChatLog();
       if (typeof document !== 'undefined') document.title = 'New Chat — Chatty';
       this.updateUiState();
     });
@@ -282,8 +297,7 @@ export class MinimalVoiceApp {
       this.resetVisualScreen();
       if (this.screenVisualHud) this.screenVisualHud.hidden = true;
       await this.engine.createConversation('New Chat');
-      if (this.inputTextEl) this.inputTextEl.textContent = '';
-      this.renderAssistantOutput('');
+      this.clearChatLog();
       if (typeof document !== 'undefined') document.title = 'New Chat — Chatty';
       this.updateUiState();
       if (window.innerWidth <= 640) {
@@ -334,7 +348,8 @@ export class MinimalVoiceApp {
         // ignore
       }
       const current = this.engine.getSettings();
-      if (this.selectChatModel) this.selectChatModel.value = current.chatModelId;
+      // Rebuilt on open: phones only list phone-sized models once the device is detected
+      this.fillChatModelOptions(current.chatModelId);
       if (this.selectPiperVoice) this.selectPiperVoice.value = current.voiceId;
       this.settingsDialog?.showModal();
     });
@@ -401,34 +416,9 @@ export class MinimalVoiceApp {
   }
 
   private onActiveChatSwitched(convo: StoredConversation): void {
-    if (this.inputTextEl) this.inputTextEl.textContent = '';
-    this.renderAssistantOutput('');
     this.resetVisualScreen();
     if (this.screenVisualHud) this.screenVisualHud.hidden = true;
-
-    if (convo.messages && convo.messages.length > 0) {
-      for (let i = convo.messages.length - 1; i >= 0; i--) {
-        const m = convo.messages[i];
-        if (
-          m.role === 'assistant' &&
-          this.outputTextEl &&
-          !this.outputTextEl.textContent &&
-          (m.canonicalContent || m.toolCall)
-        ) {
-          this.renderAssistantOutput(m.canonicalContent, m.toolCall, false, isWelcomeMessage(m));
-        }
-        if (
-          m.role === 'user' &&
-          this.inputTextEl &&
-          !this.inputTextEl.textContent &&
-          m.canonicalContent
-        ) {
-          this.inputTextEl.textContent = m.canonicalContent;
-        }
-      }
-    } else if (convo.summary && this.outputTextEl) {
-      this.showSummaryNote(convo.summary.summaryText);
-    }
+    this.renderConversation(convo.messages ?? [], convo.summary);
 
     if (typeof document !== 'undefined') {
       document.title = `${convo.title || 'New Chat'} — Chatty`;
@@ -558,15 +548,14 @@ export class MinimalVoiceApp {
   }
 
   private renderAssistantOutput(
+    target: HTMLElement,
     content: string,
     toolCall?: ConversationMessage['toolCall'],
     isStreaming = false,
     /** App-authored text (the welcome greeting), shown as a note rather than a model reply */
     isAppNote = false
   ): void {
-    if (!this.outputTextEl) return;
-
-    this.outputTextEl.innerHTML = '';
+    target.innerHTML = '';
 
     let activeToolCall = toolCall;
     // "[Interrupted]" is bookkeeping for the model's history; show it as a note, not reply text
@@ -586,9 +575,9 @@ export class MinimalVoiceApp {
       }
     }
 
-    if (activeToolCall) {
-      const toolElement = createToolSummaryElement(activeToolCall);
-      this.outputTextEl.appendChild(toolElement);
+    // Generated code is shown in the model output panel, so only other tools get a card here
+    if (activeToolCall && activeToolCall.name !== 'javascript_runtime') {
+      target.appendChild(createToolSummaryElement(activeToolCall));
     }
 
     // Clean conversational text (strip raw tool blocks and special tags completely)
@@ -606,18 +595,18 @@ export class MinimalVoiceApp {
     }
 
     if (displayText && isAppNote) {
-      this.outputTextEl.appendChild(this.createSystemNote(displayText));
+      target.appendChild(this.createSystemNote(displayText));
     } else if (displayText) {
       const textDiv = document.createElement('div');
       textDiv.className = 'assistant-text-content';
       textDiv.textContent = displayText;
-      this.outputTextEl.appendChild(textDiv);
+      target.appendChild(textDiv);
     }
     if (wasInterrupted) {
-      this.outputTextEl.appendChild(this.createSystemNote('Interrupted'));
+      target.appendChild(this.createSystemNote('Interrupted'));
     }
 
-    this.outputTextEl.scrollTop = this.outputTextEl.scrollHeight;
+    this.scrollChatToBottom();
   }
 
   /** App/status text inside the conversation panels, styled apart from what was said. */
@@ -630,9 +619,96 @@ export class MinimalVoiceApp {
   }
 
   private showSummaryNote(summaryText: string): void {
-    if (!this.outputTextEl) return;
-    this.outputTextEl.innerHTML = '';
-    this.outputTextEl.appendChild(this.createSystemNote(`Earlier in this chat: ${summaryText}`));
+    this.chatLogEl?.appendChild(this.createSystemNote(`Earlier in this chat: ${summaryText}`));
+  }
+
+  /** Empties the chat log and the raw output panel. */
+  private clearChatLog(): void {
+    if (this.chatLogEl) this.chatLogEl.innerHTML = '';
+    this.bubbles.clear();
+    this.turnBubbles.clear();
+    this.interimUserBubble = null;
+    this.setRawOutput('');
+  }
+
+  /** Renders a whole conversation (on load and when switching chats). */
+  private renderConversation(
+    messages: readonly ConversationMessage[],
+    summary: { summaryText: string } | null | undefined
+  ): void {
+    this.clearChatLog();
+    if (summary?.summaryText) this.showSummaryNote(summary.summaryText);
+    for (const m of messages) {
+      if (m.role === 'user' && m.canonicalContent) this.addUserBubble(m);
+      else if (m.role === 'assistant' && (m.canonicalContent || m.toolCall)) this.renderAssistantMessage(m);
+    }
+    const lastReply = [...messages].reverse().find((m) => m.role === 'assistant');
+    this.setRawOutput(lastReply?.rawLlmOutput || lastReply?.rawCode || '');
+    this.scrollChatToBottom();
+  }
+
+  private createBubble(role: 'user' | 'assistant'): HTMLElement {
+    const row = document.createElement('div');
+    row.className = `chat-row ${role}`;
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-bubble';
+    row.appendChild(bubble);
+    this.chatLogEl?.appendChild(row);
+    return bubble;
+  }
+
+  /** What the user is saying, shown as it is recognized; becomes their message once sent. */
+  private showInterimTranscript(text: string): void {
+    if (!text) {
+      this.interimUserBubble?.parentElement?.remove();
+      this.interimUserBubble = null;
+      return;
+    }
+    this.interimUserBubble ??= this.createBubble('user');
+    this.interimUserBubble.classList.add('interim');
+    this.interimUserBubble.textContent = text;
+    this.scrollChatToBottom();
+  }
+
+  private addUserBubble(msg: ConversationMessage): void {
+    if (this.bubbles.has(msg.id)) return;
+    const bubble = this.interimUserBubble ?? this.createBubble('user');
+    this.interimUserBubble = null;
+    bubble.classList.remove('interim');
+    bubble.textContent = msg.canonicalContent;
+    this.bubbles.set(msg.id, bubble);
+    this.scrollChatToBottom();
+  }
+
+  private bubbleForTurn(turnId: string): HTMLElement {
+    let bubble = this.turnBubbles.get(turnId);
+    if (!bubble) {
+      bubble = this.createBubble('assistant');
+      this.turnBubbles.set(turnId, bubble);
+    }
+    return bubble;
+  }
+
+  private renderAssistantMessage(msg: ConversationMessage): void {
+    const bubble = this.bubbles.get(msg.id) ?? this.bubbleForTurn(msg.turnId);
+    this.bubbles.set(msg.id, bubble);
+    this.renderAssistantOutput(bubble, msg.canonicalContent, msg.toolCall, false, isWelcomeMessage(msg));
+  }
+
+  /** Shows the model's raw output, kept scrolled to the newest text. speak() lines are left out: what was said is in the chat. */
+  private setRawOutput(text: string): void {
+    if (!this.rawOutputEl) return;
+    this.rawOutputEl.textContent = text
+      .split('\n')
+      .filter((line) => !/^\s*(?:await\s+)?speak\(.*\);?\s*$/.test(line))
+      .join('\n')
+      .trim();
+    this.rawOutputEl.scrollTop = this.rawOutputEl.scrollHeight;
+  }
+
+  /** Keeps the chat log scrolled to the newest message. */
+  private scrollChatToBottom(): void {
+    if (this.chatLogEl) this.chatLogEl.scrollTop = this.chatLogEl.scrollHeight;
   }
 
   private updateUiState(): void {
@@ -688,6 +764,37 @@ export class MinimalVoiceApp {
    * Turns the context meter into an animated barber pole while the app is initializing or
    * the LLM is working (transcribing, building context, generating, compacting, running tools).
    */
+  private showSettingsAndWait(): Promise<void> {
+    const dialog = this.settingsDialog;
+    if (!dialog) return Promise.resolve();
+    const current = this.engine.getSettings();
+    this.fillChatModelOptions(current.chatModelId);
+    if (this.selectPiperVoice) this.selectPiperVoice.value = current.voiceId;
+    return new Promise((resolve) => {
+      dialog.addEventListener(
+        'close',
+        () => {
+          try {
+            localStorage.setItem(SETTINGS_SEEN_KEY, '1');
+          } catch {
+            // ignore
+          }
+          resolve();
+        },
+        { once: true }
+      );
+      dialog.showModal();
+    });
+  }
+
+  private fillChatModelOptions(selected: string): void {
+    if (!this.selectChatModel) return;
+    this.selectChatModel.replaceChildren(
+      ...this.engine.getChatModelOptions().map((m) => new Option(m.name, m.id))
+    );
+    this.selectChatModel.value = selected;
+  }
+
   private updateBusyIndicator(): void {
     const bar = document.querySelector<HTMLElement>('.context-meter-bar');
     if (!bar) return;
@@ -738,7 +845,6 @@ export class MinimalVoiceApp {
           if (this.keepAwakeWanted && !this.isWakeLockHeld()) this.setKeepAwake(true);
         }, 5000);
       }
-      this.updateKeepAwakeHint();
       if (!wakeLock || this.isWakeLockHeld()) return;
       if (this.wakeLockPending || document.visibilityState !== 'visible') return;
       this.wakeLockPending = true;
@@ -749,7 +855,6 @@ export class MinimalVoiceApp {
           // Re-acquire if the system revokes it while still busy
           sentinel.addEventListener?.('release', () => {
             if (this.wakeLockSentinel === sentinel) this.wakeLockSentinel = null;
-            this.updateKeepAwakeHint();
             if (this.keepAwakeWanted && document.visibilityState === 'visible') this.setKeepAwake(true);
           });
           // Became idle while the request was in flight
@@ -760,7 +865,6 @@ export class MinimalVoiceApp {
         })
         .finally(() => {
           this.wakeLockPending = false;
-          this.updateKeepAwakeHint();
         });
     } else {
       if (this.keepAwakeRetryTimer) {
@@ -772,20 +876,11 @@ export class MinimalVoiceApp {
         this.wakeLockSentinel = null;
         void sentinel.release().catch(() => {});
       }
-      this.updateKeepAwakeHint();
     }
   }
 
   private isWakeLockHeld(): boolean {
     return !!this.wakeLockSentinel && !this.wakeLockSentinel.released;
-  }
-
-  /** Asks the user to keep the screen on while busy if the browser won't hold a wake lock. */
-  private updateKeepAwakeHint(): void {
-    const hint = document.getElementById('keep-awake-hint');
-    if (!hint) return;
-    const show = this.keepAwakeWanted && !this.isWakeLockHeld() && !this.wakeLockPending;
-    hint.hidden = !show;
   }
 
   /** True while any startup model (Gemma, Piper, Whistle) is still downloading/initializing. */

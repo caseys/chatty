@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { compactAssistantContent, isTalkOnly } from '../src/core/history-format.ts';
-import { ConversationOrchestrator } from '../src/core/orchestrator.ts';
+import { ConversationOrchestrator, EXAMPLE_TURNS } from '../src/core/orchestrator.ts';
 import { StateMachineCoordinator } from '../src/core/state-machine.ts';
 import type { ConversationMessage, LlmGenerationOptions, LlmGenerationResult, LlmRuntimeProvider } from '../src/types/index.ts';
 
@@ -69,7 +69,7 @@ class ScriptedLlm implements LlmRuntimeProvider {
 }
 
 describe('desktop history with programs', () => {
-  it('summarizes the last program for unrelated turns and shows it in full for edits', async () => {
+  it('describes past programs in the system prompt and shows the one being edited in full', async () => {
     const llm = new ScriptedLlm();
     const orchestrator = new ConversationOrchestrator({
       stateCoordinator: new StateMachineCoordinator(),
@@ -82,10 +82,14 @@ describe('desktop history with programs', () => {
     await orchestrator.submitUserInput('how are you?');
     await orchestrator.submitUserInput('make it bigger');
 
+    // The conversation's own turns, after the example exchanges
     const assistantSeen = (call: LlmGenerationOptions) =>
-      call.messages.filter((m) => m.role === 'assistant').map((m) => m.content);
-    // Unrelated turn: the drawing program is only a summary line
-    expect(assistantSeen(llm.calls[1])[0]).toContain('Earlier program omitted');
+      call.messages.slice(EXAMPLE_TURNS.length).filter((m) => m.role === 'assistant').map((m) => m.content);
+    // Unrelated turn: the drawing leaves the history (so small models can't copy a summary
+    // instead of writing code) and is described in the system prompt
+    expect(assistantSeen(llm.calls[1])).toEqual([]);
+    expect(llm.calls[1].messages.slice(EXAMPLE_TURNS.length).map((m) => m.content)).not.toContain('draw a red circle');
+    expect(llm.calls[1].systemPrompt).toContain('- "draw a red circle": you built something on screen (6 lines)');
     // Edit turn: the program being changed is shown in full
     expect(assistantSeen(llm.calls[2])).toContain(DRAWING);
   });
