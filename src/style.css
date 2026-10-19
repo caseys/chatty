@@ -532,7 +532,7 @@ body {
   border: 1px solid var(--border-color);
   background: var(--bg-elevated);
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: 16px; /* under 16px, iOS Safari zooms in on focus */
 }
 
 #chat-input:focus {
@@ -1873,7 +1873,7 @@ body {
   background: var(--fill-subtle);
   color: var(--text-primary);
   font: inherit;
-  font-size: 14.5px;
+  font-size: 16px; /* under 16px, iOS Safari zooms in on focus */
 }
 
 .chat-input-field:focus {

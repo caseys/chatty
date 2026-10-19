@@ -54,6 +54,8 @@ export class MinimalVoiceApp {
   private clearModelCacheBtn = document.getElementById('btn-clear-model-cache') as HTMLButtonElement | null;
   private rawOutputEl = document.getElementById('raw-output');
   private runStatusEl = document.getElementById('run-status');
+  // The last Settings save being applied (model downloads wait for it)
+  private settingsApplying: Promise<void> = Promise.resolve();
   private rawOutputTurnId: string | null = null;
   // Chat bubbles by message id and by turn (streamed text arrives before the reply is saved)
   private bubbles = new Map<string, HTMLElement>();
@@ -199,6 +201,8 @@ export class MinimalVoiceApp {
         this.updateUiState();
       },
       onConfirm: (message) => window.confirm(message),
+      // Downloads wait while Settings is open, so the model picked there is the one downloaded
+      beforeModelDownload: () => this.settingsClosed(),
       onError: (err, context) => {
         if (this.statusEl) {
           this.statusEl.textContent = `Error (${context}): ${err.message}`;
@@ -315,7 +319,6 @@ export class MinimalVoiceApp {
       this.clearModelCacheBtn!.disabled = true;
       await clearModelCache();
       await this.refreshModelCacheSize();
-      if (this.modelCacheSizeEl) this.modelCacheSizeEl.textContent += ' (cleared; models download again on next load)';
     });
     this.updateChatExamples(false);
     this.placeWaveforms();
@@ -455,12 +458,13 @@ export class MinimalVoiceApp {
         if (this.statusEl) {
           this.statusEl.textContent = 'Applying updated settings...';
         }
-        await this.engine.updateSettings({
+        this.settingsApplying = this.engine.updateSettings({
           chatModelId: newChatModelId,
           codingModelId: newCodingModelId,
           voiceId: newVoiceId,
           speechEnabled: newSpeechEnabled,
         });
+        await this.settingsApplying;
         this.updateUiState();
       }
     });
@@ -793,6 +797,13 @@ export class MinimalVoiceApp {
   /** Keeps the chat log scrolled to the newest message. */
   private scrollChatToBottom(): void {
     if (this.chatLogEl) this.chatLogEl.scrollTop = this.chatLogEl.scrollHeight;
+  }
+
+  /** Resolves once Settings is closed and any changes saved there are applied. */
+  private async settingsClosed(): Promise<void> {
+    const dialog = this.settingsDialog;
+    if (dialog?.open) await new Promise((resolve) => dialog.addEventListener('close', resolve, { once: true }));
+    await this.settingsApplying.catch(() => {});
   }
 
   private fillSpeechSetting(on: boolean): void {

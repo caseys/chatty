@@ -52,6 +52,7 @@ import type {
   SupportedLanguage,
   SystemTelemetry,
 } from '../types/index.ts';
+import { clearSpeechModelCache } from './model-cache.ts';
 
 const WELCOME_MESSAGE =
   'Welcome to Chatty, I can do anything your browser can do. For example: ask me to make MIDI music, ' +
@@ -144,6 +145,8 @@ export interface VoiceAssistantEngineEvents {
   onError?: (error: Error, context: string) => void;
   /** Yes/no question for the user (the app shows a browser confirm dialog); no answer means no */
   onConfirm?: (message: string) => boolean;
+  /** Resolves when model downloads may start (the UI holds them while Settings is open) */
+  beforeModelDownload?: () => Promise<void>;
   onCapabilitiesDetected?: (caps: BrowserCapabilities) => void;
   onLlmProgress?: (
     loaded: number,
@@ -190,6 +193,8 @@ export class VoiceAssistantEngine {
   private speechEnabled: boolean = DEFAULT_SETTINGS.speechEnabled;
   // Pause between model loads (?gap=<ms>), set in initialize()
   private loadGapMs = 250;
+  // Deleting the speech models' downloads (speech off); loading them again waits for it
+  private speechEviction: Promise<void> = Promise.resolve();
   private sidebarOpen: boolean = DEFAULT_SETTINGS.sidebarOpen;
   private codingLlmProvider: WorkerLlmProvider | null = null;
   private phoneModels: PhoneModelSet | null = null;
@@ -518,6 +523,7 @@ export class VoiceAssistantEngine {
     this.ttsProvider.voiceId = this.voiceId;
     this.orchestrator.setSpeechOutputEnabled(this.speechEnabled);
     this.audioSubsystem.setAudioSessionType(this.speechEnabled ? 'play-and-record' : 'playback');
+    if (!this.speechEnabled) this.evictSpeechModels();
 
     this.stateCoordinator.setModelState('stt', 'ready');
     this.stateCoordinator.setModelState('llm', 'downloading');
@@ -610,7 +616,8 @@ export class VoiceAssistantEngine {
     // 3 & 4. The LLM, then the speech models (Piper, then Whistle), one at a time, never
     // overlapping. The LLM goes first on every device: it is the big download, and the app
     // can't answer without it. With speech off, the speech models aren't loaded at all.
-    void startLlm()
+    void this.downloadsAllowed()
+      .then(() => startLlm())
       .catch(() => {})
       .then(() =>
         this.speechEnabled ? this.loadGap().then(() => this.loadSpeechModels()) : this.events.onSttLoadSettled?.()
@@ -639,12 +646,25 @@ export class VoiceAssistantEngine {
     }
   }
 
+  /** Waits while the UI holds model downloads (Settings is open). */
+  private async downloadsAllowed(): Promise<void> {
+    await this.events.beforeModelDownload?.();
+  }
+
   private loadGap(): Promise<void> {
     return this.loadGapMs > 0 ? new Promise((r) => setTimeout(r, this.loadGapMs)) : Promise.resolve();
   }
 
+  /** Speech is off: its models' downloads are deleted (they download again if it's turned on). */
+  private evictSpeechModels(): void {
+    this.speechEviction = this.speechEviction.then(() => clearSpeechModelCache()).catch(() => {});
+  }
+
   /** Piper, then Whistle, one at a time. Stops (and frees them) if speech is turned off meanwhile. */
   private async loadSpeechModels(): Promise<void> {
+    await this.speechEviction;
+    await this.downloadsAllowed();
+    if (!this.speechEnabled) return;
     writeLoadStage('the voice');
     this.stateCoordinator.setModelState('tts', 'downloading');
     await this.ttsProvider
@@ -673,6 +693,8 @@ export class VoiceAssistantEngine {
       return;
     }
     await this.loadGap();
+    await this.downloadsAllowed();
+    if (!this.speechEnabled) return;
     writeLoadStage('speech recognition');
     await this.sttProvider
       .initialize((loaded, total) => this.events.onSttProgress?.(loaded, total))
@@ -716,6 +738,7 @@ export class VoiceAssistantEngine {
     this.audioSubsystem.stopAllPlaybackImmediately();
     await Promise.all([this.ttsProvider.dispose(), this.sttProvider.dispose()]);
     this.stateCoordinator.setModelState('tts', 'unloaded');
+    this.evictSpeechModels();
     this.greetWithoutSpeech();
   }
 

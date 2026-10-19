@@ -63,3 +63,18 @@ export async function clearModelCache(): Promise<void> {
     }
   }
 }
+
+// Speech model downloads (names from runtimes/stt-provider.ts and runtimes/tts-provider.ts)
+const SPEECH_OPFS_ENTRIES = ['whistle-stt-base.cact', 'piper'];
+const SPEECH_CACHE_NAMES = ['chatty-piper-phonemize-v1'];
+
+/** Deletes the speech models' downloads (Whistle, Piper voices and phonemizer), used when speech is off. */
+export async function clearSpeechModelCache(): Promise<void> {
+  const root = await opfsRoot();
+  if (root) {
+    await Promise.all(SPEECH_OPFS_ENTRIES.map((name) => root.removeEntry(name, { recursive: true }).catch(() => {})));
+  }
+  if (typeof caches !== 'undefined') {
+    await Promise.all(SPEECH_CACHE_NAMES.map((name) => caches.delete(name).catch(() => false)));
+  }
+}
