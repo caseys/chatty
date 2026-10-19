@@ -43,9 +43,6 @@ function errorText(message: string, line?: number): string {
   return line ? `Error at line ${line}: ${message}` : `Error: ${message}`;
 }
 
-/** Errors this soon after a program ran are sent back to the model to fix */
-const AUTO_FIX_WINDOW_MS = 10_000;
-
 /** How a reply's code went: ran, failed, still running (a song, a timer), or there was none */
 export interface RunStatus {
   kind: 'ok' | 'running' | 'error' | 'none';
@@ -279,7 +276,6 @@ export class ConversationOrchestrator {
   private lastRun: {
     turnId: string;
     code: string;
-    finishedAt: number;
     isAutoFix: boolean;
     fixRequested: boolean;
     error: string | null;
@@ -1214,7 +1210,6 @@ export class ConversationOrchestrator {
             this.lastRun = {
               turnId,
               code: executableCode,
-              finishedAt: performance.now(),
               isAutoFix: !!options?.autoFix,
               fixRequested: false,
               error: execResult.error ?? null,
@@ -1411,13 +1406,14 @@ export class ConversationOrchestrator {
    * runtime timers or event handlers after the code-mode turn has finished.
    */
   /**
-   * An error a program threw after it started (a timer, handler or async function). Shown, and
-   * if it's the newest program and it just ran, sent back to the model to fix.
+   * An error a program threw after it started (a timer, an async function, or a handler the user
+   * triggered, maybe minutes later). Shown, and sent back to the model to fix, once per program.
    */
   reportProgramError(message: string, line?: number): void {
     this.events.onRunStatus?.(null, { kind: 'error', text: `${errorText(message, line)} (while running)` });
     const run = this.lastRun;
-    if (!run || run.error || performance.now() - run.finishedAt > AUTO_FIX_WINDOW_MS) return;
+    // A program that only talks can't have thrown it: it's from an app still on screen from before
+    if (!run || run.error || isTalkOnly(run.code)) return;
     run.error = message;
     run.errorLine = line;
     // Still finishing its turn (speaking): the turn's end sends it
@@ -1870,6 +1866,12 @@ export class ConversationOrchestrator {
           content: cleaned,
         });
       }
+    }
+
+    // The program being edited or fixed is always shown in full right before the request, even
+    // when its turn is no longer in the history (compacted away)
+    if (programBeingEdited && !promptMessages.some((m) => m.role === 'assistant' && m.content === programBeingEdited)) {
+      promptMessages.push({ role: 'assistant', content: programBeingEdited });
     }
 
     promptMessages.push({

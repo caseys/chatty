@@ -1300,7 +1300,8 @@ export class JavascriptRuntime {
           Boolean(document.querySelector('canvas, svg, table, img, video, form, button, input, div:not(#root)')) ||
           Array.from(document.body.children).some(c => c !== rootEl && c.tagName !== 'SCRIPT' && c.tagName !== 'STYLE');
 
-        let out = res;
+        // A function (often the program's last line defines or exposes one) is never a reply
+        let out = typeof res === 'function' ? undefined : res;
         if (out === undefined && logs.length > 0) {
           out = logs.join('\\n');
         }
