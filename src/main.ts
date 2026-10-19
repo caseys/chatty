@@ -657,7 +657,8 @@ export class MinimalVoiceApp {
       snap.turn === 'generating';
     bar.classList.toggle('busy', busy);
     bar.setAttribute('aria-busy', String(busy));
-    this.setKeepAwake(busy);
+    // Also stay awake while the mic is on, so a hands-free conversation isn't cut off by sleep.
+    this.setKeepAwake(busy || snap.microphone === 'listening');
   }
 
   /**
