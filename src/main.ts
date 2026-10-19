@@ -4,9 +4,12 @@
 // ============================================================================
 
 import { VoiceAssistantEngine } from './core/voice-assistant-engine.ts';
+import { MODEL_REGISTRY } from './core/model-manager.ts';
 import { FluidAudioVisualizer } from './audio/visualizer.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
 import { createToolSummaryElement, parseStreamingToolCall, stripToolCallMarkup } from './tools/tool-formatter.ts';
+
+type LoadKind = 'llm' | 'tts' | 'stt';
 
 type WakeLockSentinelLike = {
   released: boolean;
@@ -33,6 +36,13 @@ export class MinimalVoiceApp {
 
   // Rootless Full-Window Visual Screen & HUD Elements
   private appInitializing = true;
+  // Startup download progress per model, combined into one progress bar
+  private loadBytes: Record<LoadKind, { loaded: number; total: number }> = {
+    llm: { loaded: 0, total: 0 },
+    tts: { loaded: 0, total: 0 },
+    stt: { loaded: 0, total: 0 },
+  };
+  private sttLoadSettled = false;
   private keepAwakeWanted = false;
   private keepAwakeListenerAdded = false;
   private wakeLockPending = false;
@@ -138,19 +148,19 @@ export class MinimalVoiceApp {
         }
         this.updateUiState();
       },
-      onLlmProgress: (_loaded, _total, pct, mb, totalMb) => {
-        const snap = this.engine.getSnapshot();
-        const modelName = snap.models.llm === 'downloading' || snap.models.llm === 'initializing'
-          ? (this.engine.llmProvider.modelId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B')
-          : 'Gemma 4';
-        this.updateDownloadProgress(`Pulling ${modelName} WebGPU to OPFS: ${mb} / ${totalMb} MB (${pct}%)...`, pct, `${mb} / ${totalMb} MB (${pct}%)`);
+      onLlmProgress: (loaded, total) => {
+        const modelName = this.engine.llmProvider.modelId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B';
+        this.reportLoadProgress('llm', loaded, total, modelName);
       },
-      onTtsProgress: (_loaded, _total, pct, mb, totalMb) => {
-        const snap = this.engine.getSnapshot();
-        if (snap.models.llm === 'ready' && (snap.models.tts === 'downloading' || snap.models.tts === 'initializing')) {
-          const detail = mb && totalMb ? `${mb} / ${totalMb} MB (${pct}%)` : `${pct}%`;
-          this.updateDownloadProgress(`Pulling Piper Voice: ${detail}...`, pct, detail);
-        }
+      onTtsProgress: (loaded, total) => {
+        this.reportLoadProgress('tts', loaded, total, 'Piper voice');
+      },
+      onSttProgress: (loaded, total) => {
+        this.reportLoadProgress('stt', loaded, total, 'Whistle speech recognition');
+      },
+      onSttLoadSettled: () => {
+        this.sttLoadSettled = true;
+        this.updateUiState();
       },
       onError: (err, context) => {
         if (this.statusEl) {
@@ -178,6 +188,7 @@ export class MinimalVoiceApp {
     // Install click pass-through before the (potentially long) model download/initialization.
     this.initPointerPassthrough();
     this.updateBusyIndicator();
+    this.updateDownloadProgress('Loading models…', 0, '0%');
     try {
       await this.engine.initialize();
     } finally {
@@ -650,10 +661,7 @@ export class MinimalVoiceApp {
     const snap = this.engine.getSnapshot();
     const busy =
       this.appInitializing ||
-      snap.models.llm === 'downloading' ||
-      snap.models.llm === 'initializing' ||
-      snap.models.tts === 'downloading' ||
-      snap.models.tts === 'initializing' ||
+      this.isStartupLoading() ||
       snap.interaction === 'finalizing_input' ||
       snap.interaction === 'building_context' ||
       snap.interaction === 'compacting' ||
@@ -747,6 +755,57 @@ export class MinimalVoiceApp {
     hint.hidden = !show;
   }
 
+  /** True while any startup model (Gemma, Piper, Whistle) is still downloading/initializing. */
+  private isStartupLoading(): boolean {
+    const m = this.engine.getSnapshot().models;
+    return (
+      m.llm === 'downloading' ||
+      m.llm === 'initializing' ||
+      m.tts === 'downloading' ||
+      m.tts === 'initializing' ||
+      !this.sttLoadSettled
+    );
+  }
+
+  /**
+   * One progress bar for all startup models (loaded one at a time): the status line names the
+   * model currently loading, the bar shows bytes across all three.
+   */
+  private reportLoadProgress(kind: LoadKind, loaded: number, total: number, label: string): void {
+    const settings = this.engine.getSettings();
+    const expected = (id: string, fallback: number) =>
+      MODEL_REGISTRY.find((m) => m.id === id)?.expectedSizeBytes ?? fallback;
+    const defaults: Record<LoadKind, number> = {
+      llm: expected(this.engine.llmProvider.modelId, 2_008_432_640),
+      tts: expected(settings.voiceId, 63_201_294),
+      stt: expected('whistle-stt-base', 16_919_407),
+    };
+    this.loadBytes[kind] = { loaded, total: total > 0 ? total : defaults[kind] };
+
+    const m = this.engine.getSnapshot().models;
+    const finished: Record<LoadKind, boolean> = {
+      llm: m.llm === 'ready' || m.llm === 'failed',
+      tts: m.tts === 'ready' || m.tts === 'failed',
+      stt: this.sttLoadSettled,
+    };
+    let sumLoaded = 0;
+    let sumTotal = 0;
+    for (const k of ['llm', 'tts', 'stt'] as LoadKind[]) {
+      const t = this.loadBytes[k].total || defaults[k];
+      sumTotal += t;
+      sumLoaded += finished[k] ? t : Math.min(this.loadBytes[k].loaded, t);
+    }
+    const overallPct = sumTotal > 0 ? Math.min(100, Math.round((sumLoaded * 100) / sumTotal)) : 0;
+    const mb = (n: number) => (n / (1024 * 1024)).toFixed(0);
+    const own = this.loadBytes[kind];
+    const ownPct = own.total > 0 ? Math.min(100, Math.round((own.loaded * 100) / own.total)) : 0;
+    this.updateDownloadProgress(
+      `Loading ${label}: ${mb(own.loaded)} / ${mb(own.total)} MB (${ownPct}%)…`,
+      overallPct,
+      `${overallPct}% · ${mb(sumLoaded)} / ${mb(sumTotal)} MB`
+    );
+  }
+
   private updateDownloadProgress(statusText: string, pct: number, meterText: string): void {
     if (this.statusEl) {
       this.statusEl.textContent = statusText;
@@ -757,7 +816,7 @@ export class MinimalVoiceApp {
     const thresholdEl = document.getElementById('context-meter-threshold');
 
     if (meterTitle) {
-      meterTitle.textContent = 'Pulling Assets';
+      meterTitle.textContent = 'Loading models';
     }
     if (meterFill) {
       meterFill.style.width = `${Math.max(1, pct)}%`;
@@ -772,13 +831,7 @@ export class MinimalVoiceApp {
   }
 
   private updateContextMeter(): void {
-    const snap = this.engine.getSnapshot();
-    const isModelLoading =
-      snap.models.llm === 'downloading' ||
-      snap.models.llm === 'initializing' ||
-      snap.models.tts === 'downloading' ||
-      snap.models.tts === 'initializing';
-    if (isModelLoading) return; // Retain download progress bar while models are loading
+    if (this.isStartupLoading()) return; // Retain download progress bar while models are loading
 
     const meterFill = document.getElementById('context-meter-fill');
     const meterText = document.getElementById('context-meter-text');
@@ -809,11 +862,7 @@ export class MinimalVoiceApp {
     if (!this.statusEl) return;
     const snap = this.engine.getSnapshot();
 
-    const isModelLoading =
-      snap.models.llm === 'downloading' ||
-      snap.models.llm === 'initializing' ||
-      snap.models.tts === 'downloading' ||
-      snap.models.tts === 'initializing';
+    const isModelLoading = this.isStartupLoading();
 
     if (snap.models.llm === 'failed') {
       this.statusEl.textContent =

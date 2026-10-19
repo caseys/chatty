@@ -78,6 +78,9 @@ export interface VoiceAssistantEngineEvents {
   onCapabilitiesDetected?: (caps: BrowserCapabilities) => void;
   onLlmProgress?: (loaded: number, total: number, pct: number, mb: string, totalMb: string) => void;
   onTtsProgress?: (loaded: number, total: number, pct: number, mb?: string, totalMb?: string) => void;
+  onSttProgress?: (loaded: number, total: number) => void;
+  /** Fired once the startup Whistle STT load settles (success or failure). */
+  onSttLoadSettled?: () => void;
   onTitleGenerated?: (title: string) => void;
   onJavascriptExecution?: (result: JavascriptExecutionResult) => void;
   onJavascriptVisualChange?: (hasVisual: boolean, iframe: HTMLIFrameElement | null) => void;
@@ -446,9 +449,12 @@ export class VoiceAssistantEngine {
         });
 
       // 4. Pre-warm Whistle STT WASM provider
-      await this.sttProvider.initialize().catch((err) => {
-        console.warn('Whistle STT pre-warm warning:', err);
-      });
+      await this.sttProvider
+        .initialize((loaded, total) => this.events.onSttProgress?.(loaded, total))
+        .catch((err) => {
+          console.warn('Whistle STT pre-warm warning:', err);
+        })
+        .finally(() => this.events.onSttLoadSettled?.());
     };
     void (llmInitDone ?? Promise.resolve()).finally(() => startSpeechModels());
 
