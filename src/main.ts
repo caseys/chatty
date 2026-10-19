@@ -7,6 +7,7 @@ import Prism from 'prismjs';
 import { VoiceAssistantEngine } from './core/voice-assistant-engine.ts';
 import { MODEL_REGISTRY } from './core/model-manager.ts';
 import { FluidAudioVisualizer } from './audio/visualizer.ts';
+import { clearModelCache, getModelCacheBytes } from './core/model-cache.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
 import { createToolSummaryElement, parseStreamingToolCall, stripToolCallMarkup } from './tools/tool-formatter.ts';
 
@@ -43,11 +44,17 @@ export class MinimalVoiceApp {
   private statusEl = document.getElementById('minimal-status');
   private chatLogEl = document.getElementById('chat-log');
   private chatExamplesEl = document.getElementById('chat-examples');
+  private chatInputForm = document.getElementById('chat-input-form') as HTMLFormElement | null;
+  private chatInput = document.getElementById('chat-input') as HTMLInputElement | null;
+  private chatSendBtn = document.getElementById('chat-send-btn') as HTMLButtonElement | null;
+  private modelCacheSizeEl = document.getElementById('model-cache-size');
+  private clearModelCacheBtn = document.getElementById('btn-clear-model-cache') as HTMLButtonElement | null;
   private rawOutputEl = document.getElementById('raw-output');
   // Chat bubbles by message id and by turn (streamed text arrives before the reply is saved)
   private bubbles = new Map<string, HTMLElement>();
   private turnBubbles = new Map<string, HTMLElement>();
   private interimUserBubble: HTMLElement | null = null;
+  private downloadRate = { label: '', bytes: 0, time: 0, rate: 0 };
   private inputCanvas = document.getElementById('input-waveform') as HTMLCanvasElement | null;
   private outputCanvas = document.getElementById('output-waveform') as HTMLCanvasElement | null;
 
@@ -263,7 +270,32 @@ export class MinimalVoiceApp {
     else target.insertBefore(waves, target.firstChild);
   }
 
+  /** Shows how much the downloaded models take up, in the settings dialog. */
+  private async refreshModelCacheSize(): Promise<void> {
+    if (!this.modelCacheSizeEl) return;
+    const bytes = await getModelCacheBytes().catch(() => 0);
+    const size = bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${Math.round(bytes / 1e6)} MB`;
+    this.modelCacheSizeEl.textContent = `Downloaded models: ${size}`;
+    if (this.clearModelCacheBtn) this.clearModelCacheBtn.disabled = bytes === 0;
+  }
+
   private bindEvents(): void {
+    this.chatInputForm?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = this.chatInput?.value.trim();
+      if (!text || this.chatSendBtn?.disabled) return;
+      if (this.chatInput) this.chatInput.value = '';
+      void this.engine.submitText(text);
+    });
+
+    this.clearModelCacheBtn?.addEventListener('click', async () => {
+      const shown = this.modelCacheSizeEl?.textContent?.replace('Downloaded models: ', '') ?? 'the downloaded models';
+      if (!confirm(`Delete ${shown} of downloaded models? They download again the next time Chatty loads.`)) return;
+      this.clearModelCacheBtn!.disabled = true;
+      await clearModelCache();
+      await this.refreshModelCacheSize();
+      if (this.modelCacheSizeEl) this.modelCacheSizeEl.textContent += ' (cleared; models download again on next load)';
+    });
     this.updateChatExamples(false);
     this.placeWaveforms();
     window.matchMedia(NARROW_LAYOUT).addEventListener('change', () => this.placeWaveforms());
@@ -351,6 +383,7 @@ export class MinimalVoiceApp {
       const current = this.engine.getSettings();
       // Rebuilt on open: phones only list phone-sized models once the device is detected
       this.fillChatModelOptions(current.chatModelId);
+      void this.refreshModelCacheSize();
       if (this.selectPiperVoice) this.selectPiperVoice.value = current.voiceId;
       this.settingsDialog?.showModal();
     });
@@ -749,8 +782,9 @@ export class MinimalVoiceApp {
     }
 
     if (this.micLabel) {
-      this.micLabel.textContent = isActive ? 'Stop' : (hasHistory ? 'Continue' : 'Start');
+      this.micLabel.textContent = isModelLoading ? 'Loading…' : isActive ? 'Stop' : hasHistory ? 'Continue' : 'Start';
     }
+    if (this.chatSendBtn) this.chatSendBtn.disabled = isModelLoading;
 
     if (this.newBtn) {
       this.newBtn.hidden = false;
@@ -783,6 +817,7 @@ export class MinimalVoiceApp {
     const current = this.engine.getSettings();
     this.fillChatModelOptions(current.chatModelId);
     if (this.selectPiperVoice) this.selectPiperVoice.value = current.voiceId;
+    void this.refreshModelCacheSize();
     return new Promise((resolve) => {
       dialog.addEventListener(
         'close',
@@ -950,11 +985,31 @@ export class MinimalVoiceApp {
     const order = this.engine.getStartupModelOrder();
     const index = order.indexOf(label);
     const step = index >= 0 ? `model ${index + 1} of ${order.length}: ` : '';
+    const rate = this.measureDownloadRate(label, own.loaded);
+    const rateText = rate && own.loaded < own.total ? ` · ${rate.toFixed(1)} MB/s` : '';
     this.updateDownloadProgress(
-      `Loading ${step}${label} — ${mb(own.loaded)} / ${mb(own.total)} MB (${ownPct}%)`,
+      `Loading ${step}${label} — ${mb(own.loaded)} / ${mb(own.total)} MB (${ownPct}%)${rateText}`,
       overallPct,
       `${overallPct}% · ${mb(sumLoaded)} / ${mb(sumTotal)} MB`
     );
+  }
+
+  /** Smoothed download speed (MB/s) of the model loading now, or null until there's enough to measure. */
+  private measureDownloadRate(label: string, loaded: number): number | null {
+    const now = performance.now();
+    const last = this.downloadRate;
+    if (last.label !== label || loaded < last.bytes) {
+      this.downloadRate = { label, bytes: loaded, time: now, rate: 0 };
+      return null;
+    }
+    const elapsed = now - last.time;
+    if (elapsed >= 500) {
+      const instant = (loaded - last.bytes) / (1024 * 1024) / (elapsed / 1000);
+      last.rate = last.rate ? last.rate * 0.6 + instant * 0.4 : instant;
+      last.bytes = loaded;
+      last.time = now;
+    }
+    return last.rate || null;
   }
 
   private updateDownloadProgress(statusText: string, pct: number, meterText: string): void {

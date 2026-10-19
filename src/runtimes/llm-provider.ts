@@ -8,7 +8,11 @@ import type {
   LlmGenerationResult,
   LlmRuntimeProvider,
 } from '../types/index.ts';
+
 import { MODEL_REGISTRY } from '../core/model-manager.ts';
+
+/** How much of the model download may run ahead of the engine loading it */
+const READ_AHEAD_BYTES = 192 * 1024 * 1024;
 
 const WASM_CDN_BASE = 'https://cdn.jsdelivr.net/npm/@litert-lm/core@0.19.0-nightly.20261016/wasm';
 const WASM_RELAXED_SIMD_CHECK = new Uint8Array([
@@ -477,7 +481,11 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
           if (!opfsFinalized) await removeCachedModel();
           await reader.cancel();
         },
-      });
+      },
+      // Read ahead of the engine: it pulls only as it loads weights, so without a buffer the
+      // download sat idle in between. Up to READ_AHEAD_BYTES wait here (desktop only; phones
+      // don't use LiteRT).
+      { highWaterMark: READ_AHEAD_BYTES, size: (chunk) => chunk.byteLength });
     }
 
     try {

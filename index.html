@@ -90,6 +90,12 @@
               <li>“What’s 15 percent of 84?”</li>
             </ul>
           </div>
+          <form id="chat-input-form" class="chat-input" autocomplete="off">
+            <input id="chat-input" class="chat-input-field" type="text" placeholder="Type a message…" enterkeyhint="send" aria-label="Message" />
+            <button id="chat-send-btn" class="chat-send-btn" type="submit" aria-label="Send" title="Send">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2 11 13"></path><path d="M22 2 15 22l-4-9-9-4Z"></path></svg>
+            </button>
+          </form>
           <div class="chat-waveforms">
             <canvas id="input-waveform" class="chat-waveform" width="160" height="24" aria-label="Microphone level"></canvas>
             <canvas id="output-waveform" class="chat-waveform" width="160" height="24" aria-label="Voice output level"></canvas>
@@ -183,6 +189,15 @@
                         <option value="en_US-hfc_male-medium">Piper US Male (Medium ONNX)</option>
                       </select>
                     </div>
+                  </div>
+
+                  <!-- Downloaded models -->
+                  <div class="settings-field">
+                    <div class="settings-label">
+                      <span class="settings-label-title">Model Cache</span>
+                      <span id="model-cache-size" class="settings-label-desc">Measuring downloaded models…</span>
+                    </div>
+                    <button id="btn-clear-model-cache" class="btn btn-secondary" type="button">Clear model cache</button>
                   </div>
 
                   <!-- App Installation -->
