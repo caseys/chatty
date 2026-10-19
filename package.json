@@ -15,6 +15,7 @@
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",
     "@litert-lm/core": "0.19.0-nightly.20261016",
+    "@mlc-ai/web-llm": "^0.2.85",
     "@realtimex/piper-tts-web": "^1.1.1",
     "acorn": "^8.19.0",
     "cactus-needle": "^0.3.0",

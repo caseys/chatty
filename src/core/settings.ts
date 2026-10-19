@@ -4,7 +4,7 @@
 // and Piper ONNX Voice choice with localStorage & IndexedDB persistence.
 // ============================================================================
 
-import type { OnnxModelSpec } from '../runtimes/onnx-llm-provider.ts';
+import type { WebLlmModelSpec } from '../runtimes/webllm-provider.ts';
 
 export interface ChattySettings {
   chatModelId: string;
@@ -21,94 +21,53 @@ export interface ModelOptionItem {
   phone?: boolean;
 }
 
-/** Chat models run with Transformers.js (ONNX on WebGPU) instead of LiteRT; the only ones phones get. */
-export interface OnnxChatModel extends ModelOptionItem, OnnxModelSpec {
+/**
+ * Chat models run with WebLLM (MLC, on WebGPU in a worker) instead of LiteRT; the only ones
+ * phones get. Memory figures are WebLLM's own estimates, including a 4,096-token context.
+ */
+export interface LocalChatModel extends ModelOptionItem, WebLlmModelSpec {
   label: string;
-  sizeBytes: number;
 }
 
-export const ONNX_CHAT_MODELS: ReadonlyArray<OnnxChatModel> = [
-  {
-    id: 'qwen2.5-coder-0.5b',
-    label: 'Qwen2.5-Coder 0.5B',
-    name: 'Qwen2.5-Coder 0.5B (~555 MB, Phone)',
-    description: 'Smallest model tuned for JavaScript',
-    repo: 'onnx-community/Qwen2.5-Coder-0.5B-Instruct',
-    dtype: 'q4f16',
-    contextLimit: 8192,
-    maxOutputTokens: 1536,
-    sizeBytes: 555_000_000,
-    phone: true,
-  },
-  {
-    id: 'qwen3-0.6b',
-    label: 'Qwen3 0.6B',
-    name: 'Qwen3 0.6B (~570 MB, Phone)',
-    description: 'Newer general model that also codes',
-    repo: 'onnx-community/Qwen3-0.6B-ONNX',
-    dtype: 'q4f16',
-    contextLimit: 8192,
-    maxOutputTokens: 1536,
-    sizeBytes: 570_000_000,
-    phone: true,
-    // Answer directly instead of writing a <think> block first
-    templateOptions: { enable_thinking: false },
-  },
-  {
-    id: 'qwen2.5-0.5b',
-    label: 'Qwen2.5 0.5B',
-    name: 'Qwen2.5 0.5B (~483 MB, Phone)',
-    description: 'Smallest general model',
-    repo: 'onnx-community/Qwen2.5-0.5B-Instruct',
-    dtype: 'q4f16',
-    contextLimit: 8192,
-    maxOutputTokens: 1536,
-    sizeBytes: 483_000_000,
-    phone: true,
-  },
-  {
-    id: 'lfm2-1.2b',
-    label: 'LFM2 1.2B',
-    name: 'LFM2 1.2B (~760 MB, Phone)',
-    description: 'Liquid AI on-device model',
-    repo: 'onnx-community/LFM2-1.2B-ONNX',
-    dtype: 'q4f16',
-    contextLimit: 8192,
-    maxOutputTokens: 1536,
-    sizeBytes: 760_000_000,
-    phone: true,
-  },
-  {
-    id: 'gemma-3-1b',
-    label: 'Gemma 3 1B',
-    name: 'Gemma 3 1B (~763 MB, Phone)',
-    description: 'Google on-device chat model',
-    repo: 'onnx-community/gemma-3-1b-it-ONNX',
-    dtype: 'q4f16',
-    contextLimit: 8192,
-    maxOutputTokens: 1536,
-    sizeBytes: 763_000_000,
-    phone: true,
-  },
-  {
-    id: 'qwen2.5-coder-1.5b',
-    label: 'Qwen2.5-Coder 1.5B',
-    name: 'Qwen2.5-Coder 1.5B (~1.34 GB, Code-focused)',
-    description: 'Strong at JavaScript, plainer conversation',
-    repo: 'onnx-community/Qwen2.5-Coder-1.5B-Instruct',
-    dtype: 'q4f16',
-    contextLimit: 8192,
-    maxOutputTokens: 1536,
-    sizeBytes: 1_344_000_000,
-  },
+const local = (
+  id: string,
+  label: string,
+  mlcId: string,
+  downloadMb: number,
+  memoryMb: number,
+  description: string,
+  phone: boolean
+): LocalChatModel => ({
+  id,
+  label,
+  name: `${label} (~${downloadMb >= 1000 ? `${(downloadMb / 1000).toFixed(1)} GB` : `${downloadMb} MB`}${phone ? ', Phone' : ''})`,
+  description: `${description} · needs ~${memoryMb >= 1000 ? `${(memoryMb / 1000).toFixed(1)} GB` : `${memoryMb} MB`} memory`,
+  mlcId,
+  sizeBytes: downloadMb * 1_000_000,
+  // Phones: a 4,096-token context keeps the model's working memory small
+  contextLimit: phone ? 4096 : 8192,
+  maxOutputTokens: 1536,
+  phone,
+});
+
+export const LOCAL_CHAT_MODELS: ReadonlyArray<LocalChatModel> = [
+  local('llama-3.2-1b', 'Llama 3.2 1B', 'Llama-3.2-1B-Instruct-q4f16_1-MLC', 705, 879, 'Meta on-device model', true),
+  local('qwen2.5-coder-0.5b', 'Qwen2.5-Coder 0.5B', 'Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC', 290, 945, 'Small model tuned for code', true),
+  local('qwen2.5-0.5b', 'Qwen2.5 0.5B', 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC', 290, 945, 'Smallest download', true),
+  { ...local('qwen3-0.6b', 'Qwen3 0.6B', 'Qwen3-0.6B-q4f16_1-MLC', 352, 1403, 'Newer general model', true), noThinking: true },
+  local('qwen2.5-coder-1.5b', 'Qwen2.5-Coder 1.5B', 'Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC', 880, 1630, 'Strong at JavaScript', false),
+  local('qwen2.5-coder-3b', 'Qwen2.5-Coder 3B', 'Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC', 1748, 2505, 'Stronger at JavaScript', false),
+  { ...local('qwen3-4b', 'Qwen3 4B', 'Qwen3-4B-q4f16_1-MLC', 2279, 3432, 'General model, good at code', false), noThinking: true },
+  local('qwen2.5-coder-7b', 'Qwen2.5-Coder 7B', 'Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC', 4296, 5107, 'Best at JavaScript, needs a strong GPU', false),
 ];
 
-export const DEFAULT_PHONE_CHAT_MODEL_ID = 'qwen2.5-0.5b';
-/** Tried after a phone load dies (likely out of memory) */
-export const SMALLEST_PHONE_CHAT_MODEL_ID = 'qwen2.5-0.5b';
+/** Phones start on Llama 3.2 1B: the smallest memory footprint, and it did best in testing */
+export const DEFAULT_PHONE_CHAT_MODEL_ID = 'llama-3.2-1b';
+/** Offered after a phone load dies (likely out of memory): the smallest memory footprint */
+export const SMALLEST_PHONE_CHAT_MODEL_ID = 'llama-3.2-1b';
 
-export function findOnnxChatModel(id: string): OnnxChatModel | undefined {
-  return ONNX_CHAT_MODELS.find((m) => m.id === id);
+export function findLocalChatModel(id: string): LocalChatModel | undefined {
+  return LOCAL_CHAT_MODELS.find((m) => m.id === id);
 }
 
 export const SUPPORTED_CHAT_MODELS: ReadonlyArray<ModelOptionItem> = [
@@ -122,7 +81,7 @@ export const SUPPORTED_CHAT_MODELS: ReadonlyArray<ModelOptionItem> = [
     name: 'Gemma 4 E4B (~2.89 GB, High Quality)',
     description: 'High quality, larger context reasoning',
   },
-  ...ONNX_CHAT_MODELS.map(({ id, name, description, phone }) => ({ id, name, description, phone })),
+  ...LOCAL_CHAT_MODELS.map(({ id, name, description, phone }) => ({ id, name, description, phone })),
 ];
 
 export const SUPPORTED_CODING_MODELS: ReadonlyArray<ModelOptionItem> = [

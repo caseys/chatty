@@ -73,3 +73,14 @@ describe('spoken input filtering', () => {
     expect(classifyTranscript('Zeichne einen Hund', true)).toBe('submit');
   });
 });
+
+describe('WebLLM thinking filter', () => {
+  it('holds back a leading <think> block and passes everything else through', async () => {
+    const { withoutThinking } = await import('../src/runtimes/webllm-provider.ts');
+    expect(withoutThinking('<thi')).toBeNull();
+    expect(withoutThinking('<think>planning the answer')).toBeNull();
+    expect(withoutThinking('<think>planning</think>\n\nspeak("Hi");')).toBe('speak("Hi");');
+    expect(withoutThinking('speak("Hi");')).toBe('speak("Hi");');
+    expect(withoutThinking('<b>bold</b>')).toBe('<b>bold</b>');
+  });
+});

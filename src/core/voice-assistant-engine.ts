@@ -25,7 +25,7 @@ import { createDrawGraphicsTool } from '../tools/draw-tool.ts';
 import { createWikipediaTool, createInstantAnswersTool } from '../tools/web-tools.ts';
 import { NEEDLE_LABEL } from '../runtimes/needle-router.ts';
 import { MODEL_REGISTRY } from './model-manager.ts';
-import { OnnxLlmProvider } from '../runtimes/onnx-llm-provider.ts';
+import { WebLlmProvider } from '../runtimes/webllm-provider.ts';
 import {
   PHONE_CHAT_SYSTEM_PROMPT,
   PhoneModelSet,
@@ -36,7 +36,7 @@ import {
   type ChattySettings,
   DEFAULT_SETTINGS,
   DEFAULT_PHONE_CHAT_MODEL_ID,
-  findOnnxChatModel,
+  findLocalChatModel,
   SMALLEST_PHONE_CHAT_MODEL_ID,
   SUPPORTED_CHAT_MODELS,
   type ModelOptionItem,
@@ -179,8 +179,8 @@ export class VoiceAssistantEngine {
   private sidebarOpen: boolean = DEFAULT_SETTINGS.sidebarOpen;
   private codingLlmProvider: WorkerLlmProvider | null = null;
   private phoneModels: PhoneModelSet | null = null;
-  // Chat model when an ONNX model is picked (always on phones); else Gemma 4 via llmProvider
-  private onnxChat: OnnxLlmProvider | null = null;
+  // Chat model when a WebLLM model is picked (always on phones); else Gemma 4 via llmProvider
+  private localChat: WebLlmProvider | null = null;
   private isPhone = false;
   // Every model load takes the next ticket; only the newest may mark the model ready or report
   // an error (a model switch in Settings supersedes a load that is still running)
@@ -436,7 +436,7 @@ export class VoiceAssistantEngine {
     // router + chat + coder phone pipeline for comparison.
     const splitPipeline =
       isConstrained && typeof location !== 'undefined' && new URLSearchParams(location.search).get('pipeline') === 'split';
-    if (isConstrained && !findOnnxChatModel(this.chatModelId)?.phone) {
+    if (isConstrained && !findLocalChatModel(this.chatModelId)?.phone) {
       this.chatModelId = DEFAULT_PHONE_CHAT_MODEL_ID;
     }
 
@@ -451,7 +451,7 @@ export class VoiceAssistantEngine {
       clearLlmLoadMarker();
       const fallbackId = isConstrained ? SMALLEST_PHONE_CHAT_MODEL_ID : recommended.fallbackLlmModelId;
       const fallbackName =
-        findOnnxChatModel(fallbackId)?.label ?? (fallbackId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B');
+        findLocalChatModel(fallbackId)?.label ?? (fallbackId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B');
       const crashedName = this.previousLoadFailure ?? 'the model';
       if (
         this.ask(
@@ -519,7 +519,7 @@ export class VoiceAssistantEngine {
         'WebGPU is required for Gemma 4 local inference. Please use Chrome, Edge, or Safari with WebGPU enabled.'
       );
     } else {
-      this.useOnnxChat(splitPipeline ? null : this.chatModelId);
+      this.useLocalChat(splitPipeline ? null : this.chatModelId);
       let startupLlm: LlmRuntimeProvider = this.chatLlm;
       // ?pipeline=split: Needle router (CPU) + Gemma 3 1B chat, Qwen coder swapped in
       if (splitPipeline) {
@@ -584,9 +584,9 @@ export class VoiceAssistantEngine {
       };
     }
 
-    // 3 & 4. Speech models (Piper, then Whistle) and the LLM load one at a time, never overlapping.
-    // Desktop: the LLM first, so it can answer sooner. Phones: the small WASM speech models first,
-    // then the WebGPU models, so the LLM load is the last allocation on a tight memory budget.
+    // 3 & 4. The LLM, then the speech models (Piper, then Whistle), one at a time, never
+    // overlapping. The LLM goes first on every device: it is the big download, and the app
+    // can't answer without it.
     const startSpeechModels = async () => {
       writeLoadStage('Piper voice');
       await this.ttsProvider
@@ -618,15 +618,9 @@ export class VoiceAssistantEngine {
         })
         .finally(() => this.events.onSttLoadSettled?.());
     };
-    if (isConstrained) {
-      void startSpeechModels()
-        .then(gap)
-        .finally(() => startLlm().finally(clearLoadStage));
-    } else {
-      void startLlm()
-        .then(gap)
-        .finally(() => startSpeechModels().finally(clearLoadStage));
-    }
+    void startLlm()
+      .then(gap)
+      .finally(() => startSpeechModels().finally(clearLoadStage));
 
     // 5. Visibility and lifecycle handlers
     if (typeof document !== 'undefined') {
@@ -690,7 +684,7 @@ export class VoiceAssistantEngine {
 
   /** Approximate startup LLM download size (bytes), before the download reports its own total. */
   getStartupLlmExpectedBytes(): number {
-    if (this.onnxChat) return findOnnxChatModel(this.onnxChat.modelId)?.sizeBytes ?? 600_000_000;
+    if (this.localChat) return findLocalChatModel(this.localChat.modelId)?.sizeBytes ?? 600_000_000;
     if (this.phoneModels) return 35_300_000 + (this.phoneModels.chatSpec.dtype === 'fp16' ? 570_000_000 : 764_000_000);
     return MODEL_REGISTRY.find((m) => m.id === this.chatModelId)?.expectedSizeBytes ?? 2_008_432_640;
   }
@@ -698,15 +692,14 @@ export class VoiceAssistantEngine {
   /** Startup models in load order, as the UI labels them ("Loading model N of M"). */
   getStartupModelOrder(): string[] {
     const speech = this.nativeStt ? ['Piper voice'] : ['Piper voice', 'Whistle speech recognition'];
-    if (this.phoneModels) return [...speech, NEEDLE_LABEL, this.phoneModels.chatSpec.label];
-    if (this.isPhone) return [...speech, this.getLlmDisplayName()];
+    if (this.phoneModels) return [NEEDLE_LABEL, this.phoneModels.chatSpec.label, ...speech];
     return [this.getLlmDisplayName(), ...speech];
   }
 
   /** Name of the model(s) loading/answering, for status text. */
   getLlmDisplayName(): string {
     if (this.phoneModels) return this.phoneModels.chatSpec.label;
-    if (this.onnxChat) return findOnnxChatModel(this.onnxChat.modelId)?.label ?? this.onnxChat.modelId;
+    if (this.localChat) return findLocalChatModel(this.localChat.modelId)?.label ?? this.localChat.modelId;
     return this.chatModelId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B';
   }
 
@@ -1211,17 +1204,17 @@ export class VoiceAssistantEngine {
 
   /** The model answering turns on desktop: Gemma 4 (LiteRT), or Qwen2.5-Coder when picked. */
   private get chatLlm(): LlmRuntimeProvider {
-    return this.onnxChat ?? this.llmProvider;
+    return this.localChat ?? this.llmProvider;
   }
 
-  /** Points the conversation and the JS runtime at an ONNX chat model, or at Gemma 4 (null). */
-  private useOnnxChat(modelId: string | null): void {
-    const model = modelId ? findOnnxChatModel(modelId) : undefined;
-    if (this.onnxChat && this.onnxChat.modelId !== model?.id) {
-      void this.onnxChat.dispose();
-      this.onnxChat = null;
+  /** Points the conversation and the JS runtime at a WebLLM chat model, or at Gemma 4 (null). */
+  private useLocalChat(modelId: string | null): void {
+    const model = modelId ? findLocalChatModel(modelId) : undefined;
+    if (this.localChat && this.localChat.modelId !== model?.id) {
+      void this.localChat.dispose();
+      this.localChat = null;
     }
-    if (model && !this.onnxChat) this.onnxChat = new OnnxLlmProvider(model.id, model);
+    if (model && !this.localChat) this.localChat = new WebLlmProvider(model.id, model);
     this.orchestrator.setLlmProvider(this.chatLlm);
     this.jsRuntime.setLlmProvider(this.chatLlm);
   }
@@ -1249,11 +1242,12 @@ export class VoiceAssistantEngine {
       // ignore
     }
 
-    const onnxModel = findOnnxChatModel(modelId);
-    if (onnxModel || this.onnxChat) {
-      // One chat model in GPU memory: unload Gemma 4 before an ONNX model loads
-      if (onnxModel) await this.llmProvider.dispose();
-      this.useOnnxChat(onnxModel?.id ?? null);
+    const localModel = findLocalChatModel(modelId);
+    if (localModel || this.localChat) {
+      // One chat model in GPU memory: unload the current one before the next loads
+      if (localModel) await this.llmProvider.dispose();
+      if (this.localChat && this.localChat.modelId !== localModel?.id) await this.localChat.dispose();
+      this.useLocalChat(localModel?.id ?? null);
     }
 
     if (this.codingModelId === modelId) {
@@ -1388,7 +1382,7 @@ export class VoiceAssistantEngine {
   async detectDevice(): Promise<void> {
     const caps = await this.modelManager.detectCapabilities();
     this.isPhone = caps.deviceProfile === 'constrained_mobile';
-    if (this.isPhone && !findOnnxChatModel(this.chatModelId)?.phone) this.chatModelId = DEFAULT_PHONE_CHAT_MODEL_ID;
+    if (this.isPhone && !findLocalChatModel(this.chatModelId)?.phone) this.chatModelId = DEFAULT_PHONE_CHAT_MODEL_ID;
   }
 
   async updateSettings(settings: Partial<ChattySettings>): Promise<void> {
@@ -1427,7 +1421,7 @@ export class VoiceAssistantEngine {
       await this.codingLlmProvider.dispose();
     }
     await this.llmProvider.dispose();
-    await this.onnxChat?.dispose();
+    await this.localChat?.dispose();
     await this.phoneModels?.dispose();
     await this.ttsProvider.dispose();
   }
