@@ -229,6 +229,12 @@ async function ensurePreinitializedWebGpuDevice(wasmModule: any): Promise<void> 
 /**
  * LiteRT-LM WebGPU Provider using `@litert-lm/core`
  */
+/**
+ * Google's recommended sampling for Gemma: temperature 1.0, top-k 64, top-p 0.95. LiteRT's TOP_P
+ * sampler (type 2) applies the top-k cut, then top-p.
+ */
+const GEMMA_SAMPLER = { type: 2 as const, k: 64, p: 0.95, temperature: 1.0 };
+
 export class LiteRtLlmProvider implements LlmRuntimeProvider {
   readonly id = 'litert-lm';
   readonly modelId: string;
@@ -553,7 +559,8 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
         options.messages[options.messages.length - 1]?.content ?? '';
       const priorMessagesJson = JSON.stringify(priorMessages);
 
-      const targetTemperature = options.temperature;
+      // Google's recommended Gemma sampling, whatever the caller asks for
+      const targetTemperature = GEMMA_SAMPLER.temperature;
       const targetMaxOutputTokens = options.maxOutputTokens ?? this.maxOutputTokens;
 
       // Reuse the existing WebGPU Conversation & KV cache if the system prompt, prior turns,
@@ -571,7 +578,7 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
         await this.clearPersistentConversation();
         conversation = await this.engine.createConversation({
           sessionConfig: {
-            samplerParams: targetTemperature !== undefined ? { temperature: targetTemperature } : undefined,
+            samplerParams: GEMMA_SAMPLER,
             maxOutputTokens: targetMaxOutputTokens,
           },
           preface: {

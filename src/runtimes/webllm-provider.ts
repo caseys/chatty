@@ -20,6 +20,9 @@ export interface WebLlmModelSpec {
 
 type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
+/** Lowest temperature used with WebLLM models (see runGeneration) */
+const WEBLLM_MIN_TEMPERATURE = 0.6;
+
 /** One system message first, then alternating turns (consecutive same-role messages are merged). */
 function toChatMessages(systemPrompt: string, messages: LlmGenerationOptions['messages']): ChatMessage[] {
   const system = [systemPrompt, ...messages.filter((m) => m.role === 'system').map((m) => m.content)]
@@ -144,8 +147,12 @@ export class WebLlmProvider implements LlmRuntimeProvider {
       const stream = await engine.chat.completions.create({
         messages: toChatMessages(options.systemPrompt, options.messages),
         stream: true,
-        temperature: options.temperature,
-        top_p: options.topP,
+        // Small models get stuck repeating themselves on near-greedy decoding (Chatty asks for 0.1,
+        // which suits Gemma on LiteRT). Qwen's guidance: about 0.7 / 0.8 with a mild repetition
+        // penalty, as Qwen2.5-Coder ships.
+        temperature: Math.max(options.temperature ?? WEBLLM_MIN_TEMPERATURE, WEBLLM_MIN_TEMPERATURE),
+        top_p: options.topP ?? 0.8,
+        repetition_penalty: 1.05,
         max_tokens: options.maxOutputTokens ?? this.maxOutputTokens,
         ...(this.spec.noThinking ? { extra_body: { enable_thinking: false } } : {}),
       });
