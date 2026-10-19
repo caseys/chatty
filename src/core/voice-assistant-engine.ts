@@ -232,7 +232,7 @@ export class VoiceAssistantEngine {
     this.jsRuntime = new JavascriptRuntime({
       mode: 'iframe',
       getSharedAudioContext: () => this.audioSubsystem.getAudioContext(),
-      onProgramError: (message) => this.orchestrator.reportProgramError(message),
+      onProgramError: (message, line) => this.orchestrator.reportProgramError(message, line),
       onResult: (res) => {
         this.events.onJavascriptExecution?.(res);
       },

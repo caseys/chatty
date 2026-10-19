@@ -38,6 +38,11 @@ import {
 } from '../tools/javascript-runtime.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 
+/** "Error at line 7: x is not defined" (the line when the browser reported it) */
+function errorText(message: string, line?: number): string {
+  return line ? `Error at line ${line}: ${message}` : `Error: ${message}`;
+}
+
 /** Errors this soon after a program ran are sent back to the model to fix */
 const AUTO_FIX_WINDOW_MS = 10_000;
 
@@ -152,7 +157,7 @@ export function classifyTranscript(
 export const CONCISE_VOICE_SYSTEM_PROMPT = [
   "You are Chatty, a voice assistant that acts by writing JavaScript. Your reply runs as a program in the user's browser, immediately and exactly as written.",
   'Rules:',
-  '1. Reply with JavaScript only: no markdown fences, no explanation before or after it. Write the shortest program that fully does what was asked.',
+  '1. Reply with JavaScript only: no markdown fences, no explanation before or after it. Write an efficient solution that fulfills this request.',
   '2. Act first: do what was asked (draw, build, play, compute, look up) as a live, working browser app, then tell the user what you did with speak("...").',
   '3. speak(text) talks to the user; plain conversation is just speak(). It accepts computed values: speak(`The total is ${total}.`). Never mention code, JavaScript or programming in what you say, and never offer code.',
   '4. The page (document.body) is a transparent, full-window layer. Use <canvas> for visuals: drawings, art, animations, games and simulations (2D or WebGL). Use HTML and CSS for interfaces: buttons, forms, cards, notes, tables, gauges, dashboards and widgets. <svg> works for diagrams and icons.',
@@ -278,6 +283,7 @@ export class ConversationOrchestrator {
     isAutoFix: boolean;
     fixRequested: boolean;
     error: string | null;
+    errorLine?: number;
   } | null = null;
   // Phone pipeline (small models): router picks a tool / code / chat each turn
   private phonePipeline: {
@@ -1212,11 +1218,12 @@ export class ConversationOrchestrator {
               isAutoFix: !!options?.autoFix,
               fixRequested: false,
               error: execResult.error ?? null,
+              errorLine: execResult.errorLine,
             };
             this.events.onRunStatus?.(
               turnId,
               execResult.error
-                ? { kind: 'error', text: `Error: ${execResult.error}` }
+                ? { kind: 'error', text: errorText(execResult.error, execResult.errorLine) }
                 : execResult.stillRunning
                   ? { kind: 'running', text: 'Ran; still running' }
                   : { kind: 'ok', text: `Ran in ${Math.max(1, Math.round(execResult.executionTimeMs))} ms` }
@@ -1252,7 +1259,8 @@ export class ConversationOrchestrator {
                   typeof execResult.output === 'object'
                     ? JSON.stringify(execResult.output)
                     : String(execResult.output);
-              } else if (execResult.error) {
+              } else if (execResult.error && !(this.autoFixErrors && !options?.autoFix)) {
+                // (When a fix follows, its reply is the answer)
                 spokenText = 'Something went wrong while running that.';
               } else if (execResult.hasVisualOutput) {
                 spokenText = "I've rendered that on your screen.";
@@ -1404,11 +1412,12 @@ export class ConversationOrchestrator {
    * An error a program threw after it started (a timer, handler or async function). Shown, and
    * if it's the newest program and it just ran, sent back to the model to fix.
    */
-  reportProgramError(message: string): void {
-    this.events.onRunStatus?.(null, { kind: 'error', text: `Error while running: ${message}` });
+  reportProgramError(message: string, line?: number): void {
+    this.events.onRunStatus?.(null, { kind: 'error', text: `${errorText(message, line)} (while running)` });
     const run = this.lastRun;
     if (!run || run.error || performance.now() - run.finishedAt > AUTO_FIX_WINDOW_MS) return;
     run.error = message;
+    run.errorLine = line;
     // Still finishing its turn (speaking): the turn's end sends it
     if (!this.scheduler.getActiveTurnId()) this.maybeAutoFix(run.turnId);
   }
@@ -1420,10 +1429,17 @@ export class ConversationOrchestrator {
     if (!run || run.turnId !== turnId || !run.error || run.isAutoFix || run.fixRequested) return;
     if (this.scheduler.getActiveTurnId()) return; // the user has already moved on
     run.fixRequested = true;
-    this.events.onRunStatus?.(turnId, { kind: 'error', text: `Error: ${run.error} (asking the model to fix it)` });
-    void this.submitUserInput(`That code failed with this error: ${run.error}\nFix the program and run it again.`, {
-      autoFix: run.code,
+    this.events.onRunStatus?.(turnId, {
+      kind: 'error',
+      text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
+    // Small models fix the right thing when shown the exact line
+    const lineText = run.errorLine ? run.code.split('\n')[run.errorLine - 1]?.trim() : '';
+    const where = lineText ? ` at line ${run.errorLine} (\`${lineText.slice(0, 160)}\`)` : '';
+    void this.submitUserInput(
+      `Your program failed${where}: ${run.error}\nReply with the complete corrected program, JavaScript only.`,
+      { autoFix: run.code }
+    );
   }
 
   speakOutOfTurn(text: string): Promise<void> {
@@ -1803,8 +1819,14 @@ export class ConversationOrchestrator {
     const promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> =
       this.phonePipeline ? [] : EXAMPLE_TURNS.map((t) => ({ ...t }));
     const pastPrograms: string[] = [];
+    // Assistant messages before the user's first one are the app's own (the welcome greeting).
+    // Sent, they'd merge into the last example's reply (consecutive turns are joined), and the
+    // model would take that example's program for its own earlier answer and copy it.
+    let userHasSpoken = false;
 
     for (const msg of context.workingMessages) {
+      if (msg.role === 'user') userHasSpoken = true;
+      else if (msg.role === 'assistant' && !userHasSpoken) continue;
       if (msg.role === 'assistant') {
         // Past programs leave the message history (with the request that asked for them) and are
         // described in the system prompt, except the one being edited, which is shown in full.

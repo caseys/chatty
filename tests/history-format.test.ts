@@ -69,6 +69,28 @@ class ScriptedLlm implements LlmRuntimeProvider {
 }
 
 describe('desktop history with programs', () => {
+  it('keeps the welcome greeting out of the prompt so it never joins the last example reply', async () => {
+    const llm = new ScriptedLlm();
+    const orchestrator = new ConversationOrchestrator({
+      stateCoordinator: new StateMachineCoordinator(),
+      llmProvider: llm,
+      enableSpeechOutput: false,
+      getConversationId: () => 'c1',
+      shouldAutoTitle: () => false,
+    });
+    orchestrator.memoryStore.addMessage({
+      id: 'msg_assistant_welcome_1',
+      turnId: 'welcome_1',
+      role: 'assistant',
+      canonicalContent: 'Welcome back, what would you like to do with this browser?',
+      timestamp: Date.now(),
+    });
+    await orchestrator.submitUserInput('Make a tip calculator');
+
+    const conversation = llm.calls[0].messages.slice(EXAMPLE_TURNS.length);
+    expect(conversation).toEqual([{ role: 'user', content: 'Make a tip calculator' }]);
+  });
+
   it('describes past programs in the system prompt and shows the one being edited in full', async () => {
     const llm = new ScriptedLlm();
     const orchestrator = new ConversationOrchestrator({

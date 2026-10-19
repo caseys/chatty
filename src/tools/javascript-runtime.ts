@@ -25,6 +25,8 @@ export interface JavascriptExecutionResult {
   task?: string;
   /** Still running when the wait ended (a long song, a slow fetch): not a failure */
   stillRunning?: boolean;
+  /** The program line the error came from (1-based), when the browser's stack trace says */
+  errorLine?: number;
 }
 
 export interface ExecutionContextOptions {
@@ -51,7 +53,7 @@ export interface JavascriptRuntimeOptions {
   /** The app's running audio context, shared with programs (see programAudio) */
   getSharedAudioContext?: () => AudioContext | null;
   /** An error a program threw after it started (in a timer, event handler or async function) */
-  onProgramError?: (message: string) => void;
+  onProgramError?: (message: string, line?: number) => void;
 }
 
 export const CODING_AGENT_SYSTEM_PROMPT = [
@@ -311,7 +313,7 @@ export class JavascriptRuntime {
   private onIframeLoad?: (iframe: HTMLIFrameElement) => void;
   private pendingRuns = new Map<string, PendingIframeRun>();
   private getSharedAudioContext?: () => AudioContext | null;
-  private onProgramError?: (message: string) => void;
+  private onProgramError?: (message: string, line?: number) => void;
   private programOutput: GainNode | null = null;
 
   constructor(options?: JavascriptRuntimeOptions) {
@@ -997,14 +999,39 @@ export class JavascriptRuntime {
     window.AudioContext = SharedAudioContext;
     window.webkitAudioContext = SharedAudioContext;
 
+    // Which line of a program an error came from. Programs are compiled with a sourceURL so
+    // stack traces name them; how many lines each way of running adds before the code is
+    // measured once with a probe, so it holds in every browser.
+    const SOURCE_TAG = '\\n//# sourceURL=chatty-program.js';
+    const ProgramFunction = Object.getPrototypeOf(async function(){}).constructor;
+    const lineOffsets = { expr: null, fn: null, eval: null };
+    let runMode = 'eval';
+    function stackLine(err) {
+      const m = String((err && err.stack) || '').match(/chatty-program\\.js:(\\d+)/);
+      return m ? Number(m[1]) : null;
+    }
+    function errorLine(err) {
+      const line = stackLine(err);
+      const offset = lineOffsets[runMode];
+      return line !== null && offset !== null && line - offset >= 1 ? line - offset : undefined;
+    }
+    (async () => {
+      const probe = async (mode, run) => {
+        try { await run(); } catch (e) { const l = stackLine(e); if (l !== null) lineOffsets[mode] = l - 1; }
+      };
+      await probe('eval', () => (0, eval)('"use strict";\\nnull.probe' + SOURCE_TAG));
+      await probe('fn', () => new ProgramFunction('speak', 'playNotes', 'searchWikipedia', 'root', '"use strict";\\nnull.probe' + SOURCE_TAG)());
+      await probe('expr', () => new ProgramFunction('speak', 'playNotes', 'searchWikipedia', 'root', '"use strict"; return (null.probe);' + SOURCE_TAG)());
+    })();
+
     // Errors after the run started (timers, handlers, async code) would otherwise fail silently
     window.addEventListener('error', (event) => {
       const err = event.error;
-      window.parent.postMessage({ type: 'program_error', message: err ? (err.message || String(err)) : event.message }, '*');
+      window.parent.postMessage({ type: 'program_error', message: err ? (err.message || String(err)) : event.message, line: errorLine(err) }, '*');
     });
     window.addEventListener('unhandledrejection', (event) => {
       const err = event.reason;
-      window.parent.postMessage({ type: 'program_error', message: err ? (err.message || String(err)) : 'Promise rejected' }, '*');
+      window.parent.postMessage({ type: 'program_error', message: err ? (err.message || String(err)) : 'Promise rejected', line: errorLine(err) }, '*');
     });
 
     window.addEventListener('message', async (event) => {
@@ -1037,11 +1064,11 @@ export class JavascriptRuntime {
         let compiledFn;
         let isExpression = false;
         try {
-          compiledFn = new AsyncFunction('speak', 'playNotes', 'searchWikipedia', 'root', '"use strict"; return (' + code.replace(/;\\s*$/, '') + ');');
+          compiledFn = new AsyncFunction('speak', 'playNotes', 'searchWikipedia', 'root', '"use strict"; return (' + code.replace(/;\\s*$/, '') + ');' + SOURCE_TAG);
           isExpression = true;
         } catch {
           try {
-            compiledFn = new AsyncFunction('speak', 'playNotes', 'searchWikipedia', 'root', '"use strict";\\n' + code);
+            compiledFn = new AsyncFunction('speak', 'playNotes', 'searchWikipedia', 'root', '"use strict";\\n' + code + SOURCE_TAG);
           } catch (compileErr) {
             throw compileErr;
           }
@@ -1049,9 +1076,11 @@ export class JavascriptRuntime {
 
         let res;
         if (isExpression || /\\bawait\\b/.test(code) || hasTopLevelReturn(code)) {
+          runMode = isExpression ? 'expr' : 'fn';
           res = await compiledFn(window.speak, window.playNotes, window.searchWikipedia, window.root);
         } else {
-          res = (0, eval)('"use strict";\\n' + code);
+          runMode = 'eval';
+          res = (0, eval)('"use strict";\\n' + code + SOURCE_TAG);
         }
         if (res instanceof Promise) {
           res = await res;
@@ -1092,6 +1121,7 @@ export class JavascriptRuntime {
           id,
           success: false,
           error: err ? (err.message || String(err)) : String(err),
+          errorLine: errorLine(err),
           logs,
           hasVisual: false,
         }, '*');
@@ -1169,7 +1199,7 @@ export class JavascriptRuntime {
     }
 
     if (data.type === 'program_error') {
-      this.onProgramError?.(String(data.message ?? 'Unknown error'));
+      this.onProgramError?.(String(data.message ?? 'Unknown error'), typeof data.line === 'number' ? data.line : undefined);
       return;
     }
 
@@ -1247,6 +1277,7 @@ export class JavascriptRuntime {
           success: Boolean(data.success),
           output: data.output,
           error: data.error,
+          errorLine: typeof data.errorLine === 'number' ? data.errorLine : undefined,
           logs: data.logs ?? [],
           spokenTexts,
           hasVisualOutput: hasVisual,
