@@ -814,7 +814,11 @@ export class VoiceAssistantEngine {
 
   /** Startup models in load order, as the UI labels them ("Loading model N of M"). */
   getStartupModelOrder(): string[] {
-    const speech = this.nativeStt ? ['Piper voice'] : ['Piper voice', 'Whistle speech recognition'];
+    const speech = !this.speechEnabled
+      ? []
+      : this.nativeStt
+        ? ['Piper voice']
+        : ['Piper voice', 'Whistle speech recognition'];
     if (this.phoneModels) return [NEEDLE_LABEL, this.phoneModels.chatSpec.label, ...speech];
     return [this.getLlmDisplayName(), ...speech];
   }
@@ -1406,12 +1410,17 @@ export class VoiceAssistantEngine {
       }
     }
 
+    void this.loadChatModel();
+  }
+
+  /** Loads (downloading if needed) the current chat model, reporting progress like startup. */
+  private loadChatModel(): Promise<void> {
     const hasWebGpu =
       typeof navigator !== 'undefined' && 'gpu' in (navigator as unknown as { gpu?: unknown });
 
     if (!hasWebGpu) {
       this.stateCoordinator.setModelState('llm', 'failed');
-      return;
+      return Promise.resolve();
     }
 
     this.stateCoordinator.setModelState('llm', 'downloading');
@@ -1445,7 +1454,26 @@ export class VoiceAssistantEngine {
           recordLoadFailure(`${modelName} didn't load: ${reason}`);
         });
     };
-    void load();
+    return load();
+  }
+
+  /**
+   * The downloaded models were deleted (Settings → Clear model cache): download the loaded ones
+   * again now, the chat model first, then speech if it's on. Models still loading (a new pick,
+   * startup) download anyway.
+   */
+  async refetchModels(): Promise<void> {
+    if (!this.started || this.phoneModels) return;
+    const models = this.stateCoordinator.getSnapshot().models;
+    if (models.llm === 'ready') {
+      await this.chatLlm.dispose();
+      await this.loadChatModel();
+    }
+    if (this.speechEnabled && models.tts === 'ready') {
+      await Promise.all([this.ttsProvider.dispose(), this.sttProvider.dispose()]);
+      await this.loadGap();
+      await this.loadSpeechModels().finally(clearLoadStage);
+    }
   }
 
   /** Asks the user a yes/no question; without a UI to answer, the answer is no. */

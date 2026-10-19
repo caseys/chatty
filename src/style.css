@@ -1069,7 +1069,12 @@ body {
   .bottom-bar {
     display: flex;
     justify-content: space-between;
-    gap: 8px;
+    gap: 0;
+  }
+
+  /* Space beside the status box only while the button shows (speech off hides Start) */
+  .bottom-right:has(.minimal-start-btn:not([hidden])) {
+    margin-left: 8px;
   }
 
   .bottom-bar .context-meter-container {
@@ -1991,17 +1996,6 @@ body {
   margin: 0;
 }
 
-.raw-panel-title {
-  flex-shrink: 0;
-  padding: 8px 12px;
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-secondary);
-  border-bottom: 1px solid var(--line);
-}
-
 /* Under the code: whether the newest reply's code ran */
 .run-status {
   flex-shrink: 0;
@@ -2093,8 +2087,14 @@ body {
 @media (max-width: 760px) {
   .chat-workspace {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 3fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
     gap: 8px;
+  }
+
+  /* The text input sits at the very bottom of the screen (main.ts moves it there) */
+  .minimal-stage > .chat-input {
+    width: 100%;
+    margin: 0;
   }
 }
 

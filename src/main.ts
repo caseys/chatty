@@ -57,6 +57,8 @@ export class MinimalVoiceApp {
   private runStatusEl = document.getElementById('run-status');
   // The last Settings save being applied (model downloads wait for it)
   private settingsApplying: Promise<void> = Promise.resolve();
+  // Set by Clear model cache; Settings' close then downloads the models in use again
+  private modelCacheCleared = false;
   private rawOutputTurnId: string | null = null;
   // Chat bubbles by message id and by turn (streamed text arrives before the reply is saved)
   private bubbles = new Map<string, HTMLElement>();
@@ -278,13 +280,23 @@ export class MinimalVoiceApp {
   }
 
   /** Waveforms sit between the status box and the button on desktop, under the chat on phones. */
-  private placeWaveforms(): void {
-    const waves = document.querySelector('.chat-waveforms');
+  /**
+   * Phones: waveforms under the chat, text input at the very bottom of the screen.
+   * Desktop: waveforms in the bottom row beside Start, text input under the chat.
+   */
+  private placeForLayout(): void {
     const narrow = window.matchMedia(NARROW_LAYOUT).matches;
-    const target = document.querySelector(narrow ? '.chat-panel' : '.bottom-right');
-    if (!waves || !target) return;
-    if (narrow) target.appendChild(waves);
-    else target.insertBefore(waves, target.firstChild);
+    const chatPanel = document.querySelector('.chat-panel');
+    const waves = document.querySelector('.chat-waveforms');
+    const bottomRight = document.querySelector('.bottom-right');
+    if (waves && chatPanel && bottomRight) {
+      if (narrow) chatPanel.appendChild(waves);
+      else bottomRight.insertBefore(waves, bottomRight.firstChild);
+    }
+    const stage = document.querySelector('.minimal-stage');
+    if (this.chatInputForm && chatPanel && stage) {
+      (narrow ? stage : chatPanel).appendChild(this.chatInputForm);
+    }
   }
 
   /** Shows how much the downloaded models take up, in the settings dialog. */
@@ -320,10 +332,17 @@ export class MinimalVoiceApp {
       this.clearModelCacheBtn!.disabled = true;
       await clearModelCache();
       await this.refreshModelCacheSize();
+      this.modelCacheCleared = true;
+    });
+    // After clearing the cache, the models in use download again once Settings closes
+    this.settingsDialog?.addEventListener('close', () => {
+      if (!this.modelCacheCleared) return;
+      this.modelCacheCleared = false;
+      void this.settingsApplying.catch(() => {}).then(() => this.engine.refetchModels());
     });
     this.updateChatExamples(false);
-    this.placeWaveforms();
-    window.matchMedia(NARROW_LAYOUT).addEventListener('change', () => this.placeWaveforms());
+    this.placeForLayout();
+    window.matchMedia(NARROW_LAYOUT).addEventListener('change', () => this.placeForLayout());
     // Stay on the newest text when the layout changes (rotation, desktop/mobile switch)
     if (typeof ResizeObserver !== 'undefined') {
       const keepAtBottom = new ResizeObserver(() => {
@@ -1038,6 +1057,8 @@ export class MinimalVoiceApp {
     this.loadBytes[kind] = { loaded, total: total > 0 ? total : defaults[kind] };
 
     const m = this.engine.getSnapshot().models;
+    // Speech off: only the chat model loads
+    const kinds: LoadKind[] = this.engine.isSpeechEnabled() ? ['llm', 'tts', 'stt'] : ['llm'];
     const finished: Record<LoadKind, boolean> = {
       llm: m.llm === 'ready' || m.llm === 'failed',
       tts: m.tts === 'ready' || m.tts === 'failed',
@@ -1045,7 +1066,7 @@ export class MinimalVoiceApp {
     };
     let sumLoaded = 0;
     let sumTotal = 0;
-    for (const k of ['llm', 'tts', 'stt'] as LoadKind[]) {
+    for (const k of kinds) {
       const t = this.loadBytes[k].total || defaults[k];
       sumTotal += t;
       sumLoaded += finished[k] ? t : Math.min(this.loadBytes[k].loaded, t);
@@ -1056,7 +1077,7 @@ export class MinimalVoiceApp {
     const ownPct = own.total > 0 ? Math.min(100, Math.round((own.loaded * 100) / own.total)) : 0;
     const order = this.engine.getStartupModelOrder();
     const index = order.indexOf(label);
-    const step = index >= 0 ? `model ${index + 1} of ${order.length}: ` : '';
+    const step = index >= 0 && order.length > 1 ? `model ${index + 1} of ${order.length}: ` : '';
     const rate = this.measureDownloadRate(label, own.loaded);
     const rateText = rate && own.loaded < own.total ? ` · ${rate.toFixed(1)} MB/s` : '';
     this.updateDownloadProgress(
