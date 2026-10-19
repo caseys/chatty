@@ -175,6 +175,20 @@ export function callUncalledFunctions(code: string): string {
   return toCall.length ? `${code}\n${toCall.map((name) => `await ${name}();`).join('\n')}` : code;
 }
 
+/**
+ * Inline handlers in a program's HTML (onclick="calc()") look names up globally, but programs run
+ * in strict mode, where their functions stay local: those functions are made global too.
+ */
+export function exposeFunctionsToInlineHandlers(code: string): string {
+  if (!/\son[a-z]+\s*=\s*\\?["']/i.test(code)) return code;
+  const names = [
+    ...Array.from(code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm), (m) => m[1]),
+    ...Array.from(code.matchAll(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/gm), (m) => m[1]),
+  ];
+  if (names.length === 0) return code;
+  return `${code}\n${[...new Set(names)].map((name) => `try { window.${name} = ${name}; } catch {}`).join('\n')}`;
+}
+
 /** Speaks the explanation that came before extracted code when the code says nothing itself. */
 function withLead(code: string, lead: string): string {
   if (!lead || /\bspeak\(/.test(code) || /\b(?:code|javascript|js|script|snippet|program|html|function)\b/i.test(lead)) {
@@ -243,13 +257,13 @@ export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
   }
 
   if (isValidJs) {
-    return { code: callUncalledFunctions(cleaned), isProse: false };
+    return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(cleaned)), isProse: false };
   }
 
   // 4b. Explanation wrapped around unfenced code: run the code part
   const program = extractProgram(cleaned);
   if (program) {
-    return { code: callUncalledFunctions(withLead(program.code, program.lead)), isProse: false };
+    return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(withLead(program.code, program.lead))), isProse: false };
   }
 
   // 5. If it's a simple arithmetic expression or number (e.g. 42 or 3 * 7), compute and speak it
@@ -1134,14 +1148,85 @@ export class JavascriptRuntime {
     // Small models often fill an element they never made (getElementById('app').innerHTML = ...):
     // a missing id gets an empty <div> on the page instead of null
     const findElementById = document.getElementById.bind(document);
+    // Stand-ins made for ids the page doesn't have yet (see carryWiring)
+    const placeholders = new Map();
     document.getElementById = (id) => {
       const found = findElementById(id);
       if (found || typeof id !== 'string' || !id) return found;
       const made = document.createElement('div');
       made.id = id;
       document.body.appendChild(made);
+      placeholders.set(id, made);
       return made;
     };
+
+    // Small models wire elements up before writing the markup that creates them, or rewrite the
+    // markup after wiring it. When an element with an id appears and an earlier element with that
+    // id was a stand-in or has left the page, the earlier one's listeners and on* handlers move to
+    // the new one, and reads and writes through a variable still holding the earlier one reach it.
+    const HANDLER_PROPS = ['onclick', 'oninput', 'onchange', 'onsubmit', 'onkeyup', 'onkeydown'];
+    const FORWARDED_PROPS = ['value', 'checked', 'textContent', 'innerText', 'innerHTML'];
+    const wiring = new WeakMap();
+    const nativeAddListener = EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener = function (type, listener, options) {
+      if (this instanceof Element) {
+        if (!wiring.has(this)) wiring.set(this, []);
+        wiring.get(this).push([type, listener, options]);
+      }
+      return nativeAddListener.call(this, type, listener, options);
+    };
+    function carryWiring(from, to) {
+      // A type the new element was wired for itself (a re-render that re-attaches) isn't doubled
+      const own = new Set((wiring.get(to) || []).map((w) => w[0]));
+      for (const [type, listener, options] of wiring.get(from) || []) {
+        if (!own.has(type)) to.addEventListener(type, listener, options);
+      }
+      for (const prop of HANDLER_PROPS) if (from[prop] && !to[prop]) to[prop] = from[prop];
+      for (const prop of FORWARDED_PROPS) {
+        try {
+          Object.defineProperty(from, prop, { configurable: true, get: () => to[prop], set: (v) => { to[prop] = v; } });
+        } catch {}
+      }
+    }
+    const departed = new Map();
+    const withIds = (node) => (node.nodeType === 1 ? [node, ...node.querySelectorAll('[id]')].filter((el) => el.id) : []);
+    new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.removedNodes) for (const el of withIds(node)) if (!el.isConnected) departed.set(el.id, el);
+      }
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          for (const el of withIds(node)) {
+            if (!el.isConnected) continue;
+            const stand = placeholders.get(el.id);
+            const earlier = stand && stand !== el && !stand.contains(el) ? stand : departed.get(el.id);
+            if (!earlier || earlier === el) continue;
+            carryWiring(earlier, el);
+            departed.delete(el.id);
+            if (earlier === stand) {
+              placeholders.delete(el.id);
+              stand.remove();
+            }
+          }
+        }
+      }
+    }).observe(document.documentElement, { childList: true, subtree: true });
+
+    // After the page has loaded, document.write would replace all of it (the card, the program's
+    // wiring and this runner): its HTML goes into the card instead, and its scripts run
+    function writeHtml(html) {
+      const scripts = [];
+      const markup = String(html).replace(/<script[^>]*>([\\s\\S]*?)<\\/script>/gi, (_m, code) => {
+        scripts.push(code);
+        return '';
+      });
+      window.root.insertAdjacentHTML('beforeend', markup);
+      for (const code of scripts) (0, eval)(code);
+    }
+    document.write = (...parts) => writeHtml(parts.join(''));
+    document.writeln = (...parts) => writeHtml(parts.join('') + '\\n');
+    document.open = () => document;
+    document.close = () => {};
 
     // Errors after the run started (timers, handlers, async code) would otherwise fail silently
     window.addEventListener('error', (event) => {

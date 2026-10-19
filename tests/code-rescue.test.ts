@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { callUncalledFunctions, inspectExecutableCode } from '../src/tools/javascript-runtime.ts';
+import { callUncalledFunctions, exposeFunctionsToInlineHandlers, inspectExecutableCode } from '../src/tools/javascript-runtime.ts';
 
 describe('running code the model wrapped or forgot to call', () => {
   it('runs a fenced block after an explanation, speaking the explanation', () => {
@@ -38,6 +38,16 @@ describe('running code the model wrapped or forgot to call', () => {
   it('still treats chat as prose', () => {
     expect(inspectExecutableCode('Sure, thanks').isProse).toBe(true);
     expect(inspectExecutableCode('I am doing well today, thanks for asking!').isProse).toBe(true);
+  });
+});
+
+describe('inline handlers in written HTML', () => {
+  it('makes top-level functions global only when the HTML calls them inline', () => {
+    const withHandler = exposeFunctionsToInlineHandlers('function calc() {}\nconst reset = () => {};\ndocument.write(\'<button onclick="calc()">Go</button>\');');
+    expect(withHandler).toContain('try { window.calc = calc; } catch {}');
+    expect(withHandler).toContain('try { window.reset = reset; } catch {}');
+    const without = 'function calc() {}\ncalc();';
+    expect(exposeFunctionsToInlineHandlers(without)).toBe(without);
   });
 });
 
