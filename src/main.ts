@@ -760,7 +760,9 @@ export class MinimalVoiceApp {
 
   private updateUiState(): void {
     const snap = this.engine.getSnapshot();
+    // 'unloaded' counts as loading too: it is the state before startup begins
     const isModelLoading =
+      snap.models.llm === 'unloaded' ||
       snap.models.llm === 'downloading' ||
       snap.models.llm === 'initializing' ||
       snap.models.tts === 'downloading' ||
