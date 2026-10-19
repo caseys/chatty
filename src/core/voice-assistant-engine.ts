@@ -42,6 +42,30 @@ const WELCOME_MESSAGE =
   'use oscillators and other Web Audio tools, draw 3D scenes, animate motion, ' +
   'look up things in Wikipedia or DuckDuckGo and more!';
 
+// Set while the LLM is loading; still present on the next start means the tab was killed mid-load.
+const LLM_LOAD_MARKER_KEY = 'chatty_llm_loading';
+function writeLlmLoadMarker(modelId: string): void {
+  try {
+    localStorage.setItem(LLM_LOAD_MARKER_KEY, modelId);
+  } catch {
+    // Storage unavailable (private mode)
+  }
+}
+function readLlmLoadMarker(): string | null {
+  try {
+    return localStorage.getItem(LLM_LOAD_MARKER_KEY);
+  } catch {
+    return null;
+  }
+}
+function clearLlmLoadMarker(): void {
+  try {
+    localStorage.removeItem(LLM_LOAD_MARKER_KEY);
+  } catch {
+    // Ignore
+  }
+}
+
 export interface VoiceAssistantEngineEvents {
   onStatusChange?: (statusText: string | null) => void;
   onStateChange?: (snapshot: CoordinatedStateSnapshot) => void;
@@ -305,6 +329,25 @@ export class VoiceAssistantEngine {
     if (!hasExplicitStoredSettings) {
       this.chatModelId = recommended.llmModelId;
     }
+
+    const isConstrained = caps.deviceProfile === 'constrained_mobile';
+    // Phones can't hold E4B: a mobile tab is killed long before device RAM runs out.
+    if (isConstrained && this.chatModelId !== recommended.llmModelId) {
+      this.chatModelId = recommended.llmModelId;
+    }
+
+    // Crash-loop guard: the marker is set while the LLM loads and cleared once it settles. If it
+    // is still present, the tab died mid-load (out of memory), so retry with the smaller model
+    // instead of crashing again on every visit.
+    const crashedLoad = readLlmLoadMarker();
+    if (crashedLoad) {
+      if (this.chatModelId !== recommended.fallbackLlmModelId) {
+        this.chatModelId = recommended.fallbackLlmModelId;
+      }
+      this.events.onStatusChange?.(
+        'The last model load ran out of memory; retrying with the smaller model.'
+      );
+    }
     // The coder always shares the chat model (there's no separate picker). A stale divergent
     // codingModelId from older settings would load a second multi-GB model onto the GPU
     // alongside the chat model and crash the tab mid-load.
@@ -341,6 +384,7 @@ export class VoiceAssistantEngine {
     this.stateCoordinator.setModelState('llm', 'downloading');
     this.stateCoordinator.setModelState('tts', 'downloading');
 
+    let llmInitDone: Promise<void> | null = null;
     const hasWebGpu =
       caps.hasWebGPU || (typeof navigator !== 'undefined' && 'gpu' in navigator);
 
@@ -351,7 +395,8 @@ export class VoiceAssistantEngine {
       );
     } else {
       const modelName = this.chatModelId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B';
-      this.llmProvider
+      writeLlmLoadMarker(this.chatModelId);
+      llmInitDone = this.llmProvider
         .initialize((loaded, total) => {
           const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
           const mb = (loaded / (1024 * 1024)).toFixed(0);
@@ -362,12 +407,14 @@ export class VoiceAssistantEngine {
           );
         })
         .then(() => {
+          clearLlmLoadMarker();
           this.stateCoordinator.setModelState('llm', 'ready');
           const readinessMs = Math.max(1, Math.round(performance.now() - startInit));
           this.orchestrator.recordInitializationTiming(readinessMs, readinessMs);
           this.events.onStatusChange?.(null);
         })
         .catch((err) => {
+          clearLlmLoadMarker();
           console.error('Gemma 4 WebGPU initialization failed:', err);
           this.stateCoordinator.setModelState('llm', 'failed');
           this.events.onStatusChange?.(
@@ -376,29 +423,34 @@ export class VoiceAssistantEngine {
         });
     }
 
-    // 3. Initialize Piper ONNX TTS worker
-    this.ttsProvider
-      .initialize((loaded, total) => {
-        const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
-        const mb = (loaded / (1024 * 1024)).toFixed(0);
-        const totalMb = (total / (1024 * 1024)).toFixed(0);
-        this.events.onTtsProgress?.(loaded, total, pct, mb, totalMb);
-        this.events.onStatusChange?.(
-          `Pulling Piper Voice: ${mb} / ${totalMb} MB (${pct}%)...`
-        );
-      })
-      .then(() => {
-        this.stateCoordinator.setModelState('tts', 'ready');
-      })
-      .catch((err) => {
-        console.warn('Piper ONNX init warning:', err);
-        this.stateCoordinator.setModelState('tts', 'failed');
-      });
+    // 3 & 4. Speech models load one at a time after the LLM settles. The WebGPU LLM load is the
+    // memory peak, so it runs alone; the small WASM models follow (WASM heaps never shrink, so
+    // keeping them out of the LLM load window lowers the peak).
+    const startSpeechModels = async () => {
+      await this.ttsProvider
+        .initialize((loaded, total) => {
+          const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
+          const mb = (loaded / (1024 * 1024)).toFixed(0);
+          const totalMb = (total / (1024 * 1024)).toFixed(0);
+          this.events.onTtsProgress?.(loaded, total, pct, mb, totalMb);
+          this.events.onStatusChange?.(
+            `Pulling Piper Voice: ${mb} / ${totalMb} MB (${pct}%)...`
+          );
+        })
+        .then(() => {
+          this.stateCoordinator.setModelState('tts', 'ready');
+        })
+        .catch((err) => {
+          console.warn('Piper ONNX init warning:', err);
+          this.stateCoordinator.setModelState('tts', 'failed');
+        });
 
-    // 4. Pre-warm Whistle STT WASM provider in background
-    this.sttProvider.initialize().catch((err) => {
-      console.warn('Whistle STT pre-warm warning:', err);
-    });
+      // 4. Pre-warm Whistle STT WASM provider
+      await this.sttProvider.initialize().catch((err) => {
+        console.warn('Whistle STT pre-warm warning:', err);
+      });
+    };
+    void (llmInitDone ?? Promise.resolve()).finally(() => startSpeechModels());
 
     // 5. Visibility and lifecycle handlers
     if (typeof document !== 'undefined') {
@@ -413,6 +465,8 @@ export class VoiceAssistantEngine {
 
     if (typeof window !== 'undefined') {
       window.addEventListener('pagehide', () => {
+        // A normal close/reload mid-load isn't an out-of-memory crash
+        clearLlmLoadMarker();
         void this.dispose();
       });
     }

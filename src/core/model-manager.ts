@@ -480,9 +480,25 @@ export class ModelManager {
       }
     }
 
+    // Phones/tablets: WebGPU limits on Apple GPUs look desktop-class, but a mobile browser tab
+    // is killed far below device RAM, so never treat them as high-memory.
+    const nav = typeof navigator !== 'undefined' ? (navigator as Navigator & {
+      userAgentData?: { mobile?: boolean };
+      deviceMemory?: number;
+    }) : undefined;
+    const ua = nav?.userAgent ?? '';
+    const isMobileDevice =
+      nav?.userAgentData?.mobile === true ||
+      /iPhone|iPad|iPod|Android|Mobile/i.test(ua) ||
+      // iPadOS Safari reports a desktop Mac user agent
+      (/Macintosh/.test(ua) && (nav?.maxTouchPoints ?? 0) > 1);
+    const lowDeviceMemory = typeof nav?.deviceMemory === 'number' && nav.deviceMemory < 8;
+
     let deviceProfile: DeviceProfile = 'unsupported_webgpu';
     if (hasWebGPU) {
-      if (maxStorageBufferBindingSize >= 1_073_741_824 && maxBufferSize >= 2_147_483_648) {
+      if (isMobileDevice || lowDeviceMemory) {
+        deviceProfile = 'constrained_mobile';
+      } else if (maxStorageBufferBindingSize >= 1_073_741_824 && maxBufferSize >= 2_147_483_648) {
         deviceProfile = 'high_memory_desktop';
       } else if (maxStorageBufferBindingSize >= 268_435_456) {
         deviceProfile = 'typical_laptop_mobile';
