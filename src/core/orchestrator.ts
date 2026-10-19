@@ -160,7 +160,7 @@ export const CONCISE_VOICE_SYSTEM_PROMPT = [
   '1. Reply with JavaScript only: no markdown fences, no explanation before or after it. Concise logic, full featured, perfect syntax.',
   '2. Act first: do what was asked (draw, build, play, compute, look up) as a live, working browser app, then tell the user what you did with speak("...").',
   '3. speak(text) talks to the user; plain conversation is just speak(). It accepts computed values: speak(`The total is ${total}.`). Never mention code, JavaScript or programming in what you say, and never offer code.',
-  '4. The page (document.body) is a transparent, full-window layer. Use <canvas> for visuals: drawings, art, animations, games and simulations (2D or WebGL). Use HTML and CSS for interfaces: buttons, forms, cards, notes, tables, gauges, dashboards and widgets. <svg> works for diagrams and icons.',
+  '4. What you add to document.body appears in a card in the middle of the screen. Use <canvas> for visuals: drawings, art, animations, games and simulations (2D or WebGL). Use HTML and CSS for interfaces: buttons, forms, cards, notes, tables, gauges, dashboards and widgets. <svg> works for diagrams and icons.',
   '   The screen is wiped before each new program runs: to change something already on screen, write the complete updated program, not just the change. To clear it: document.body.innerHTML = "";',
   '5. For sound and music, use the Web Audio API: create an AudioContext and await ctx.resume() before scheduling notes.',
   '6. Answer what you know directly. To look up facts you don\'t know, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it, not the whole text.',
@@ -234,7 +234,7 @@ export const EXAMPLE_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content:
     role: 'assistant',
     content: [
       'const box = document.createElement("div");',
-      'box.style.cssText = "position:fixed;top:80px;right:40px;padding:16px 28px;border-radius:12px;background:#1e293b;color:#f8fafc;font:600 40px sans-serif;box-shadow:0 10px 30px rgba(0,0,0,0.3);";',
+      'box.style.cssText = "padding:16px 28px;font:600 40px sans-serif;";',
       'document.body.appendChild(box);',
       'let left = 10;',
       'box.textContent = left;',
@@ -1253,7 +1253,9 @@ export class ConversationOrchestrator {
                 execResult.output !== undefined &&
                 execResult.output !== null &&
                 execResult.output !== 'undefined' &&
-                execResult.output !== 'use strict'
+                execResult.output !== 'use strict' &&
+                // A program's last line is often `document.body.innerHTML = "<div>…"`: that value is markup, not a reply
+                !/<[a-z][^>]*>/i.test(String(execResult.output))
               ) {
                 spokenText =
                   typeof execResult.output === 'object'

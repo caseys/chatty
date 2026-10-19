@@ -1291,8 +1291,9 @@ export class MinimalVoiceApp {
         const doc = iframe.contentDocument;
         if (!doc) return null;
         const hit = doc.elementFromPoint(x, y);
-        // Over root, body, html, or nothing: transparent, pass through to the page underneath.
-        if (!hit || hit === doc.documentElement || hit === doc.body || hit.id === 'root') return null;
+        // Over the transparent layer (html, the real body) or nothing: pass through to the page.
+        // The output card (#root, which the sandbox's document.body points to) is content.
+        if (!hit || hit === doc.documentElement || hit.tagName === 'BODY') return null;
 
         // Canvas: test the alpha of the pixel under the cursor (tagName: the canvas is cross-realm).
         if (hit.tagName === 'CANVAS') {
@@ -1394,6 +1395,12 @@ export class MinimalVoiceApp {
       if (g.origin === 'host' && g.pointerType !== 'mouse') {
         // The browser will still fire a native click at the host element the touch started on.
         suppressHostClickUntil = performance.now() + 800;
+      }
+      // Touch has no hover to hand the screen back: release it after every tap, or the next
+      // swipe over the chat lands in the program's layer and the chat won't scroll
+      if (g.pointerType !== 'mouse') {
+        const iframe = getIframe();
+        if (iframe) setCapture(iframe, false);
       }
     };
 

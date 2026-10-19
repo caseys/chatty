@@ -921,35 +921,36 @@ export class JavascriptRuntime {
       color: light-dark(#0f172a, #f1f5f9);
       -webkit-font-smoothing: antialiased;
     }
-    #root {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100vw;
-      height: 100vh;
-      width: 100dvw;
-      height: 100dvh;
-      pointer-events: none;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 24px;
-    }
-    /* Programs draw on document.body (root is an alias): same centered layout */
+    /* The transparent full-window layer centers the card */
     body {
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: 24px;
+      padding: 16px;
     }
-    #root > *, body > *:not(#root):not(script):not(style) {
+    /* Program output: one card (document.body and root both mean this element), hidden while empty */
+    #root {
+      max-width: 100%;
+      max-height: 100%;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      padding: 16px;
+      background: #505050;
+      color: #f8fafc;
+      border-radius: 4px;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55), 0 8px 20px rgba(0, 0, 0, 0.35);
       pointer-events: auto;
     }
+    #root:empty {
+      display: none;
+    }
     canvas, svg {
-      max-width: 100vw;
-      max-height: 100vh;
+      max-width: 100%;
+      max-height: 100%;
       display: block;
       pointer-events: auto;
       background: transparent;
@@ -1028,6 +1029,8 @@ export class JavascriptRuntime {
     };
 
     window.root = document.getElementById('root');
+    // Programs draw on document.body: it's the card (#root), so everything they add stays together
+    Object.defineProperty(document, 'body', { configurable: true, get: () => window.root });
 
     // new AudioContext() gives programs the app's already-running audio (see programAudio).
     // close() and suspend() would stop the app's own audio, so they do nothing here.
