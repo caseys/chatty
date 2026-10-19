@@ -11,6 +11,9 @@ import { createToolSummaryElement, parseStreamingToolCall, stripToolCallMarkup }
 
 type LoadKind = 'llm' | 'tts' | 'stt';
 
+/** The app's own greeting (engine creates it with a welcome_ turn id). */
+const isWelcomeMessage = (m: ConversationMessage) => m.turnId.startsWith('welcome_');
+
 type WakeLockSentinelLike = {
   released: boolean;
   release: () => Promise<void>;
@@ -138,13 +141,13 @@ export class MinimalVoiceApp {
           }
         }
         if (msg.role === 'assistant' && (msg.canonicalContent || msg.toolCall)) {
-          this.renderAssistantOutput(msg.canonicalContent, msg.toolCall);
+          this.renderAssistantOutput(msg.canonicalContent, msg.toolCall, false, isWelcomeMessage(msg));
         }
         this.updateUiState();
       },
       onMessageUpdated: (msg) => {
         if (msg.role === 'assistant' && (msg.canonicalContent || msg.toolCall)) {
-          this.renderAssistantOutput(msg.canonicalContent, msg.toolCall);
+          this.renderAssistantOutput(msg.canonicalContent, msg.toolCall, false, isWelcomeMessage(msg));
         }
         this.updateUiState();
       },
@@ -222,14 +225,14 @@ export class MinimalVoiceApp {
       for (let i = messages.length - 1; i >= 0; i--) {
         const m = messages[i];
         if (m.role === 'assistant' && this.outputTextEl && !this.outputTextEl.textContent && (m.canonicalContent || m.toolCall)) {
-          this.renderAssistantOutput(m.canonicalContent, m.toolCall);
+          this.renderAssistantOutput(m.canonicalContent, m.toolCall, false, isWelcomeMessage(m));
         }
         if (m.role === 'user' && this.inputTextEl && !this.inputTextEl.textContent && m.canonicalContent) {
           this.inputTextEl.textContent = m.canonicalContent;
         }
       }
     } else if (summary && this.outputTextEl) {
-      this.outputTextEl.textContent = `[Summary: ${summary.summaryText}]`;
+      this.showSummaryNote(summary.summaryText);
     }
 
     // Populate settings dropdowns initially from engine
@@ -412,7 +415,7 @@ export class MinimalVoiceApp {
           !this.outputTextEl.textContent &&
           (m.canonicalContent || m.toolCall)
         ) {
-          this.renderAssistantOutput(m.canonicalContent, m.toolCall);
+          this.renderAssistantOutput(m.canonicalContent, m.toolCall, false, isWelcomeMessage(m));
         }
         if (
           m.role === 'user' &&
@@ -424,7 +427,7 @@ export class MinimalVoiceApp {
         }
       }
     } else if (convo.summary && this.outputTextEl) {
-      this.outputTextEl.textContent = `[Summary: ${convo.summary.summaryText}]`;
+      this.showSummaryNote(convo.summary.summaryText);
     }
 
     if (typeof document !== 'undefined') {
@@ -557,14 +560,18 @@ export class MinimalVoiceApp {
   private renderAssistantOutput(
     content: string,
     toolCall?: ConversationMessage['toolCall'],
-    isStreaming = false
+    isStreaming = false,
+    /** App-authored text (the welcome greeting), shown as a note rather than a model reply */
+    isAppNote = false
   ): void {
     if (!this.outputTextEl) return;
 
     this.outputTextEl.innerHTML = '';
 
     let activeToolCall = toolCall;
-    let cleanText = content;
+    // "[Interrupted]" is bookkeeping for the model's history; show it as a note, not reply text
+    const wasInterrupted = /\[(?:Response )?interrupted\]\s*$/i.test(content);
+    let cleanText = content.replace(/\s*\[(?:Response )?interrupted\]\s*$/i, '');
 
     // If streaming and tool call not yet finalized in msg, detect if stream has tool call block
     if (isStreaming && !activeToolCall) {
@@ -598,14 +605,34 @@ export class MinimalVoiceApp {
       displayText = '';
     }
 
-    if (displayText) {
+    if (displayText && isAppNote) {
+      this.outputTextEl.appendChild(this.createSystemNote(displayText));
+    } else if (displayText) {
       const textDiv = document.createElement('div');
       textDiv.className = 'assistant-text-content';
       textDiv.textContent = displayText;
       this.outputTextEl.appendChild(textDiv);
     }
+    if (wasInterrupted) {
+      this.outputTextEl.appendChild(this.createSystemNote('Interrupted'));
+    }
 
     this.outputTextEl.scrollTop = this.outputTextEl.scrollHeight;
+  }
+
+  /** App/status text inside the conversation panels, styled apart from what was said. */
+  private createSystemNote(text: string): HTMLElement {
+    const note = document.createElement('div');
+    note.className = 'system-note';
+    note.setAttribute('role', 'note');
+    note.textContent = text;
+    return note;
+  }
+
+  private showSummaryNote(summaryText: string): void {
+    if (!this.outputTextEl) return;
+    this.outputTextEl.innerHTML = '';
+    this.outputTextEl.appendChild(this.createSystemNote(`Earlier in this chat: ${summaryText}`));
   }
 
   private updateUiState(): void {

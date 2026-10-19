@@ -8,6 +8,8 @@ import type {
   ConversationSummary,
   LongTermMemoryItem,
 } from '../types/index.ts';
+// Size estimates use the same compact form the prompt uses (past programs summarized)
+import { compactAssistantContent } from './history-format.ts';
 
 export interface CandidateMemoryProposal {
   id: string;
@@ -366,9 +368,7 @@ export class ConversationMemoryStore {
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const msg = this.messages[i];
       const textToEstimate =
-        msg.role === 'assistant'
-          ? msg.rawLlmOutput || msg.rawCode || msg.canonicalContent
-          : msg.canonicalContent;
+        msg.role === 'assistant' ? compactAssistantContent(msg) : msg.canonicalContent;
       const msgTokens = this.estimateTokens(textToEstimate);
       if (usedTokens + msgTokens > tokenBudget && selectedMessages.length >= 2) {
         break;
@@ -452,9 +452,7 @@ export class ConversationMemoryStore {
     }
     for (const msg of this.messages) {
       const textToEstimate =
-        msg.role === 'assistant'
-          ? msg.rawLlmOutput || msg.rawCode || msg.canonicalContent
-          : msg.canonicalContent;
+        msg.role === 'assistant' ? compactAssistantContent(msg) : msg.canonicalContent;
       tokens += this.estimateTokens(textToEstimate);
     }
     if (incomingQuery) {

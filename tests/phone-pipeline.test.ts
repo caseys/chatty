@@ -2,12 +2,13 @@ import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import {
   detectActionIntent,
+  isFollowUpEdit,
   parseDurationSeconds,
   parseFunctionGemmaCall,
   PHONE_CHAT_SYSTEM_PROMPT,
   TurnRouter,
 } from '../src/core/phone-pipeline.ts';
-import { ConversationOrchestrator } from '../src/core/orchestrator.ts';
+import { ConversationOrchestrator, programDraws } from '../src/core/orchestrator.ts';
 import { StateMachineCoordinator } from '../src/core/state-machine.ts';
 import type { LlmGenerationOptions, LlmGenerationResult, LlmRuntimeProvider } from '../src/types/index.ts';
 
@@ -74,6 +75,39 @@ describe('action intent gate', () => {
     expect(detectActionIntent('Who was Ada Lovelace?')).toBe('lookup');
     expect(detectActionIntent('What is the capital of Peru')).toBe('lookup');
     expect(detectActionIntent('How many cups in a gallon')).toBe('lookup');
+  });
+});
+
+describe('screen clearing', () => {
+  it('only programs that draw wipe the screen', () => {
+    expect(programDraws('speak("Hello there!");')).toBe(false);
+    expect(programDraws('await playNotes("C4 E4 G4", 200); speak("Done");')).toBe(false);
+    expect(programDraws('const c = document.createElement("canvas"); root.appendChild(c);')).toBe(true);
+    expect(programDraws('root.innerHTML = "<h1>Hi</h1>";')).toBe(true);
+  });
+});
+
+describe('follow-ups', () => {
+  it('recognizes edits to what was just made', () => {
+    for (const q of ['make it bigger', 'add a sun', 'change the color to blue', 'now make them faster', 'do it again but red instead']) {
+      expect(isFollowUpEdit(q), q).toBe(true);
+    }
+  });
+  it('does not treat questions or new topics as edits', () => {
+    for (const q of ['tell me more about it', 'why is it red?', 'how are you', 'thanks, that is great']) {
+      expect(isFollowUpEdit(q), q).toBe(false);
+    }
+  });
+  it('continues the previous action', async () => {
+    const router = new TurnRouter({ generateRaw: async () => { throw new Error('should not run'); } } as never);
+    const lastCode = { kind: 'code' as const, task: 'draw a red circle', code: 'speak("ok")' };
+    expect(await router.route('make it bigger', undefined, lastCode)).toEqual({ kind: 'code', task: 'make it bigger', edit: true });
+    const lastLookup = { kind: 'tool' as const, name: 'search_wikipedia', args: { query: 'Lima' } };
+    expect(await router.route('what about Paris?', undefined, lastLookup)).toEqual({
+      kind: 'tool',
+      name: 'search_wikipedia',
+      args: { query: 'Paris' },
+    });
   });
 });
 
@@ -165,5 +199,31 @@ describe('Orchestrator phone pipeline', () => {
     expect(coder.calls[0].messages).toEqual([{ role: 'user', content: 'draw a red circle' }]);
     // Once the generated code runs, the message shows the executed program
     expect(msg?.toolCall?.name).toBe('javascript_runtime');
+  });
+
+  it('gives the coder the previous program when editing it', async () => {
+    const chat = new RecordingLlm('chat', 'ok');
+    const coder = new RecordingLlm('coder', 'root.innerHTML = "<b>circle</b>"; speak("Done.");');
+    const orchestrator = new ConversationOrchestrator({
+      stateCoordinator: new StateMachineCoordinator(),
+      llmProvider: new RecordingLlm('unused', 'unused'),
+      enableSpeechOutput: false,
+      getConversationId: () => 'c1',
+      shouldAutoTitle: () => false,
+    });
+    orchestrator.configurePhonePipeline({
+      chat,
+      coder,
+      router: new TurnRouter(fakeRouterModel('call:coder_agent{task:<escape>draw a red circle<escape>}')),
+      chatSystemPrompt: PHONE_CHAT_SYSTEM_PROMPT,
+    });
+    await orchestrator.submitUserInput('draw a red circle');
+    await orchestrator.submitUserInput('make it bigger');
+    expect(coder.calls).toHaveLength(2);
+    expect(coder.calls[1].messages).toEqual([
+      { role: 'user', content: 'draw a red circle' },
+      { role: 'assistant', content: 'root.innerHTML = "<b>circle</b>"; speak("Done.");' },
+      { role: 'user', content: 'make it bigger' },
+    ]);
   });
 });

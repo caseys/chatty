@@ -293,6 +293,21 @@ export class JavascriptRuntime {
     }
   }
 
+  /** True when a previous run left something on the visual screen (root or body-level elements). */
+  hasVisualContent(): boolean {
+    try {
+      const doc = this.activeIframe?.contentDocument;
+      if (!doc?.body) return false;
+      const root = doc.getElementById('root');
+      if (root && root.childNodes.length > 0) return true;
+      return Array.from(doc.body.children).some(
+        (el) => el !== root && el.tagName !== 'SCRIPT' && el.tagName !== 'STYLE'
+      );
+    } catch {
+      return false;
+    }
+  }
+
   private abortPendingRuns(reason: string): void {
     for (const run of Array.from(this.pendingRuns.values())) {
       run.finish(null, reason);

@@ -24,7 +24,14 @@ import {
   stripToolCallMarkup,
 } from './speech-normalizer.ts';
 import { StateMachineCoordinator } from './state-machine.ts';
-import { runReadyTool, type ReadyToolOutcome, type TurnRouter } from './phone-pipeline.ts';
+import { compactAssistantContent, isTalkOnly, programDraws } from './history-format.ts';
+import {
+  isFollowUpEdit,
+  runReadyTool,
+  type LastAction,
+  type ReadyToolOutcome,
+  type TurnRouter,
+} from './phone-pipeline.ts';
 import {
   JavascriptRuntime,
   inspectExecutableCode,
@@ -80,6 +87,8 @@ export const COMPACTION_SYSTEM_PROMPT = [
   'Format as a dense, structured summary under 200 words. Do not include conversational filler, greetings, or commentary.',
 ].join(' ');
 
+export { programDraws } from './history-format.ts';
+
 export const CONCISE_VOICE_SYSTEM_PROMPT = [
   'You are Chatty, an autonomous AI voice and browser assistant whose ONLY output is executable JavaScript.',
   'UNIVERSAL BROWSER CAPABILITY: You interact with the user and the browser through code execution.',
@@ -92,6 +101,7 @@ export const CONCISE_VOICE_SYSTEM_PROMPT = [
   '   - SVG Vector Graphics: <svg> with <path>, <circle>, <rect>, <polygon>, <linearGradient> for crisp scalable diagrams, icons, and vector illustrations.',
   '   - Any HTML/DOM elements: <div>, <section>, <table>, <progress>, <meter>, <button>, <input>, <h1>-<h6>, <p>, <span> with modern CSS for cards, sticky notes, banners, gauges, dashboards, or interactive widgets.',
   '   - To clear the screen when asked: root.innerHTML = ""; speak("Cleared your screen.");',
+  '   - The screen is wiped before each new program runs. To change something already on screen, output the complete updated program, not just the change.',
   '4. To play sound, music melodies, or MIDI chords, call: await playNotes("C4 E4 G4 C5", 200);',
   '5. To look up factual encyclopedia topics, call: const info = await searchWikipedia("topic"); speak(info.summary);',
   '6. NEVER mention code, JavaScript, or programming to the user in speak(). Never ask "would you like that code?". Fulfill every request directly as a live working browser application.',
@@ -170,6 +180,9 @@ export class ConversationOrchestrator {
   private compactionThreshold: number;
   private getConversationId?: () => string;
   private shouldAutoTitle?: (conversationId: string) => boolean;
+  // Last tool or program in each conversation: lets follow-ups ("make it bigger", "what about
+  // Paris?") continue the previous action, and gives the coder the program it is editing
+  private lastAction: LastAction | null = null;
   // Phone pipeline (small models): router picks a tool / code / chat each turn
   private phonePipeline: {
     router: TurnRouter;
@@ -471,10 +484,16 @@ export class ConversationOrchestrator {
       : this.selectResponseMode(normalized, resolvedContext.workingMessages);
 
     // Stage 3: Build the prompt respecting model context budget
+    // Editing the last program ("make it bigger")? Then the model needs that program's code;
+    // otherwise past programs appear only as one-line summaries.
+    const lastAction = this.getLastAction(conversationId);
+    const programBeingEdited =
+      lastAction?.kind === 'code' && isFollowUpEdit(normalized) ? lastAction.code : null;
     let { systemPrompt, promptMessages } = this.buildModelPrompt(
       normalized,
       resolvedContext,
-      responseMode
+      responseMode,
+      programBeingEdited
     );
 
     // Prepare assistant message placeholder
@@ -598,12 +617,15 @@ export class ConversationOrchestrator {
       // Stage 5: Generate incrementally (or execute tool if tool_execution mode)
       let finalCanonicalText = '';
       let generationProvider = this.llmProvider;
+      // What the program being written is for (remembered for follow-up edits)
+      let codeTask = normalized;
 
       if (this.phonePipeline) {
-        const route = await this.phonePipeline.router.route(normalized, signal);
+        const route = await this.phonePipeline.router.route(normalized, signal, this.getLastAction(conversationId));
         if (!this.scheduler.isTurnValid(turnId) || signal.aborted) return assistantMsg;
 
         if (route.kind === 'tool') {
+          this.lastAction = { conversationId, kind: 'tool', name: route.name, args: route.args };
           assistantMsg.toolCall = { name: route.name, arguments: route.args };
           this.events.onMessageUpdated?.({ ...assistantMsg });
           const outcome = await runReadyTool(route.name, route.args, {
@@ -635,11 +657,21 @@ export class ConversationOrchestrator {
           }
         } else if (route.kind === 'code') {
           // Qwen2.5-Coder writes the program; the existing code path streams speak() and runs it
+          codeTask = route.task;
           assistantMsg.toolCall = { name: 'coder_agent', arguments: { task: route.task } };
           this.events.onMessageUpdated?.({ ...assistantMsg });
           generationProvider = this.phonePipeline.coder;
           systemPrompt = CONCISE_VOICE_SYSTEM_PROMPT;
-          promptMessages = [{ role: 'user', content: route.task }];
+          const previous = this.getLastAction(conversationId);
+          promptMessages =
+            route.edit && previous?.kind === 'code'
+              ? [
+                  // The coder sees the program it is changing (the screen is wiped before it runs)
+                  { role: 'user', content: previous.task },
+                  { role: 'assistant', content: previous.code },
+                  { role: 'user', content: route.task },
+                ]
+              : [{ role: 'user', content: route.task }];
           this.events.onStatusChange?.('Writing code…');
         }
       }
@@ -1011,6 +1043,12 @@ export class ConversationOrchestrator {
             // Set once the run returns: later speak() calls come from timers/handlers the code left
             // running, and are voiced outside the (finished) turn instead of being dropped.
             let runFinished = false;
+            // A new program that draws starts on a clean screen: old drawings, animation loops and
+            // sounds go away. Programs that only talk (desktop replies are speak() code) leave the
+            // screen alone, and nothing happens when the screen is already empty.
+            if (programDraws(executableCode) && this.javascriptRuntime.hasVisualContent?.()) {
+              await this.javascriptRuntime.resetVisual();
+            }
             const execResult = await this.javascriptRuntime.execute(executableCode, undefined, {
               onSpeak: (phrase) => {
                 if (runFinished) {
@@ -1029,6 +1067,11 @@ export class ConversationOrchestrator {
               audioContextAccessor: this.audioContextAccessor,
             });
             runFinished = true;
+            // The program follow-ups may edit; remembered even when it failed ("fix it" edits it
+            // too). Talk-only replies (desktop chat is speak() code) don't replace it.
+            if (!isTalkOnly(executableCode)) {
+              this.lastAction = { conversationId, kind: 'code', task: codeTask, code: executableCode };
+            }
 
             if (this.scheduler.isTurnValid(turnId)) {
               let spokenText = '';
@@ -1227,6 +1270,11 @@ export class ConversationOrchestrator {
     } catch {
       // Non-fatal if standalone speech fails or speech output disabled
     }
+  }
+
+  /** The last tool/program used in this conversation, if any. */
+  private getLastAction(conversationId: string | undefined): LastAction | null {
+    return this.lastAction && this.lastAction.conversationId === conversationId ? this.lastAction : null;
   }
 
   /** True when the coordinated state still belongs to the given turn/compaction id. */
@@ -1521,7 +1569,8 @@ export class ConversationOrchestrator {
   private buildModelPrompt(
     userMessage: string,
     context: ReturnType<ConversationMemoryStore['resolveContextForQuery']>,
-    mode: ResponseMode
+    mode: ResponseMode,
+    programBeingEdited: string | null = null
   ): {
     systemPrompt: string;
     promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
@@ -1574,8 +1623,15 @@ export class ConversationOrchestrator {
 
     for (const msg of context.workingMessages) {
       if (msg.role === 'assistant') {
-        // Phone chat model sees what was said, not generated code (it would imitate the code)
-        const content = (this.phonePipeline ? msg.canonicalContent || '' : msg.rawLlmOutput || msg.rawCode || msg.canonicalContent || '')
+        // Phone chat model sees what was said, not generated code (it would imitate the code).
+        // Desktop sees past programs summarized, except the one being edited, in full.
+        const content = (
+          this.phonePipeline
+            ? msg.canonicalContent || ''
+            : programBeingEdited && msg.rawCode === programBeingEdited
+              ? msg.rawCode
+              : compactAssistantContent(msg)
+        )
           .replace(/\s*\[Interrupted\]\s*$/, '')
           .trim();
         if (!content || content === '[Response interrupted]' || content.startsWith('[Error')) {

@@ -201,7 +201,8 @@ export class SwappingLlmProvider implements LlmRuntimeProvider {
 
 export type RouteDecision =
   | { kind: 'chat' }
-  | { kind: 'code'; task: string }
+  /** edit: changes the previous program (the coder is given it) */
+  | { kind: 'code'; task: string; edit?: boolean }
   | { kind: 'tool'; name: 'set_timer' | 'search_wikipedia' | 'web_search'; args: Record<string, unknown> };
 
 // No "chat" tool: base FunctionGemma always calls *something*, so plain chat is decided by
@@ -276,6 +277,27 @@ export function parseDurationSeconds(text: string): number | null {
 
 export type ActionIntent = 'timer' | 'code' | 'lookup';
 
+/** The previous tool/program in this conversation, used to continue follow-ups. */
+export type LastAction =
+  | { conversationId?: string; kind: 'code'; task: string; code: string }
+  | { conversationId?: string; kind: 'tool'; name: string; args: Record<string, unknown> };
+
+/**
+ * "make it bigger", "add a sun", "change the color to blue": a change to what the last
+ * program made, rather than a new request.
+ */
+export function isFollowUpEdit(text: string): boolean {
+  const t = text.toLowerCase().trim();
+  // Questions about it ("tell me more about it", "why is it red?") are conversation, not edits
+  if (/^(tell|explain|what|why|how|who|where|when|is|are|was|does|did|do you|can you tell)\b/.test(t)) return false;
+  const editVerb =
+    /\b(do|redo|play|show|run|repeat|make|change|add|bigger|smaller|larger|faster|slower|louder|quieter|softer|more|less|move|turn|colou?r|paint|remove|delete|replace|speed|slow|rotate|flip|put|give|use|swap|switch|increase|decrease|double|halve)\b/.test(t);
+  const refersBack =
+    /\b(it|its|them|that|this|those|these|again|instead|too|also)\b/.test(t) ||
+    /^(now|and|then|also|add|make|change)\b/.test(t);
+  return editVerb && refersBack;
+}
+
 /**
  * Cheap keyword gate run before FunctionGemma. Requests with no action words are plain chat
  * (the base model can't decline to call a tool), which also skips the router's latency.
@@ -321,7 +343,16 @@ function queryFromText(text: string): string {
 export class TurnRouter {
   constructor(private readonly router: OnnxLlmProvider) {}
 
-  async route(userText: string, signal?: AbortSignal): Promise<RouteDecision> {
+  async route(userText: string, signal?: AbortSignal, last?: LastAction | null): Promise<RouteDecision> {
+    // Follow-ups continue the previous action (FunctionGemma sees only the current message)
+    if (last?.kind === 'code' && isFollowUpEdit(userText)) {
+      return { kind: 'code', task: userText, edit: true };
+    }
+    const about = userText.match(/^(?:and\s+)?(?:what|how)\s+about\s+(.+?)[?.!]*$/i);
+    if (about && last?.kind === 'tool' && (last.name === 'search_wikipedia' || last.name === 'web_search')) {
+      return { kind: 'tool', name: last.name, args: { query: about[1].trim() } };
+    }
+
     const intent = detectActionIntent(userText);
     if (!intent) return { kind: 'chat' };
     let decision: { name: string; args: Record<string, unknown> } | null = null;
