@@ -2096,6 +2096,21 @@ body {
     width: 100%;
     margin: 0;
   }
+
+  /* Typing (keyboard up): the chat and output panels shrink to 42% of their height and the
+     input follows them up. With a flex-grow under 1 the panels take only that share of the
+     free space, and the rest goes below the input. */
+  .chat-workspace {
+    transition: flex-grow 0.25s ease;
+  }
+
+  .minimal-stage:has(.chat-input-field:focus) {
+    justify-content: flex-start;
+  }
+
+  .minimal-stage:has(.chat-input-field:focus) .chat-workspace {
+    flex-grow: 0.42;
+  }
 }
 
 .context-meter-container {

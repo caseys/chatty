@@ -23,8 +23,6 @@ type WakeLockSentinelLike = {
 };
 
 const SETTINGS_SEEN_KEY = 'chatty_settings_seen';
-/** Set once the user has spoken; until then the chat shows example phrases */
-const HAS_SPOKEN_KEY = 'chatty_has_spoken';
 /** Matches the CSS breakpoint where the chat and code panels stack */
 const NARROW_LAYOUT = '(max-width: 760px)';
 
@@ -340,7 +338,7 @@ export class MinimalVoiceApp {
       this.modelCacheCleared = false;
       void this.settingsApplying.catch(() => {}).then(() => this.engine.refetchModels());
     });
-    this.updateChatExamples(false);
+    this.showChatExamples(true);
     this.placeForLayout();
     window.matchMedia(NARROW_LAYOUT).addEventListener('change', () => this.placeForLayout());
     // Stay on the newest text when the layout changes (rotation, desktop/mobile switch)
@@ -712,6 +710,7 @@ export class MinimalVoiceApp {
     this.turnBubbles.clear();
     this.interimUserBubble = null;
     this.setRawOutput('');
+    this.showChatExamples(true);
   }
 
   /** Renders a whole conversation (on load and when switching chats). */
@@ -753,20 +752,13 @@ export class MinimalVoiceApp {
     this.scrollChatToBottom();
   }
 
-  /** Example phrases stay up until the user has spoken for the first time. */
-  private updateChatExamples(userHasSpoken: boolean): void {
-    let spoken = userHasSpoken;
-    try {
-      if (spoken) localStorage.setItem(HAS_SPOKEN_KEY, '1');
-      else spoken = localStorage.getItem(HAS_SPOKEN_KEY) !== null;
-    } catch {
-      // no storage: show examples until they speak in this visit
-    }
-    if (this.chatExamplesEl) this.chatExamplesEl.hidden = spoken;
+  /** Example phrases show in a chat until the user sends something in it. */
+  private showChatExamples(show: boolean): void {
+    if (this.chatExamplesEl) this.chatExamplesEl.hidden = !show;
   }
 
   private addUserBubble(msg: ConversationMessage): void {
-    this.updateChatExamples(true);
+    this.showChatExamples(false);
     if (this.bubbles.has(msg.id)) return;
     const bubble = this.interimUserBubble ?? this.createBubble('user');
     this.interimUserBubble = null;
