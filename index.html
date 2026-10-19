@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: data: https://cdn.jsdelivr.net; frame-src 'self' data: blob:; connect-src 'self' https: blob: data:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; manifest-src 'self';"
+    />
+    <title>Chatty</title>
+    <meta name="description" content="Private, 100% client-side browser voice AI powered by Whistle STT, Gemma 4 WebGPU, and Piper ONNX TTS with zero server calls." />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#0a0d14" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" href="/mascott.png" />
+    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main class="minimal-stage" aria-label="Voice Assistant">
+      <header class="minimal-top-bar" aria-label="Top Actions">
+        <div class="minimal-top-left">
+          <button id="btn-toggle-sidebar" class="minimal-corner-btn btn-sidebar-toggle corner-left" type="button" aria-label="Toggle Chats Sidebar" title="Chats (Left Column)">
+            <svg class="sidebar-box-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect width="18" height="18" x="3" y="3" rx="2.5"></rect>
+              <line x1="9" y1="3" x2="9" y2="21"></line>
+            </svg>
+          </button>
+
+          <button id="btn-new-chat" class="minimal-corner-btn btn-new-chat" type="button" aria-label="Start new chat channel" title="New Chat">
+            <span class="btn-emoji" aria-hidden="true">➕</span>
+            <span>New</span>
+          </button>
+        </div>
+
+        <button id="btn-settings" class="minimal-corner-btn btn-settings corner-right" type="button" aria-label="Settings" title="Settings">
+          <span class="btn-emoji" aria-hidden="true">⚙️</span>
+        </button>
+      </header>
+
+      <!-- Expandable Chats Sidebar (Hidden by default, open/close state held in preferences) -->
+      <aside id="chat-sidebar" class="chat-sidebar" aria-label="Conversations Sidebar" hidden>
+        <div class="sidebar-header">
+          <div class="sidebar-title-group">
+            <span class="sidebar-title-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2.5"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
+            </span>
+            <span class="sidebar-title">Chats</span>
+          </div>
+          <div class="sidebar-header-actions">
+            <button id="btn-sidebar-new-chat" class="sidebar-action-btn" type="button" title="Start New Chat" aria-label="New Chat">➕</button>
+            <button id="btn-close-sidebar" class="sidebar-action-btn close-btn" type="button" title="Close Sidebar" aria-label="Close Sidebar">✕</button>
+          </div>
+        </div>
+
+        <div class="sidebar-content scroller">
+          <ul id="sidebar-chat-list" class="sidebar-chat-list" role="listbox" aria-label="Conversations">
+            <!-- Dynamically populated chat channels -->
+          </ul>
+        </div>
+      </aside>
+
+      <!-- Sidebar Backdrop for overlay dismiss -->
+      <div id="sidebar-backdrop" class="sidebar-backdrop" hidden></div>
+
+      <div id="minimal-mascot-container" class="minimal-mascot-container">
+        <img src="/mascott.png" alt="Chatty Mascot" class="minimal-mascot-img" width="120" height="112" />
+      </div>
+      <div class="minimal-control">
+        <div class="minimal-btn-group">
+          <button id="btn-mic-toggle" class="minimal-start-btn" type="button" aria-label="Start or stop voice" disabled>
+            <span class="minimal-btn-dot" aria-hidden="true"></span>
+            <span id="mic-btn-label">Start</span>
+          </button>
+        </div>
+
+        <dialog id="dialog-ios-install" class="ios-install-dialog">
+          <div class="ios-install-content">
+            <h3>Install Chatty</h3>
+            <p id="ios-install-instructions">
+              In Safari, tap the <strong>Share</strong> button
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+              at the bottom, then choose <strong>"Add to Home Screen"</strong>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" width="18" height="18" rx="4"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>.
+            </p>
+            <button id="btn-close-ios-dialog" type="button" class="btn btn-secondary btn-sm">Got it</button>
+          </div>
+        </dialog>
+
+        <!-- Settings Modal (Native <dialog>) -->
+        <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-dialog-title">
+          <div class="settings-dialog-content">
+            <div class="settings-header">
+              <div class="settings-title-group">
+                <span class="settings-title-icon" aria-hidden="true">⚙️</span>
+                <h3 id="settings-dialog-title">Settings</h3>
+              </div>
+              <button id="btn-close-settings-x" class="settings-close-x" type="button" aria-label="Close Settings">✕</button>
+            </div>
+
+            <form id="settings-form" method="dialog" class="settings-form">
+              <!-- Chat Model Selection -->
+              <div class="settings-field">
+                <label for="select-chat-model" class="settings-label">
+                  <span class="settings-label-title">Chat Gemma Model</span>
+                  <span class="settings-label-desc">Primary conversational model</span>
+                </label>
+                <div class="settings-select-wrapper">
+                  <select id="select-chat-model" class="settings-select">
+                    <option value="gemma-4-e2b-it-web">Gemma 4 E2B (~1.95 GB, Fast)</option>
+                    <option value="gemma-4-e4b-it-web">Gemma 4 E4B (~2.89 GB, High Quality)</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Coder Agent Model Selection -->
+              <div class="settings-field">
+                <label for="select-coding-model" class="settings-label">
+                  <span class="settings-label-title">Coder Agent Model</span>
+                  <span class="settings-label-desc">Subagent for code generation & tools</span>
+                </label>
+                <div class="settings-select-wrapper">
+                  <select id="select-coding-model" class="settings-select">
+                    <option value="gemma-4-e2b-it-web">Gemma 4 E2B (~1.95 GB, Fast)</option>
+                    <option value="gemma-4-e4b-it-web">Gemma 4 E4B (~2.89 GB, High Quality)</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Piper Voice Selection -->
+              <div class="settings-field">
+                <label for="select-piper-voice" class="settings-label">
+                  <span class="settings-label-title">Piper Voice</span>
+                  <span class="settings-label-desc">Local ONNX text-to-speech synthesis</span>
+                </label>
+                <div class="settings-select-wrapper">
+                  <select id="select-piper-voice" class="settings-select">
+                    <option value="en_US-hfc_female-medium">Piper US Female (Medium ONNX)</option>
+                    <option value="en_US-hfc_male-medium">Piper US Male (Medium ONNX)</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- App Installation -->
+              <div id="settings-install-field" class="settings-field settings-install-field">
+                <label class="settings-label">
+                  <span class="settings-label-title">App Installation</span>
+                  <span class="settings-label-desc">Install Chatty on your device for fast offline access</span>
+                </label>
+                <button id="btn-install-app" class="btn btn-secondary btn-settings-install" type="button" aria-label="Install Chatty App">
+                  <span class="btn-emoji" aria-hidden="true">📲</span>
+                  <span>Install Chatty App</span>
+                </button>
+              </div>
+
+              <div class="settings-actions">
+                <button id="btn-cancel-settings" type="button" class="btn btn-secondary">Cancel</button>
+                <button id="btn-save-settings" type="submit" class="btn btn-primary">Save Changes</button>
+              </div>
+            </form>
+          </div>
+        </dialog>
+      </div>
+
+      <section class="minimal-section" aria-label="Voice Input">
+        <canvas
+          id="input-waveform"
+          class="minimal-waveform"
+          width="360"
+          height="48"
+          aria-label="Input waveform preview"
+        ></canvas>
+        <div id="input-result-text" class="minimal-input-text scroller" aria-live="polite"></div>
+      </section>
+
+      <section class="minimal-section" aria-label="Voice Output">
+        <canvas
+          id="output-waveform"
+          class="minimal-waveform"
+          width="360"
+          height="48"
+          aria-label="Output waveform preview"
+        ></canvas>
+        <div id="output-text" class="minimal-output-text scroller" aria-live="polite"></div>
+      </section>
+
+      <footer class="context-meter-container" aria-label="Status and Resource Usage">
+        <div id="minimal-status" class="minimal-status" aria-live="polite">Pulling local models…</div>
+        <div class="context-meter-header">
+          <span class="context-meter-label"><span class="context-meter-dot" aria-hidden="true"></span><span id="meter-title">Context Window</span></span>
+          <span id="context-meter-text" class="context-meter-value">0% (0 / 8,192 tokens)</span>
+        </div>
+        <div class="context-meter-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Progress">
+          <div id="context-meter-fill" class="context-meter-fill" style="width: 0%;"></div>
+          <div id="context-meter-threshold" class="context-meter-threshold" title="Auto-compaction threshold (85%)"></div>
+        </div>
+      </footer>
+
+      <!-- Full-window rootless drawing & visual DOM layer (transparent, click-through) -->
+      <div id="screen-visual-layer" class="screen-visual-layer" aria-hidden="true">
+        <div id="js-runtime-iframe-container" class="js-iframe-container"></div>
+      </div>
+
+      <!-- Floating Screen Visual HUD (appears when agent draws on screen or adds DOM elements) -->
+      <aside id="screen-visual-hud" class="screen-visual-hud" hidden aria-label="Screen Visual Controls">
+        <div class="hud-pill">
+          <span class="hud-status-dot" aria-hidden="true"></span>
+          <span class="hud-title">Visual Active</span>
+          <button id="btn-hud-clear" class="hud-btn" type="button" title="Clear screen">Clear</button>
+          <button id="btn-hud-close" class="hud-btn hud-close" type="button" title="Hide visual layer" aria-label="Hide">✕</button>
+        </div>
+      </aside>
+
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

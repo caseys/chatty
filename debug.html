@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; frame-src 'self' data: blob:; connect-src 'self' https: blob: data:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: data:; manifest-src 'self';"
+    />
+    <title>Chatty — Debug Console</title>
+    <meta name="description" content="Debug console and telemetry workspace for Chatty 100% client-side browser voice AI." />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#0a0d14" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Chatty" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" href="/mascott.png" />
+    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <!-- Top Header Bar -->
+      <header class="top-bar">
+        <div class="brand">
+          <div class="brand-logo" aria-hidden="true">
+            <img src="/mascott.png" alt="Chatty Mascot" class="brand-mascot-img" width="34" height="32" />
+          </div>
+          <div>
+            <h1 class="brand-title">Chatty</h1>
+            <p class="brand-subtitle">100% Client-Side Browser Voice AI · Zero Server Calls</p>
+          </div>
+        </div>
+
+        <!-- Coordinated State Machine Badges -->
+        <div class="state-strip" aria-label="System State Machines">
+          <div class="state-chip">
+            <span class="chip-label">Interaction</span>
+            <span id="badge-interaction" class="chip-value state-idle">idle</span>
+          </div>
+          <div class="state-chip">
+            <span class="chip-label">Mic</span>
+            <span id="badge-mic" class="chip-value">stopped</span>
+          </div>
+          <div class="state-chip">
+            <span class="chip-label">Playback</span>
+            <span id="badge-playback" class="chip-value">stopped</span>
+          </div>
+          <div class="state-chip">
+            <span class="chip-label">Runtime</span>
+            <span id="badge-runtime" class="chip-value state-ready">ready</span>
+          </div>
+        </div>
+
+        <!-- Header Actions -->
+        <div class="header-actions">
+          <button id="btn-open-models" class="btn btn-secondary" type="button">
+            Models &amp; Storage
+          </button>
+          <button id="btn-run-eval" class="btn btn-secondary" type="button">
+            Run Quality Suite
+          </button>
+          <button id="btn-clear-chat" class="btn btn-secondary" type="button" title="Reset Conversation">
+            Reset Chat
+          </button>
+        </div>
+      </header>
+
+      <!-- Main 2-Column Workspace -->
+      <main class="workspace">
+        <!-- Left/Center: Voice Orb + Live Transcript + Conversation Stream -->
+        <section class="conversation-panel" aria-label="Voice Conversation">
+          <!-- Voice Visualizer & Primary Controls -->
+          <div class="voice-stage">
+            <div class="orb-container">
+              <canvas id="audio-visualizer" width="260" height="90" aria-label="Voice activity waveform"></canvas>
+              <div id="live-partial-banner" class="partial-banner" hidden>
+                <span class="pulse-dot"></span>
+                <span id="partial-transcript-text">Listening...</span>
+              </div>
+            </div>
+
+            <div class="voice-controls">
+              <button id="btn-mic-toggle" class="btn btn-primary btn-mic" type="button">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                </svg>
+                <span id="mic-btn-label">Start Voice Input</span>
+              </button>
+
+              <button id="btn-interrupt" class="btn btn-danger" type="button" disabled>
+                Stop / Barge-In
+              </button>
+
+              <label class="toggle-label" title="Toggle spoken audio synthesis">
+                <input type="checkbox" id="chk-tts-enabled" checked />
+                <span>Speak Responses</span>
+              </label>
+
+              <select id="select-language" class="select-control" aria-label="Speech Recognition Language">
+                <option value="en">English (en)</option>
+                <option value="de">Deutsch (de)</option>
+                <option value="fr">Français (fr)</option>
+                <option value="es">Español (es)</option>
+                <option value="it">Italiano (it)</option>
+                <option value="nl">Nederlands (nl)</option>
+                <option value="pl">Polski (pl)</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Memory Approval Banner (when candidate durable preference detected) -->
+          <div id="memory-proposal-banner" class="proposal-banner" hidden></div>
+
+          <!-- Chat Transcript Feed -->
+          <div id="chat-messages" class="chat-feed scroller" role="log" aria-live="polite">
+            <div class="empty-state">
+              <img src="/mascott.png" alt="Chatty Mascot" class="empty-mascot-img" width="80" height="74" />
+              <h2>Private, Local Voice Assistant</h2>
+              <p>
+                Speak using the microphone or type below. Audio capture, Whistle WASM speech recognition,
+                LLM context orchestration, and phrase-level speech synthesis run locally in your browser.
+              </p>
+              <div class="quick-prompts">
+                <button type="button" class="chip-prompt" data-prompt="What are three options for browser inference?">
+                  "Three options for browser inference?"
+                </button>
+                <button type="button" class="chip-prompt" data-prompt="Tell me more about the second option.">
+                  "Tell me about the second option"
+                </button>
+                <button type="button" class="chip-prompt" data-prompt="What is the capital of France?">
+                  "Capital of France?"
+                </button>
+                <button type="button" class="chip-prompt" data-prompt="Calculate 42 * 19">
+                  "Calculate 42 * 19"
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Typed Input Form (Always Available Fallback) -->
+          <form id="chat-form" class="chat-input-bar">
+            <input
+              id="chat-input"
+              type="text"
+              placeholder="Type a message or speak with the microphone..."
+              autocomplete="off"
+              aria-label="Message input"
+            />
+            <button id="btn-send" class="btn btn-primary" type="submit">Send</button>
+          </form>
+        </section>
+
+        <!-- Right Sidebar: Context & Memory Inspector + Telemetry + Evaluation -->
+        <aside class="inspector-sidebar scroller" aria-label="Memory and Telemetry Inspector">
+          <!-- Hardware & Active Runtime Card -->
+          <div class="card">
+            <h2 class="card-title">Hardware &amp; Active Runtime</h2>
+            <div id="capabilities-summary" class="kv-grid">
+              <div class="kv-row"><span>Device Profile</span><strong id="cap-profile">Detecting...</strong></div>
+              <div class="kv-row"><span>WebGPU</span><strong id="cap-webgpu">Checking...</strong></div>
+              <div class="kv-row"><span>Active LLM</span><strong id="cap-llm">Gemma 4 E2B (WebGPU)</strong></div>
+              <div class="kv-row"><span>Active STT</span><strong id="cap-stt">Whistle WASM</strong></div>
+              <div class="kv-row"><span>Active TTS</span><strong id="cap-tts">Piper ONNX</strong></div>
+            </div>
+          </div>
+
+          <!-- 3-Tier Memory Inspector Card -->
+          <div class="card">
+            <div class="card-header-row">
+              <h2 class="card-title">3-Tier Conversation Memory</h2>
+              <span id="memory-turn-count" class="badge-subtle">0 verbatim</span>
+            </div>
+
+            <div class="memory-section">
+              <h3 class="section-subtitle">Conversation Summary (Compacted)</h3>
+              <p id="summary-display" class="muted-box">
+                No compacted summary yet (created automatically when conversation exceeds working context budget).
+              </p>
+            </div>
+
+            <div class="memory-section">
+              <div class="card-header-row" style="margin-bottom: 6px;">
+                <h3 class="section-subtitle" style="margin: 0;">Long-Term Approved Memory</h3>
+                <button id="btn-clear-memories" type="button" class="btn btn-ghost btn-sm">Clear All</button>
+              </div>
+              <form id="memory-add-form" class="memory-inline-form">
+                <input id="mem-key-input" type="text" placeholder="Key (e.g. response_style)" required />
+                <input id="mem-val-input" type="text" placeholder="Value (e.g. concise bullets)" required />
+                <button type="submit" class="btn btn-secondary btn-sm">Save</button>
+              </form>
+              <ul id="memory-list" class="memory-list"></ul>
+            </div>
+          </div>
+
+          <!-- Real-Time Performance & Observability Card -->
+          <div class="card">
+            <h2 class="card-title">Performance &amp; Telemetry</h2>
+            <div class="metrics-grid">
+              <div class="metric-box">
+                <span class="metric-label">LLM TTFT</span>
+                <strong id="metric-ttft" class="metric-value">— ms</strong>
+              </div>
+              <div class="metric-box">
+                <span class="metric-label">First Audio</span>
+                <strong id="metric-first-audio" class="metric-value">— ms</strong>
+              </div>
+              <div class="metric-box">
+                <span class="metric-label">Throughput</span>
+                <strong id="metric-tps" class="metric-value">— tok/s</strong>
+              </div>
+              <div class="metric-box">
+                <span class="metric-label">TTS RTF</span>
+                <strong id="metric-rtf" class="metric-value">—</strong>
+              </div>
+              <div class="metric-box">
+                <span class="metric-label">Completed Turns</span>
+                <strong id="metric-completed" class="metric-value">0</strong>
+              </div>
+              <div class="metric-box">
+                <span class="metric-label">Barge-Ins</span>
+                <strong id="metric-interrupted" class="metric-value">0</strong>
+              </div>
+            </div>
+          </div>
+
+          <!-- Evaluation Benchmark Results Card -->
+          <div class="card" id="eval-card">
+            <div class="card-header-row">
+              <h2 class="card-title">Quality Benchmark Suite</h2>
+              <span id="eval-score-badge" class="badge-subtle">Not run</span>
+            </div>
+            <div id="eval-results-list" class="eval-list">
+              <p class="muted-box">Click "Run Quality Suite" to execute the 10-case multi-turn conversation &amp; interruption benchmark.</p>
+            </div>
+          </div>
+        </aside>
+      </main>
+
+      <!-- Native <dialog closedby="any"> for Model Manager & Offline Storage -->
+      <dialog id="dialog-models" class="modal-dialog" closedby="any">
+        <div class="modal-header">
+          <div>
+            <h2>Local Model Registry &amp; Offline Storage</h2>
+            <p class="modal-subtitle">
+              Manage WebGPU / WASM / ONNX artifacts stored in Origin Private File System (OPFS) &amp; IndexedDB.
+            </p>
+          </div>
+          <button id="btn-close-models" class="btn btn-ghost" type="button" aria-label="Close modal">✕</button>
+        </div>
+
+        <div class="storage-bar-wrap">
+          <div class="kv-row">
+            <span>Browser Storage Quota</span>
+            <strong id="storage-quota-text">Calculating...</strong>
+          </div>
+        </div>
+
+        <div id="model-registry-list" class="model-list"></div>
+      </dialog>
+    </div>
+
+    <script type="module" src="/src/debug.ts"></script>
+  </body>
+</html>
