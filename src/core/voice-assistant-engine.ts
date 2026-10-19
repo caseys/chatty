@@ -37,7 +37,6 @@ import {
   DEFAULT_SETTINGS,
   DEFAULT_PHONE_CHAT_MODEL_ID,
   findLocalChatModel,
-  SMALLEST_PHONE_CHAT_MODEL_ID,
   SUPPORTED_CHAT_MODELS,
   type ModelOptionItem,
   loadSettingsFromStorage,
@@ -80,15 +79,24 @@ function writeLlmLoadMarker(modelId: string): void {
     // Storage unavailable (private mode)
   }
 }
-function readLlmLoadMarker(): string | null {
-  try {
-    return localStorage.getItem(LLM_LOAD_MARKER_KEY);
-  } catch {
-    return null;
-  }
-}
 // Which model was loading when the tab last died (any startup model, for diagnostics)
 const LOAD_STAGE_KEY = 'chatty_load_stage';
+/** A model load that failed (and wasn't retried): shown in Settings on the next visit */
+const LAST_LOAD_FAILED_KEY = 'chatty_last_load_failed';
+function recordLoadFailure(text: string): void {
+  try {
+    localStorage.setItem(LAST_LOAD_FAILED_KEY, text);
+  } catch {
+    // Storage unavailable
+  }
+}
+function clearLoadFailure(): void {
+  try {
+    localStorage.removeItem(LAST_LOAD_FAILED_KEY);
+  } catch {
+    // Storage unavailable
+  }
+}
 function writeLoadStage(label: string): void {
   try {
     localStorage.setItem(LOAD_STAGE_KEY, label);
@@ -444,25 +452,10 @@ export class VoiceAssistantEngine {
     // is still present, the tab died mid-load (out of memory), so retry with the smaller model
     // instead of crashing again on every visit.
     this.previousLoadFailure = takeLoadStage();
-    // Never reloads on its own: the user decides whether to try the smaller model.
-    const crashedLoad = readLlmLoadMarker();
-    let skipLlmLoad = false;
-    if (crashedLoad) {
-      clearLlmLoadMarker();
-      const fallbackId = isConstrained ? SMALLEST_PHONE_CHAT_MODEL_ID : recommended.fallbackLlmModelId;
-      const fallbackName =
-        findLocalChatModel(fallbackId)?.label ?? (fallbackId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B');
-      const crashedName = this.previousLoadFailure ?? 'the model';
-      if (
-        this.ask(
-          `Last time, loading ${crashedName} stopped the page (probably out of memory).\n\nLoad ${fallbackName} now?`
-        )
-      ) {
-        this.chatModelId = fallbackId;
-      } else {
-        skipLlmLoad = true;
-      }
-    }
+    // A load that crashed or failed last time was shown in Settings before startup (main.ts),
+    // where the user chose what to load now; clear the record
+    clearLlmLoadMarker();
+    clearLoadFailure();
     // The coder always shares the chat model (there's no separate picker). A stale divergent
     // codingModelId from older settings would load a second multi-GB model onto the GPU
     // alongside the chat model and crash the tab mid-load.
@@ -503,7 +496,8 @@ export class VoiceAssistantEngine {
     //   ?stt=native|whistle   ?chat=270m   ?gap=<ms between model loads>
     const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
     const sttPref = params?.get('stt');
-    const loadGapMs = Number(params?.get('gap') ?? (isConstrained ? 1500 : 0)) || 0;
+    // Short pause between model loads, the same on every device (?gap=<ms> to change)
+    const loadGapMs = Number(params?.get('gap') ?? 250) || 0;
     const gap = () => (loadGapMs > 0 ? new Promise<void>((r) => setTimeout(r, loadGapMs)) : Promise.resolve());
     // Whistle on every device; the browser's own recognizer only on request (?stt=native)
     if (sttPref === 'native' && NativeSpeechRecognizer.isSupported()) {
@@ -558,6 +552,7 @@ export class VoiceAssistantEngine {
           .then(() => {
             clearLlmLoadMarker();
             if (ticket !== this.llmLoadTicket) return;
+            clearLoadFailure();
             this.stateCoordinator.setModelState('llm', 'ready');
             const readinessMs = Math.max(1, Math.round(performance.now() - startInit));
             this.orchestrator.recordInitializationTiming(readinessMs, readinessMs);
@@ -575,13 +570,8 @@ export class VoiceAssistantEngine {
               this.stateCoordinator.setModelState('llm', 'downloading');
               return startLlm();
             }
+            recordLoadFailure(`${modelName} didn't load: ${reason}`);
           });
-      };
-    }
-    if (skipLlmLoad) {
-      startLlm = async () => {
-        this.stateCoordinator.setModelState('llm', 'failed');
-        this.events.onStatusChange?.('Model not loaded. Reload the page or choose a model in Settings to try again.');
       };
     }
 
@@ -1292,6 +1282,7 @@ export class VoiceAssistantEngine {
         })
         .then(() => {
           if (ticket !== this.llmLoadTicket) return;
+          clearLoadFailure();
           this.stateCoordinator.setModelState('llm', 'ready');
           this.events.onStatusChange?.(null);
         })
@@ -1305,6 +1296,7 @@ export class VoiceAssistantEngine {
             this.stateCoordinator.setModelState('llm', 'downloading');
             return load();
           }
+          recordLoadFailure(`${modelName} didn't load: ${reason}`);
         });
     };
     void load();
@@ -1377,6 +1369,23 @@ export class VoiceAssistantEngine {
         console.warn('Piper ONNX change warning:', err);
         this.stateCoordinator.setModelState('tts', 'failed');
       });
+  }
+
+  /**
+   * Why the last visit's model load didn't finish, if it didn't: the page stopped mid-load
+   * (probably out of memory) or the load failed. Read before initialize(), which clears it.
+   */
+  getLastLoadProblem(): string | null {
+    try {
+      const stage = localStorage.getItem(LOAD_STAGE_KEY);
+      if (stage || localStorage.getItem(LLM_LOAD_MARKER_KEY)) {
+        return `Last time, loading ${stage ?? 'the model'} stopped the page (probably out of memory).`;
+      }
+      const failed = localStorage.getItem(LAST_LOAD_FAILED_KEY);
+      return failed ? `Last time, ${failed}.` : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Detects the device class early (before initialize), so the settings picker lists the right models. */

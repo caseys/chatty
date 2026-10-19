@@ -1282,19 +1282,16 @@ body {
   color: var(--text-secondary);
 }
 
-/* Under the model picker, on phone-size screens only */
+/* Under the model picker: why the last model load crashed or failed */
 .settings-warning {
-  display: none;
   margin-top: 6px;
   font-size: 12.5px;
   font-weight: 500;
   color: var(--warning);
 }
 
-@media (max-width: 760px) {
-  .settings-warning {
-    display: block;
-  }
+.settings-warning[hidden] {
+  display: none;
 }
 
 .settings-header {
@@ -2107,17 +2104,7 @@ body {
   box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
 }
 
-.keep-awake-hint {
-  margin: 6px 0 0;
-  font-size: 11px;
-  line-height: 1.3;
-  text-align: center;
-  color: var(--warning);
-}
 
-.keep-awake-hint[hidden] {
-  display: none;
-}
 
 /* App/status notes inside the conversation panels (welcome, interrupted, earlier summary) */
 .system-note {

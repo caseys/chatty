@@ -211,19 +211,13 @@ export class MinimalVoiceApp {
     this.updateBusyIndicator();
     this.updateDownloadProgress('Loading models…', 0, '0%');
     try {
-      // First visit: choose the model and voice before anything downloads
-      if (isFirstVisit()) {
+      // First visit, or the last model load crashed or failed: choose before anything downloads
+      const loadProblem = this.engine.getLastLoadProblem();
+      if (isFirstVisit() || loadProblem) {
         await this.engine.detectDevice();
-        await this.showSettingsAndWait();
+        await this.showSettingsAndWait(loadProblem);
       }
       await this.engine.initialize();
-      // The page died mid-load last time: say which model, so on-device testing can pinpoint it
-      const failedStage = this.engine.previousLoadFailure;
-      const note = document.getElementById('load-failure-note');
-      if (failedStage && note) {
-        note.textContent = `Last visit stopped while loading ${failedStage} (likely out of memory).`;
-        note.hidden = false;
-      }
     } finally {
       this.appInitializing = false;
       this.updateBusyIndicator();
@@ -814,9 +808,15 @@ export class MinimalVoiceApp {
    * Turns the context meter into an animated barber pole while the app is initializing or
    * the LLM is working (transcribing, building context, generating, compacting, running tools).
    */
-  private showSettingsAndWait(): Promise<void> {
+  /** Opens Settings and waits for it to close; `loadProblem` explains why (last load crashed or failed). */
+  private showSettingsAndWait(loadProblem: string | null = null): Promise<void> {
     const dialog = this.settingsDialog;
     if (!dialog) return Promise.resolve();
+    const warning = document.getElementById('model-load-warning');
+    if (warning) {
+      warning.textContent = loadProblem ? `⚠️ ${loadProblem} Choose a smaller model, then save.` : '';
+      warning.hidden = !loadProblem;
+    }
     const current = this.engine.getSettings();
     this.fillChatModelOptions(current.chatModelId);
     if (this.selectPiperVoice) this.selectPiperVoice.value = current.voiceId;
@@ -830,6 +830,7 @@ export class MinimalVoiceApp {
           } catch {
             // ignore
           }
+          if (warning) warning.hidden = true;
           resolve();
         },
         { once: true }

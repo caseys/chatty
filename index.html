@@ -119,7 +119,6 @@
             <div id="context-meter-fill" class="context-meter-fill" style="width: 0%;"></div>
             <div id="context-meter-threshold" class="context-meter-threshold" title="Auto-compaction threshold (85%)"></div>
           </div>
-          <p id="load-failure-note" class="keep-awake-hint" role="status" hidden></p>
         </footer>
         <!-- Waveforms go here on desktop (main.ts places them), then start/stop -->
         <div class="bottom-right">
@@ -174,7 +173,7 @@
                         <option value="qwen2.5-coder-1.5b">Qwen2.5-Coder 1.5B (~1.34 GB, Code-focused)</option>
                       </select>
                     </div>
-                    <p class="settings-warning">⚠️ May crash mobile browsers.</p>
+                    <p id="model-load-warning" class="settings-warning" role="alert" hidden></p>
                   </div>
 
                   <!-- Piper Voice Selection -->
