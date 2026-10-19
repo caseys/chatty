@@ -1710,6 +1710,18 @@ body {
   box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
 }
 
+.keep-awake-hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.3;
+  text-align: center;
+  color: #f59e0b;
+}
+
+.keep-awake-hint[hidden] {
+  display: none;
+}
+
 /* Barber-pole overlay while the app initializes or the LLM is working */
 .context-meter-bar.busy::after {
   content: '';

@@ -8,7 +8,11 @@ import { FluidAudioVisualizer } from './audio/visualizer.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
 import { createToolSummaryElement, parseStreamingToolCall, stripToolCallMarkup } from './tools/tool-formatter.ts';
 
-type WakeLockSentinelLike = { released: boolean; release: () => Promise<void> };
+type WakeLockSentinelLike = {
+  released: boolean;
+  release: () => Promise<void>;
+  addEventListener?: (type: 'release', listener: () => void) => void;
+};
 
 export class MinimalVoiceApp {
   private engine: VoiceAssistantEngine;
@@ -33,6 +37,7 @@ export class MinimalVoiceApp {
   private keepAwakeListenerAdded = false;
   private wakeLockPending = false;
   private wakeLockSentinel: WakeLockSentinelLike | null = null;
+  private keepAwakeRetryTimer = 0;
   private screenVisualLayer = document.getElementById('screen-visual-layer') as HTMLElement | null;
   private screenVisualHud = document.getElementById('screen-visual-hud') as HTMLElement | null;
   private hudClearBtn = document.getElementById('btn-hud-clear') as HTMLButtonElement | null;
@@ -662,45 +667,84 @@ export class MinimalVoiceApp {
   }
 
   /**
-   * Holds a Screen Wake Lock while busy so mobile browsers don't sleep (and suspend the
-   * download / model init / tool run). The browser drops the lock when the page is hidden,
-   * so it is re-requested when the page becomes visible again.
+   * Holds a Screen Wake Lock while busy so mobile browsers don't sleep: iOS suspends a sleeping
+   * page and kills tabs holding a large model, so dimming mid-load crashes the app.
+   * The lock is fragile on mobile (dropped when hidden, revoked by Low Power Mode, denied in
+   * iOS < 18.4 Home Screen apps), so while it is wanted it is re-requested on release, on
+   * visibility, on the next tap, and every few seconds.
    */
   private setKeepAwake(on: boolean): void {
     this.keepAwakeWanted = on;
     const wakeLock = (navigator as Navigator & { wakeLock?: { request: (type: 'screen') => Promise<WakeLockSentinelLike> } })
       .wakeLock;
-    if (!wakeLock) return;
 
     if (!this.keepAwakeListenerAdded) {
       this.keepAwakeListenerAdded = true;
+      const retry = () => {
+        if (this.keepAwakeWanted && !this.isWakeLockHeld()) this.setKeepAwake(true);
+      };
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') this.setKeepAwake(this.keepAwakeWanted);
+        if (document.visibilityState === 'visible') retry();
       });
+      // A user gesture can succeed where an unprompted request was refused
+      window.addEventListener('pointerdown', retry, { capture: true, passive: true });
+      window.addEventListener('keydown', retry, { capture: true });
     }
 
     if (on) {
-      if (this.wakeLockSentinel && !this.wakeLockSentinel.released) return;
+      if (!this.keepAwakeRetryTimer) {
+        this.keepAwakeRetryTimer = window.setInterval(() => {
+          if (this.keepAwakeWanted && !this.isWakeLockHeld()) this.setKeepAwake(true);
+        }, 5000);
+      }
+      this.updateKeepAwakeHint();
+      if (!wakeLock || this.isWakeLockHeld()) return;
       if (this.wakeLockPending || document.visibilityState !== 'visible') return;
       this.wakeLockPending = true;
       wakeLock
         .request('screen')
         .then((sentinel) => {
           this.wakeLockSentinel = sentinel;
+          // Re-acquire if the system revokes it while still busy
+          sentinel.addEventListener?.('release', () => {
+            if (this.wakeLockSentinel === sentinel) this.wakeLockSentinel = null;
+            this.updateKeepAwakeHint();
+            if (this.keepAwakeWanted && document.visibilityState === 'visible') this.setKeepAwake(true);
+          });
           // Became idle while the request was in flight
           if (!this.keepAwakeWanted) void sentinel.release().catch(() => {});
         })
         .catch(() => {
-          // Denied (battery saver, unsupported context); not fatal
+          // Denied (Low Power Mode, iOS Home Screen app < 18.4, no gesture yet); retried later
         })
         .finally(() => {
           this.wakeLockPending = false;
+          this.updateKeepAwakeHint();
         });
-    } else if (this.wakeLockSentinel) {
-      const sentinel = this.wakeLockSentinel;
-      this.wakeLockSentinel = null;
-      void sentinel.release().catch(() => {});
+    } else {
+      if (this.keepAwakeRetryTimer) {
+        window.clearInterval(this.keepAwakeRetryTimer);
+        this.keepAwakeRetryTimer = 0;
+      }
+      if (this.wakeLockSentinel) {
+        const sentinel = this.wakeLockSentinel;
+        this.wakeLockSentinel = null;
+        void sentinel.release().catch(() => {});
+      }
+      this.updateKeepAwakeHint();
     }
+  }
+
+  private isWakeLockHeld(): boolean {
+    return !!this.wakeLockSentinel && !this.wakeLockSentinel.released;
+  }
+
+  /** Asks the user to keep the screen on while busy if the browser won't hold a wake lock. */
+  private updateKeepAwakeHint(): void {
+    const hint = document.getElementById('keep-awake-hint');
+    if (!hint) return;
+    const show = this.keepAwakeWanted && !this.isWakeLockHeld() && !this.wakeLockPending;
+    hint.hidden = !show;
   }
 
   private updateDownloadProgress(statusText: string, pct: number, meterText: string): void {
