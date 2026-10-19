@@ -331,6 +331,7 @@ export class JavascriptRuntime {
   private programSounding = false;
   private quietWatch: { timer: ReturnType<typeof setInterval>; analyser: AnalyserNode } | null = null;
   private programOutput: GainNode | null = null;
+  private cardShadow: HTMLElement | null = null;
 
   constructor(options?: JavascriptRuntimeOptions) {
     this.mode = options?.mode ?? 'iframe';
@@ -460,10 +461,51 @@ export class JavascriptRuntime {
     return withActivity('clearing the screen', () => this.resetVisualNow());
   }
 
+  /**
+   * The output card takes touches and clicks natively (typing, scrolling inside it) and the page
+   * gets them everywhere else: the full-window iframe is clipped to the card, which limits both
+   * what it paints and where it can be hit. Its shadow is drawn on the page, behind it.
+   */
+  private watchCard(iframe: HTMLIFrameElement): void {
+    const win = iframe.contentWindow as (Window & typeof globalThis) | null;
+    const card = iframe.contentDocument?.getElementById('root');
+    if (!win || !card) return;
+    this.cardShadow?.remove();
+    const shadow = document.createElement('div');
+    shadow.style.cssText =
+      'position:absolute;border-radius:4px;pointer-events:none;box-shadow:0 24px 64px rgba(0,0,0,0.55),0 8px 20px rgba(0,0,0,0.35);';
+    iframe.before(shadow);
+    this.cardShadow = shadow;
+    const update = () => {
+      if (this.activeIframe !== iframe) return;
+      const r = card.getBoundingClientRect();
+      const shown = r.width > 0 && r.height > 0;
+      iframe.style.pointerEvents = shown ? 'auto' : 'none';
+      iframe.style.clipPath = shown
+        ? `inset(${r.top}px ${win.innerWidth - r.right}px ${win.innerHeight - r.bottom}px ${r.left}px round 4px)`
+        : 'inset(50%)';
+      shadow.hidden = !shown;
+      Object.assign(shadow.style, { top: `${r.top}px`, left: `${r.left}px`, width: `${r.width}px`, height: `${r.height}px` });
+    };
+    // Size changes (images loading, layout) and content changes (which also cover a page that
+    // isn't rendering yet, when resize callbacks wait)
+    new win.ResizeObserver(update).observe(card);
+    new win.MutationObserver(() => setTimeout(update, 0)).observe(card, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+    });
+    win.addEventListener('resize', update);
+    update();
+  }
+
   private async resetVisualNow(): Promise<void> {
     const hadIframe = Boolean(this.activeIframe);
     this.abortPendingRuns('Visual screen was cleared');
     this.silenceProgramAudio();
+    this.cardShadow?.remove();
+    this.cardShadow = null;
     if (this.activeIframe) {
       this.activeIframe.style.pointerEvents = 'none';
       this.activeIframe.remove();
@@ -921,13 +963,14 @@ export class JavascriptRuntime {
       color: light-dark(#0f172a, #f1f5f9);
       -webkit-font-smoothing: antialiased;
     }
-    /* The transparent full-window layer centers the card */
+    /* The transparent full-window layer centers the card, clear of the top bar and the bottom
+       controls (the card is the only part that takes touches) */
     body {
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: 16px;
+      padding: 76px 16px 84px;
     }
     /* Program output: one card (document.body and root both mean this element), hidden while empty */
     #root {
@@ -942,7 +985,9 @@ export class JavascriptRuntime {
       background: #505050;
       color: #f8fafc;
       border-radius: 4px;
-      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55), 0 8px 20px rgba(0, 0, 0, 0.35);
+      contain: paint;
+      /* Scrolling inside the card never carries on to the page behind it */
+      overscroll-behavior: contain;
       pointer-events: auto;
     }
     #root:empty {
@@ -1230,6 +1275,7 @@ export class JavascriptRuntime {
       };
       window.addEventListener('message', onReady);
       iframe.addEventListener('load', () => {
+        if (this.activeIframe === iframe) this.watchCard(iframe);
         if (this.activeIframe === iframe) this.onIframeLoad?.(iframe);
         setTimeout(done, 50);
       });

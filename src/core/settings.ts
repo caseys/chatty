@@ -53,17 +53,30 @@ const local = (
 });
 
 export const LOCAL_CHAT_MODELS: ReadonlyArray<LocalChatModel> = [
+  // Phone-sized (smallest memory first)
+  local('smollm2-360m', 'SmolLM2 360M', 'SmolLM2-360M-Instruct-q4f16_1-MLC', 204, 376, 'Tiniest download, basic answers', true),
   local('llama-3.2-1b', 'Llama 3.2 1B', 'Llama-3.2-1B-Instruct-q4f16_1-MLC', 705, 879, 'Meta on-device model', true),
   local('qwen2.5-coder-0.5b', 'Qwen2.5-Coder 0.5B', 'Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC', 290, 945, 'Small model tuned for code', true),
   local('qwen2.5-0.5b', 'Qwen2.5 0.5B', 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC', 290, 945, 'Smallest download', true),
   { ...local('qwen3-0.6b', 'Qwen3 0.6B', 'Qwen3-0.6B-q4f16_1-MLC', 352, 1403, 'Newer general model', true), noThinking: true },
+  { ...local('qwen3.5-0.8b', 'Qwen3.5 0.8B', 'Qwen3.5-0.8B-q4f16_1-MLC', 424, 1629, 'Newest small Qwen', true), noThinking: true },
+  // Desktop (smallest memory first)
   local('qwen2.5-coder-1.5b', 'Qwen2.5-Coder 1.5B', 'Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC', 880, 1630, 'Strong at JavaScript', false),
+  local('smollm2-1.7b', 'SmolLM2 1.7B', 'SmolLM2-1.7B-Instruct-q4f16_1-MLC', 963, 1774, 'Hugging Face small model', false),
+  { ...local('qwen3-1.7b', 'Qwen3 1.7B', 'Qwen3-1.7B-q4f16_1-MLC', 968, 2037, 'General model', false), noThinking: true },
+  { ...local('qwen3.5-2b', 'Qwen3.5 2B', 'Qwen3.5-2B-q4f16_1-MLC', 1059, 2245, 'Newest Qwen, small', false), noThinking: true },
+  local('llama-3.2-3b', 'Llama 3.2 3B', 'Llama-3.2-3B-Instruct-q4f16_1-MLC', 1807, 2264, 'Meta on-device model', false),
   local('qwen2.5-coder-3b', 'Qwen2.5-Coder 3B', 'Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC', 1748, 2505, 'Stronger at JavaScript', false),
+  local('ministral-3-3b', 'Ministral 3 3B', 'Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC', 1929, 2864, 'Mistral edge model (Dec 2025)', false),
   { ...local('qwen3-4b', 'Qwen3 4B', 'Qwen3-4B-q4f16_1-MLC', 2279, 3432, 'General model, good at code', false), noThinking: true },
+  local('phi-4-mini', 'Phi-4-mini', 'Phi-4-mini-instruct-q4f16_1-MLC', 2158, 3438, 'Microsoft, strong reasoning', false),
+  { ...local('qwen3.5-4b', 'Qwen3.5 4B', 'Qwen3.5-4B-q4f16_1-MLC', 2367, 3868, 'Newest Qwen, balanced', false), noThinking: true },
   local('qwen2.5-coder-7b', 'Qwen2.5-Coder 7B', 'Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC', 4296, 5107, 'Best at JavaScript, needs a strong GPU', false),
+  { ...local('qwen3-8b', 'Qwen3 8B', 'Qwen3-8B-q4f16_1-MLC', 4608, 5696, 'General model, needs a strong GPU', false), noThinking: true },
+  { ...local('qwen3.5-9b', 'Qwen3.5 9B', 'Qwen3.5-9B-q4f16_1-MLC', 5038, 6433, 'Newest Qwen, largest; needs a strong GPU', false), noThinking: true },
 ];
 
-/** Phones start on Llama 3.2 1B: the smallest memory footprint, and it did best in testing */
+/** Phones start on Qwen3 0.6B */
 export const DEFAULT_PHONE_CHAT_MODEL_ID = 'qwen3-0.6b';
 /** Offered after a phone load dies (likely out of memory): the smallest memory footprint */
 export const SMALLEST_PHONE_CHAT_MODEL_ID = 'llama-3.2-1b';
