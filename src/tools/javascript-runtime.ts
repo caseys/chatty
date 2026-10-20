@@ -1010,6 +1010,10 @@ export class JavascriptRuntime {
     *, *::before, *::after {
       box-sizing: border-box;
     }
+    /* Under 16px, iOS Safari zooms the page in when a field is focused (wins over the program's own sizes) */
+    input, select, textarea, button {
+      font-size: 16px !important;
+    }
     html, body {
       margin: 0;
       padding: 0;
