@@ -9,6 +9,7 @@ import { loopProtect } from './loop-protect.ts';
 import { playNotesHelper } from './music-tool.ts';
 import { fetchWikipediaSummary } from './web-tools.ts';
 import { withActivity } from '../core/activity-breadcrumbs.ts';
+import { silenceSoftwareMidi, softwareMidiAccess } from '../audio/software-midi.ts';
 
 export type JavascriptExecutionMode = 'iframe' | 'worker' | 'eval';
 
@@ -360,7 +361,17 @@ export class JavascriptRuntime {
     if (this.getSharedAudioContext && typeof window !== 'undefined') {
       // Read by the sandbox's AudioContext stand-in (same origin)
       (window as unknown as { __chattySharedAudio?: () => unknown }).__chattySharedAudio = () => this.programAudio();
+      // Read by the sandbox's navigator.requestMIDIAccess (see audio/software-midi.ts)
+      (window as unknown as { __chattyMidi?: unknown }).__chattyMidi = (options: { sysex?: boolean } | undefined, now: () => number) =>
+        this.programMidi(options, now);
     }
+  }
+
+  /** Web MIDI for a program: a software synth playing into the program's audio output. */
+  private async programMidi(options: { sysex?: boolean } | undefined, now: () => number): Promise<unknown> {
+    const audio = this.programAudio();
+    if (!audio) throw new DOMException('Audio is not available', 'NotSupportedError');
+    return softwareMidiAccess(audio.context, audio.output, now, options);
   }
 
   /**
@@ -419,6 +430,7 @@ export class JavascriptRuntime {
   }
 
   private silenceProgramAudio(): void {
+    silenceSoftwareMidi();
     this.stopWatchingProgramSound();
     try {
       this.programOutput?.disconnect();
@@ -1211,6 +1223,18 @@ export class JavascriptRuntime {
         }
       }
     }).observe(document.documentElement, { childList: true, subtree: true });
+
+    // Web MIDI on every device: a software synth on Chatty's audio (iPhone has no Web MIDI, and
+    // desktop Web MIDI only reaches plugged-in devices). Timestamps are on this page's clock.
+    Object.defineProperty(navigator, 'requestMIDIAccess', {
+      configurable: true,
+      value: (options) => window.parent.__chattyMidi(options, () => performance.now()),
+    });
+
+    // clear(): empties the card, so a program can start the screen over
+    window.clear = () => {
+      window.root.innerHTML = '';
+    };
 
     // After the page has loaded, document.write would replace all of it (the card, the program's
     // wiring and this runner): its HTML goes into the card instead, and its scripts run
