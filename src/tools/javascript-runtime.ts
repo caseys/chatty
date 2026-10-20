@@ -656,7 +656,7 @@ export function prepareExecutableCode(rawText: string): string {
 export function detectRecommendedMode(code: string): JavascriptExecutionMode {
   // 1. Audio, visual, DOM, interactive widgets, timers, MIDI, storage, or host helpers require sandboxed iframe
   if (
-    /\b(document|window|canvas|getContext|Audio|AudioContext|webkitAudioContext|OscillatorNode|GainNode|requestMIDIAccess|svg|innerHTML|appendChild|addEventListener|setInterval|setTimeout|requestAnimationFrame|createElement|getElementById|querySelector|classList|style|onclick|root|playNotes|speak|searchWikipedia|localStorage|sessionStorage|alert|prompt|confirm|location|navigator)\b/i.test(
+    /\b(document|window|canvas|getContext|Audio|AudioContext|webkitAudioContext|OscillatorNode|GainNode|requestMIDIAccess|out|clear|svg|innerHTML|appendChild|addEventListener|setInterval|setTimeout|requestAnimationFrame|createElement|getElementById|querySelector|classList|style|onclick|root|playNotes|speak|searchWikipedia|localStorage|sessionStorage|alert|prompt|confirm|location|navigator)\b/i.test(
       code
     )
   ) {
@@ -750,13 +750,23 @@ export class JavascriptRuntime {
    */
   private programAudio(): { context: AudioContext; output: AudioNode } | null {
     const context = this.getSharedAudioContext?.();
-    if (!context) return null;
+    if (!context) {
+      this.onRunLog?.('error', 'sound: no audio yet (it starts with a tap or the Start button)');
+      return null;
+    }
     if (!this.programOutput || this.programOutput.context !== context) {
       this.programOutput = context.createGain();
       this.programOutput.connect(context.destination);
     }
     this.watchProgramSound(this.programOutput);
-    if (context.state !== 'running') void context.resume().catch(() => {});
+    if (context.state !== 'running') {
+      void context.resume().catch(() => {});
+      // Browsers (Safari above all) keep audio paused until a tap: say so (any tap starts it,
+      // see the engine's unlockAudio)
+      setTimeout(() => {
+        if (context.state !== 'running') this.onRunLog?.('error', `sound: the audio is ${context.state}: tap the page to hear it`);
+      }, 300);
+    }
     return { context, output: this.programOutput };
   }
 
@@ -1634,10 +1644,20 @@ export class JavascriptRuntime {
     // The MIDI output a program gets as \`out\` when it uses one without asking for it; MIDI
     // starts only when it first plays a note
     let defaultMidi = null;
+    // Once per program: a loop that can't sound would otherwise report every note
+    let soundErrorSent = false;
     const defaultMidiOut = {
       send(...args) {
         defaultMidi ??= navigator.requestMIDIAccess().then((access) => access.outputs.values().next().value);
-        defaultMidi.then((output) => output && output.send(...args)).catch(() => {});
+        defaultMidi
+          .then((output) => output && output.send(...args))
+          .catch((err) => {
+            // Sound that can't play is reported in the run log, not swallowed
+            defaultMidi = null;
+            if (soundErrorSent) return;
+            soundErrorSent = true;
+            window.parent.postMessage({ type: 'sound_error', text: String(err && err.message || err) }, '*');
+          });
       },
       play(...args) { this.send(...args); },
       playNote(...args) { this.send(...args); },
@@ -1929,6 +1949,7 @@ export class JavascriptRuntime {
       window.beat = 60000 / 100;
       window.start = performance.now() + 100;
       window.out = forgivingOut;
+      soundErrorSent = false;
       const logs = [];
       const origLog = console.log;
       const origWarn = console.warn;
@@ -2009,6 +2030,11 @@ export class JavascriptRuntime {
       }
     });
 
+    // A tap or key press in the card starts Chatty's audio too (browsers only start it in one)
+    for (const type of ['pointerdown', 'keydown']) {
+      window.addEventListener(type, () => { try { window.parent.__chattyUnlockAudio?.(); } catch {} }, true);
+    }
+
     // Notify parent that iframe is ready
     window.parent.postMessage({ type: 'iframe_ready' }, '*');
   </script>
@@ -2085,6 +2111,11 @@ export class JavascriptRuntime {
 
     if (data.type === 'clear') {
       this.onRunLog?.('clear', '');
+      return;
+    }
+
+    if (data.type === 'sound_error') {
+      this.onRunLog?.('error', `sound: ${String(data.text ?? '')}`);
       return;
     }
 

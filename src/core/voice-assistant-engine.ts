@@ -237,6 +237,17 @@ export class VoiceAssistantEngine {
 
     // The run log is kept per chat
     setRunLogChat(() => this.activeConversationId);
+    // Browsers start audio only in a tap or key press: every one, anywhere in Chatty (the
+    // program's card included, see the sandbox), creates or resumes the one shared AudioContext
+    if (typeof document !== 'undefined') {
+      const unlockAudio = () => {
+        const context = this.audioSubsystem?.getAudioContext();
+        if (!context || context.state !== 'running') void this.audioSubsystem?.ensureAudioContext().catch(() => {});
+      };
+      document.addEventListener('pointerdown', unlockAudio, true);
+      document.addEventListener('keydown', unlockAudio, true);
+      (window as unknown as { __chattyUnlockAudio?: () => void }).__chattyUnlockAudio = unlockAudio;
+    }
     this.jsRuntime = new JavascriptRuntime({
       mode: 'iframe',
       getSharedAudioContext: () => this.audioSubsystem.getAudioContext(),
