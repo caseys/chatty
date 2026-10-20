@@ -193,7 +193,7 @@ const FACTS_REQUEST =
  * same prompt each turn.
  */
 const PROMPT_RULES: ReadonlyArray<{ text: string; when?: RegExp }> = [
-  { text: '- Reply with perfect JavaScript syntax ONLY. Concise logic, fully functional.' },
+  { text: '- ONLY return executable JavaScript. Concise logic, fully functional.' },
   { text: '- Act first: do what was asked (draw, build, play, compute, look up) as a live, working browser app, then tell the user what you did with speak("...").' },
   { text: '- ALL messages to the user go through speak(text): plain conversation is just speak(). speak() accepts computed values in template strings.' },
   { text: '- What you add to document.body appears in a card in the middle of the screen. Use HTML and CSS for interfaces: buttons, forms, cards, notes, tables, gauges, dashboards and widgets. The screen is wiped with clear(): to completely update the screen, call clear() first.' },
