@@ -60,3 +60,21 @@ describe('phone default chat model', () => {
     expect(loadChatModelChoice()).toBeNull();
   });
 });
+
+describe('phone default by browser', () => {
+  it('uses Gemma where Chrome reports enough memory, and Qwen3 on iPhone or low memory', async () => {
+    const { phoneDefaultChatModelId, isAppleMobile, resolvePhoneChatModelId } = await import('../src/core/settings.ts');
+    expect(phoneDefaultChatModelId(8, false)).toBe('gemma-4-e2b-it-web');
+    expect(phoneDefaultChatModelId(4, false)).toBe('gemma-4-e2b-it-web');
+    expect(phoneDefaultChatModelId(2, false)).toBe('qwen3-0.6b');
+    expect(phoneDefaultChatModelId(undefined, false)).toBe('qwen3-0.6b');
+    expect(phoneDefaultChatModelId(8, true)).toBe('qwen3-0.6b');
+    expect(isAppleMobile('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', 5)).toBe(true);
+    expect(isAppleMobile('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 5)).toBe(true); // iPad
+    expect(isAppleMobile('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 0)).toBe(false);
+    expect(isAppleMobile('Mozilla/5.0 (Linux; Android 14; Pixel 6)', 5)).toBe(false);
+    // A saved pick still wins
+    expect(resolvePhoneChatModelId('qwen3-0.6b', 'gemma-4-e2b-it-web')).toBe('qwen3-0.6b');
+    expect(resolvePhoneChatModelId(null, 'gemma-4-e2b-it-web')).toBe('gemma-4-e2b-it-web');
+  });
+});

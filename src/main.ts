@@ -9,6 +9,7 @@ import { MODEL_REGISTRY } from './core/model-manager.ts';
 import { FluidAudioVisualizer } from './audio/visualizer.ts';
 import { clearModelCache, getModelCacheBytes } from './core/model-cache.ts';
 import { unwrapExampleFormat } from './tools/javascript-runtime.ts';
+import { isAppleMobile } from './core/settings.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
 import type { RunStatus } from './core/orchestrator.ts';
 import { createToolSummaryElement, parseStreamingToolCall, stripToolCallMarkup } from './tools/tool-formatter.ts';
@@ -1358,11 +1359,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     (navigator as any).standalone === true;
 
   const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
+
+  // iPhone: a quality warning in place of installing (the models that fit Safari are the smallest)
+  const installField = document.getElementById('settings-install-field');
+  const iphoneWarning = isAppleMobile() && !!installField;
+  if (iphoneWarning && installField) {
+    installField.innerHTML = '<p class="settings-safari-warning" role="note">⚠️ Quality degraded on iPhone Safari</p>';
+  }
   const isMacSafari =
     /^((?!chrome|android).)*safari/i.test(navigator.userAgent) &&
     !/chrome|chromium|edg/i.test(navigator.userAgent);
 
-  if (!isStandalone) {
+  if (!isStandalone && !iphoneWarning) {
     if (installBtn) {
       installBtn.hidden = false;
     }

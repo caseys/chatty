@@ -100,8 +100,30 @@ export function isPhoneChatModel(id: string): boolean {
  * it, otherwise the phone default. Phones don't follow the desktop default or recommendation:
  * Gemma 4 E2B is phone-capable, but a phone only gets it when the user chose it.
  */
-export function resolvePhoneChatModelId(chosen: string | null): string {
-  return chosen && isPhoneChatModel(chosen) ? chosen : DEFAULT_PHONE_CHAT_MODEL_ID;
+/** Phone memory (navigator.deviceMemory, GB) that runs Gemma 4 E2B: Chrome on Android handles it */
+const GEMMA_PHONE_MEMORY_GB = 4;
+
+/** iPhone or iPad: every browser there is Safari underneath, which crashes on Gemma */
+export function isAppleMobile(
+  ua = typeof navigator !== 'undefined' ? navigator.userAgent : '',
+  touchPoints = typeof navigator !== 'undefined' ? navigator.maxTouchPoints : 0
+): boolean {
+  return /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && touchPoints > 1);
+}
+
+/**
+ * The phone default: Gemma 4 E2B where the browser says there's enough memory (Chrome reports
+ * navigator.deviceMemory; Safari doesn't), Qwen3 0.6B on iPhone and low-memory phones
+ */
+export function phoneDefaultChatModelId(
+  deviceMemory = typeof navigator !== 'undefined' ? (navigator as { deviceMemory?: number }).deviceMemory : undefined,
+  appleMobile = isAppleMobile()
+): string {
+  return !appleMobile && (deviceMemory ?? 0) >= GEMMA_PHONE_MEMORY_GB ? 'gemma-4-e2b-it-web' : DEFAULT_PHONE_CHAT_MODEL_ID;
+}
+
+export function resolvePhoneChatModelId(chosen: string | null, fallback = phoneDefaultChatModelId()): string {
+  return chosen && isPhoneChatModel(chosen) ? chosen : fallback;
 }
 
 export function findLocalChatModel(id: string): LocalChatModel | undefined {

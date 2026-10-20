@@ -188,10 +188,15 @@ describe('a fix that loses the program', () => {
 
     // The fix asked for the program again, led by the original request
     const fixAsk = llm.turns[1].messages.at(-1)!.content;
-    expect(fixAsk.startsWith('Request: draw a red circle\nThe program failed at line 3: boom is not defined\n')).toBe(true);
+    expect(fixAsk.startsWith('Your program failed at line 3: boom is not defined\nLine 3: ')).toBe(true);
     // A fix turn has its own short prompt and only the fix request
     expect(llm.turns[1].systemPrompt).toBe(FIX_SYSTEM_PROMPT);
-    expect(llm.turns[1].messages).toEqual([{ role: 'user', content: fixAsk }]);
+    // The request, the failed program as the model's reply, then the fix request
+    expect(llm.turns[1].messages).toEqual([
+      { role: 'user', content: 'draw a red circle' },
+      { role: 'assistant', content: DRAWING },
+      { role: 'user', content: fixAsk },
+    ]);
 
     // Only the original program ran; the fix's text was neither spoken nor shown
     expect(executed).toEqual([DRAWING]);
@@ -441,7 +446,7 @@ describe('rules picked for small models', () => {
 
 
 describe('context shared between the conversation and a fix turn', () => {
-  it('tells the fix what came before, and puts a working fix in place of the broken program', async () => {
+  it('shows the fix the request and the failed program, and puts a working fix in place of the broken program', async () => {
     const SONG = 'const out = 1;\nspeak("Here is a song.");';
     const FASTER = [
       'const out = 1;',
@@ -464,7 +469,9 @@ describe('context shared between the conversation and a fix turn', () => {
     await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
 
     const fixAsk = llm.turns[2].messages.at(-1)!.content;
-    expect(fixAsk.startsWith('Earlier requests: Play a song\nRequest: make it faster\n')).toBe(true);
+    expect(llm.turns[2].messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+    expect(llm.turns[2].messages[0].content).toBe('make it faster');
+    expect(fixAsk.startsWith('Your program failed at line 6: t is not defined\nLine 6: setTimeout(() => send(t), 100);')).toBe(true);
     const fixed = FASTER.replace('send(t)', 'send(1)');
     expect(executed[2]).toBe(fixed);
     // The conversation now holds the working program as the reply to "make it faster"

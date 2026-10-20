@@ -688,7 +688,14 @@ export class ConversationOrchestrator {
     const fixedTurnId = options?.autoFix ? this.lastRun?.turnId : undefined;
     if (options?.autoFix) {
       systemPrompt = FIX_SYSTEM_PROMPT;
-      promptMessages = [{ role: 'user', content: normalized }];
+      // The failed program is the model's last reply, after the request it answered; the fix
+      // request itself is just the error and its line
+      const task = this.lastRun?.task;
+      promptMessages = [
+        ...(task ? [{ role: 'user' as const, content: task }] : []),
+        { role: 'assistant', content: options.autoFix },
+        { role: 'user', content: normalized },
+      ];
     }
     // Notes added to the request go out with it again in every later prompt (see buildModelPrompt)
     const sentRequest = promptMessages[promptMessages.length - 1]?.content;
@@ -1027,7 +1034,7 @@ export class ConversationOrchestrator {
             !!originalCode && (isTalkOnly(executableCode) || (programDraws(originalCode) && !programDraws(executableCode)));
           // Edits that matched nothing leave the same failing program: running it again would
           // only repeat the error (and its sounds and words)
-          const unchangedProgram = !!originalCode && fixedProgram.trim() === originalCode.trim();
+          const unchangedProgram = !!originalCode && fixedProgram.replace(/\s+/g, '') === originalCode.replace(/\s+/g, '');
 
           if (lostProgram || unchangedProgram) {
             const failed = this.lastRun;
@@ -1330,13 +1337,7 @@ export class ConversationOrchestrator {
       kind: 'error',
       text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
-    // The requests before this one, so the fix knows what the program is for
-    const earlier = this.memoryStore
-      .getMessages()
-      .filter((m) => m.role === 'user' && !m.autoFix && m.turnId !== run.turnId)
-      .slice(-2)
-      .map((m) => m.canonicalContent);
-    const request = fixRequest(run.task, run.code, run.errorLine, run.error, earlier);
+    const request = fixRequest(run.code, run.errorLine, run.error);
     // A short pause before the model runs again, unless the user moves on meanwhile
     void settle(AFTER_HEAVY_MS).then(() => {
       if (this.scheduler.getActiveTurnId()) return;

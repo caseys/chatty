@@ -1,73 +1,40 @@
 /**
- * Fixing a failed program the way coding tools do, kept small for small models: a fix turn has
- * its own short system prompt (FIX_SYSTEM_PROMPT) and only the fix request, which shows the error
- * and the numbered lines around it. The model answers with search/replace blocks, matched by
- * their text (so indentation and the shown line numbers don't matter), and they're applied to the
- * program. Asked to rewrite the whole program instead, small models copied it back, bug and all.
+ * Fixing a failed program. A fix turn has its own short system prompt (FIX_SYSTEM_PROMPT); its
+ * messages are the request, the failed program as the model's reply, and the fix request: the
+ * error and the one line it points at. The model names the cause in a "// Cause:" line, then
+ * writes search/replace blocks, applied by matching their text. Tested on Gemma, naming the cause
+ * first and then editing fixed the most bugs: rewriting the whole program copied the bug back in,
+ * and edits without a cause changed nothing. A whole program sent instead is still taken.
  */
-
-/** Lines shown on each side of the failing line */
-const CONTEXT_LINES = 5;
-/** Enough of the original request to say what the program is for */
-const MAX_REQUEST_CHARS = 200;
-
-const SEARCH_REPLACE_FORMAT = ['<<<<<<< SEARCH', '(the lines to change)', '=======', '(the new lines)', '>>>>>>> REPLACE'];
 
 /** The system prompt of a fix turn: only what fixing needs */
 export const FIX_SYSTEM_PROMPT = [
-  "You fix JavaScript programs that run in the user's browser. Each request shows what the program is for, its error and the lines around it.",
-  'Reply ONLY with search/replace blocks, nothing else:',
+  "You fix JavaScript programs that run in the user's browser. Each request gives the error a program hit and the line it points at.",
+  'Reply with a comment line naming the cause (// Cause: ...), then search/replace blocks that fix it, nothing else.',
+].join('\n');
+
+const FIX_FORMAT = [
+  'First write one comment line saying what caused the error (// Cause: ...), then fix it with search/replace blocks:',
   '<<<<<<< SEARCH',
-  '(lines copied exactly from the program)',
+  '(the lines to change, copied exactly)',
   '=======',
   '(the fixed lines)',
   '>>>>>>> REPLACE',
-  'Use one block per change, and change only what the fix needs.',
-  'Example, for "prise is not defined":',
-  '<<<<<<< SEARCH',
-  'const total = prise * 2;',
-  '=======',
-  'const total = price * 2;',
-  '>>>>>>> REPLACE',
 ].join('\n');
 
-const numberedLines = (lines: string[], start: number) => lines.map((text, i) => `${start + i}: ${text}`).join('\n');
-
-const shortRequest = (request: string) =>
-  request.replace(/\s+/g, ' ').trim().replace(/[.!?:,;\s]+$/, '').slice(0, MAX_REQUEST_CHARS);
-
 /**
- * `earlier`: the conversation's requests before this one, so the fix knows what the program is
- * for when the request was a follow-up ("make it faster" on a song)
+ * The fix request: the error and the one line it points at. The program itself is in the
+ * conversation just before it (the model's own last reply), so the model can write it again.
  */
-export function fixRequest(
-  request: string,
-  code: string,
-  line: number | undefined,
-  error: string,
-  earlier: string[] = []
-): string {
-  const task = shortRequest(request);
+export function fixRequest(code: string, line: number | undefined, error: string): string {
   const problem = error.trim().replace(/\.+$/, '');
   const lines = code.split('\n');
-  const before = earlier.map(shortRequest).filter(Boolean);
-  const parts = [
-    ...(before.length > 0 ? [`Earlier requests: ${before.join(' / ')}`] : []),
-    ...(task ? [`Request: ${task}`] : []),
-  ];
-  if (!line || line < 1 || line > lines.length) {
-    // No line to point at: the whole program
-    parts.push(`The program failed: ${problem}`, `The program:\n${numberedLines(lines, 1)}`);
-  } else {
-    const start = Math.max(1, line - CONTEXT_LINES);
-    const end = Math.min(lines.length, line + CONTEXT_LINES);
-    parts.push(
-      `The program failed at line ${line}: ${problem}`,
-      `Lines ${start}-${end} of the program:\n${numberedLines(lines.slice(start - 1, end), start)}`
-    );
-  }
-  parts.push(`Reply with search/replace blocks only:\n${SEARCH_REPLACE_FORMAT.join('\n')}`);
-  return parts.join('\n');
+  const at = line && line >= 1 && line <= lines.length ? line : undefined;
+  return [
+    at ? `Your program failed at line ${at}: ${problem}` : `Your program failed: ${problem}`,
+    ...(at ? [`Line ${at}: ${lines[at - 1].trim()}`] : []),
+    FIX_FORMAT,
+  ].join('\n');
 }
 
 const SEARCH_REPLACE = /<{5,}\s*SEARCH[^\n]*\n([\s\S]*?)\n?={5,}[^\n]*\n([\s\S]*?)\n?>{5,}\s*REPLACE/gi;

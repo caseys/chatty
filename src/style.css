@@ -2375,3 +2375,15 @@ body {
   pointer-events: none;
   display: block;
 }
+
+/* iPhone: shown in Settings where installing would be */
+.settings-safari-warning {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: light-dark(#92400e, #fcd34d);
+  font-size: 14px;
+  text-align: center;
+}
