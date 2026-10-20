@@ -37,6 +37,7 @@ import {
   inspectExecutableCode,
   syntaxErrorLine,
 } from '../tools/javascript-runtime.ts';
+import { fixRequest } from './line-fix.ts';
 import { AFTER_HEAVY_MS, settle } from './settle.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 
@@ -1457,7 +1458,10 @@ export class ConversationOrchestrator {
     if (!this.scheduler.getActiveTurnId()) this.maybeAutoFix(run.turnId);
   }
 
-  /** One automatic fix per request: the error goes back to the model, which rewrites the program. */
+  /**
+   * One automatic fix per request: the error goes back to the model, shown the lines around it,
+   * and it rewrites the program (see line-fix.ts).
+   */
   private maybeAutoFix(turnId: string): void {
     const run = this.lastRun;
     if (!this.autoFixErrors) return;
@@ -1468,16 +1472,11 @@ export class ConversationOrchestrator {
       kind: 'error',
       text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
-    // Small models fix the right thing when shown the exact line
-    const lineText = run.errorLine ? run.code.split('\n')[run.errorLine - 1]?.trim() : '';
-    const where = lineText ? ` at line ${run.errorLine} (\`${lineText.slice(0, 160)}\`)` : '';
+    const request = fixRequest(run.code, run.errorLine, run.error);
     // A short pause before the model runs again, unless the user moves on meanwhile
     void settle(AFTER_HEAVY_MS).then(() => {
       if (this.scheduler.getActiveTurnId()) return;
-      return this.submitUserInput(
-        `Your program failed${where}: ${run.error}\nReply with the complete corrected program, JavaScript only.`,
-        { autoFix: run.code }
-      );
+      return this.submitUserInput(request, { autoFix: run.code });
     });
   }
 
