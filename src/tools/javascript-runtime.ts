@@ -415,6 +415,8 @@ export class JavascriptRuntime {
   private onProgramAudio?: (sounding: boolean) => void;
   private onProgramActivity?: (active: boolean) => void;
   private programSounding = false;
+  // The last program_activity the sandbox reported: timers, animation frames or async work pending
+  private programActive = false;
   private quietWatch: { timer: ReturnType<typeof setInterval>; analyser: AnalyserNode } | null = null;
   private programOutput: GainNode | null = null;
   private cardShadow: HTMLElement | null = null;
@@ -603,6 +605,7 @@ export class JavascriptRuntime {
     this.abortPendingRuns('Visual screen was cleared');
     this.silenceProgramAudio();
     // The program's timers go with its page
+    this.programActive = false;
     this.onProgramActivity?.(false);
     this.cardShadow?.remove();
     this.cardShadow = null;
@@ -631,6 +634,11 @@ export class JavascriptRuntime {
     } catch {
       return false;
     }
+  }
+
+  /** True while the previous program still has something going: output on screen, sound, or timers/async work. */
+  hasRunningProgram(): boolean {
+    return this.hasVisualContent() || this.programSounding || this.programActive;
   }
 
   private abortPendingRuns(reason: string): void {
@@ -1606,7 +1614,8 @@ export class JavascriptRuntime {
     }
 
     if (data.type === 'program_activity') {
-      this.onProgramActivity?.(Boolean(data.active));
+      this.programActive = Boolean(data.active);
+      this.onProgramActivity?.(this.programActive);
       return;
     }
 

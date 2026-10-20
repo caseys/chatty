@@ -84,17 +84,59 @@ function orchestratorFor(llm: LlmRuntimeProvider, extra: Partial<ConstructorPara
 /** A program runtime that fails the first run the way a countdown with a typo does */
 function fakeRuntime(results: Array<Partial<JavascriptExecutionResult>>) {
   const executed: string[] = [];
+  /** Whether the previous program still has something going; a reset ends it */
+  const state = { running: false, resets: 0 };
   const runtime = {
     async execute(code: string): Promise<JavascriptExecutionResult> {
       executed.push(code);
       const r = results.shift() ?? {};
       return { success: !r.error, logs: [], hasVisualOutput: false, executionTimeMs: 1, code, mode: 'eval', ...r };
     },
-    async resetVisual() {},
-    hasVisualContent: () => false,
+    async resetVisual() {
+      state.resets++;
+      state.running = false;
+    },
+    hasRunningProgram: () => state.running,
   } as unknown as JavascriptRuntime;
-  return { executed, runtime };
+  return { executed, runtime, state };
 }
+
+describe('a new program replaces the one still running', () => {
+  const SONG = 'setInterval(() => playNotes("C4 E4 G4"), 2000);';
+  const SLOWER = 'setInterval(() => playNotes("C4 E4 G4"), 4000);';
+
+  async function turn(orchestrator: ConversationOrchestrator, text: string) {
+    await orchestrator.submitUserInput(text);
+    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+  }
+
+  it('resets before a program that is not talk-only, even one that draws nothing', async () => {
+    const llm = new QueueLlm([SONG, SLOWER]);
+    const { executed, runtime, state } = fakeRuntime([]);
+    const orchestrator = orchestratorFor(llm, { javascriptRuntime: runtime });
+
+    await turn(orchestrator, 'play a song on a loop');
+    expect(state.resets).toBe(0);
+    state.running = true;
+    await turn(orchestrator, 'play something slower');
+    expect(state.resets).toBe(1);
+    expect(executed).toEqual([SONG, SLOWER]);
+  });
+
+  it('leaves a running program alone for a talk-only reply', async () => {
+    const llm = new QueueLlm([SONG, 'speak("2 plus 2 is 4.");']);
+    const { executed, runtime, state } = fakeRuntime([]);
+    const orchestrator = orchestratorFor(llm, { javascriptRuntime: runtime });
+
+    await turn(orchestrator, 'play a song on a loop');
+    state.running = true;
+    await turn(orchestrator, "what's 2+2");
+    expect(state.resets).toBe(0);
+    expect(state.running).toBe(true);
+    // It still ran, on top of the song
+    expect(executed).toEqual([SONG, 'speak("2 plus 2 is 4.");']);
+  });
+});
 
 describe('a fix that loses the program', () => {
   const lostFixes = [
@@ -352,5 +394,26 @@ describe('the memory store budget', () => {
     add(slack, 'message 13', 13);
     expect(slack.getMessages().length).toBe(8);
     expect(slack.getMessages()[0].canonicalContent).toBe('message 6');
+  });
+});
+
+describe('rules picked for small models', () => {
+  it('keeps the core rules and adds the optional ones only when the request needs them', async () => {
+    const { promptRules } = await import('../src/core/orchestrator.ts');
+    const tip = promptRules('Code a tip calculator app with a UI for the bill and tip %', true);
+    expect(tip).toContain('- What you add to document.body appears in a card');
+    expect(tip).toContain('Use HTML and CSS for interfaces');
+    expect(tip).not.toContain('Web MIDI');
+    expect(tip).not.toContain('<canvas>');
+    expect(tip).not.toMatch(/^\d+\. /m);
+    const music = promptRules('Play a music loop with a G major chord on piano', true);
+    expect(music).toContain('Web MIDI');
+    // An edit is matched against the program it changes too
+    expect(promptRules('make it faster\nconst out = (await navigator.requestMIDIAccess())', true)).toContain('Web MIDI');
+    expect(promptRules('Draw a rainbow over green hills', true)).toContain('<canvas>');
+    expect(promptRules('Who was Ada Lovelace?', true)).toContain('Wikipedia');
+    // Unfiltered: every rule
+    const all = promptRules();
+    for (const part of ['Web MIDI', '<canvas>', '<svg>', 'WebGL', 'Wikipedia']) expect(all).toContain(part);
   });
 });

@@ -21,7 +21,6 @@ import {
   IncrementalPhraseSegmenter,
   normalizeTextForSpeech,
   normalizeUserTranscript,
-  stripToolCallMarkup,
 } from './speech-normalizer.ts';
 import { StateMachineCoordinator } from './state-machine.ts';
 import { describePastProgram, isTalkOnly, programDraws } from './history-format.ts';
@@ -84,6 +83,7 @@ export interface ConversationOrchestratorOptions {
   memoryStore?: ConversationMemoryStore;
   llmProvider: LlmRuntimeProvider;
   ttsProvider?: TtsRuntimeProvider;
+  /** Ignored: the legacy tool-call path is gone (still accepted so the debug console and benchmark suite compile) */
   tools?: ToolDefinition[];
   javascriptRuntime?: JavascriptRuntime;
   audioContextAccessor?: () => Promise<AudioContext | null> | AudioContext | null;
@@ -98,9 +98,6 @@ export interface ConversationOrchestratorOptions {
   /** Whether the given conversation still needs an auto-generated title. */
   shouldAutoTitle?: (conversationId: string) => boolean;
 }
-
-/** Internal marker: a legacy tool failure was already reported to the user. */
-class ToolFailureHandled extends Error {}
 
 export const TITLE_GENERATION_SYSTEM_PROMPT = [
   'You are an expert conversation title generator.',
@@ -178,20 +175,48 @@ export function classifyTranscript(
   return words.length >= 2 ? 'submit' : 'ignore';
 }
 
-export const CONCISE_VOICE_SYSTEM_PROMPT = [
-  "You are Chatty, a voice assistant that acts by writing JavaScript. Your reply runs as a program in the user's browser, immediately and exactly as written.",
-  'Rules:',
-  '1. Reply with perfect JavaScript syntax ONLY. Concise logic, fully functional.',
-  '2. Act first: do what was asked (draw, build, play, compute, look up) as a live, working browser app, then tell the user what you did with speak("...").',
-  '3. ALL messages to the user go through speak(text): plain conversation is just speak(), and nothing is written outside the code (no explanations, notes or markdown). speak() accepts computed values: speak(`The total is ${total}.`). Never mention code, JavaScript or programming in what you say, and never offer code.',
-  '4. What you add to document.body appears in a card in the middle of the screen. Use <canvas> for visuals: drawings, art, animations, games and simulations (2D or WebGL). Use HTML and CSS for interfaces: buttons, forms, cards, notes, tables, gauges, dashboards and widgets. <svg> works for diagrams and icons.',
-  '   The screen is wiped with clear(): to completely update the screen, call clear() first.',
-  '5. Sound: Web Audio (create an AudioContext and await ctx.resume() first), or Web MIDI for instruments: out = (await navigator.requestMIDIAccess()).outputs.values().next().value; then call out.send([instrument, notes, velocity, durationMs], time) once per note, chord or drum hit, at its own time. Instruments: piano, bass, organ, guitar, strings, violin, trumpet, sax, flute, drums. Notes: one note (\'G3\'), a chord by name (\'G major\', \'Am7\'), a scale (\'G pentatonic down\' plays its notes in order), drum hits (\'kick\', \'snare\', \'hihat\'), or an array (up to 4 notes sound together; 5 or more play one after another). Timing: declare const bpm, beat = 60000 / bpm and start = performance.now() at the top; beat n plays at start + n * beat, and a 4/4 measure is 4 beats. Play it once unless asked to loop or repeat. To loop: put the bars in a function that ends with start += their length, call it, then setInterval it with that same length. A beat or groove means drums. Boom-chuck: kick on beats 1 and 3, snare on 2 and 4. Walking bass: one bass note per beat, stepping through the chord\'s notes. Shuffle: hi-hats on each beat and two-thirds of the way through it.',
-  '6. Answer what you know directly. To look up facts you don\'t know, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it, not the whole text.',
-  '7. Write code instead of guessing results.',
-  '8. If you define a function, call it.',
-  '9. The examples (zorbs, blips, Zibble, Zorblax) are made up: never reuse their names, numbers or formulas.',
-].join('\n');
+/** Requests (or the program being changed) that the optional rules are for */
+const SOUND_REQUEST =
+  /\b(?:play|music|song|sing|sound|beat|groove|drum|piano|bass|guitar|organ|violin|strings|trumpet|sax|flute|chord|melod|tune|notes?\b|midi|rhythm|jam|loop|tempo|bpm|beep|tone|audio|instrument|scale|requestMIDIAccess|AudioContext)/i;
+const DRAWING_REQUEST =
+  /\b(?:draw|paint|sketch|picture|image|art|animat|game|simulat|bounc|canvas|scene|shape|circle|square|triangle|star|sky|rainbow|landscape|pattern|fractal|particle|mov(?:e|ing)|getContext)/i;
+const THREE_D_REQUEST = /(?:\b3d\b|\bthree[- ]?d\b|\bcube|\bsphere|\bwebgl|\brotat|\bspin|\borbit|\bplanet|THREE\.)/i;
+const DIAGRAM_REQUEST = /\b(?:svg|diagram|icon|chart|graph|logo|vector|flowchart|map)/i;
+const FACTS_REQUEST =
+  /\b(?:who|what|when|where|why|which|how (?:many|much|old|tall|far|big|long)|tell me|about|look up|search|find out|history|define|meaning|capital|population|weather|news|facts?|wiki|fetch)\b/i;
+
+/**
+ * The rules, as bullets (small models copy numbering into their replies). A rule with `when` is
+ * for some requests only: models with a small context (the smallest ones, on any device) get it
+ * only when the request, or the program it changes, matches. Bigger models get every rule, the
+ * same prompt each turn.
+ */
+const PROMPT_RULES: ReadonlyArray<{ text: string; when?: RegExp }> = [
+  { text: '- Reply with perfect JavaScript syntax ONLY. Concise logic, fully functional.' },
+  { text: '- Act first: do what was asked (draw, build, play, compute, look up) as a live, working browser app, then tell the user what you did with speak("...").' },
+  { text: '- ALL messages to the user go through speak(text): plain conversation is just speak(), and nothing is written outside the code (no explanations, notes or markdown). speak() accepts computed values: speak(`The total is ${total}.`). Never mention code, JavaScript or programming in what you say, and never offer code.' },
+  { text: '- What you add to document.body appears in a card in the middle of the screen. Use HTML and CSS for interfaces: buttons, forms, cards, notes, tables, gauges, dashboards and widgets. The screen is wiped with clear(): to completely update the screen, call clear() first.' },
+  { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations.', when: DRAWING_REQUEST },
+  { text: '- For 3D, use WebGL on a <canvas>.', when: THREE_D_REQUEST },
+  { text: '- <svg> works for diagrams and icons.', when: DIAGRAM_REQUEST },
+  { text: '- Sound: Web Audio (create an AudioContext and await ctx.resume() first), or Web MIDI for instruments: out = (await navigator.requestMIDIAccess()).outputs.values().next().value; then call out.send([instrument, notes, velocity, durationMs], time) once per note, chord or drum hit, at its own time. Instruments: piano, bass, organ, guitar, strings, violin, trumpet, sax, flute, drums. Notes: one note (\'G3\'), a chord by name (\'G major\', \'Am7\'), a scale (\'G pentatonic down\' plays its notes in order), drum hits (\'kick\', \'snare\', \'hihat\'), or an array (up to 4 notes sound together; 5 or more play one after another). Timing: declare const bpm, beat = 60000 / bpm and start = performance.now() at the top; beat n plays at start + n * beat, and a 4/4 measure is 4 beats. Play it once unless asked to loop or repeat. To loop: put the bars in a function that ends with start += their length, call it, then setInterval it with that same length. A beat or groove means drums. Boom-chuck: kick on beats 1 and 3, snare on 2 and 4. Walking bass: one bass note per beat, stepping through the chord\'s notes. Shuffle: hi-hats on each beat and two-thirds of the way through it.', when: SOUND_REQUEST },
+  { text: '- Answer what you know directly. To look up facts you don\'t know, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it, not the whole text.', when: FACTS_REQUEST },
+  { text: '- Write code instead of guessing results.' },
+  { text: '- If you define a function, call it.' },
+  { text: '- The examples (zorbs, blips, Zibble, Zorblax) are made up: never reuse their names, numbers or formulas.' },
+];
+
+/** The rules for a request: all of them, or (filter) only those it needs */
+export function promptRules(request = '', filter = false): string {
+  const rules = PROMPT_RULES.filter((rule) => !filter || !rule.when || rule.when.test(request));
+  return [
+    "You are Chatty, a voice assistant that acts by writing JavaScript. Your reply runs as a program in the user's browser, immediately and exactly as written.",
+    'Rules:',
+    ...rules.map((rule) => rule.text),
+  ].join('\n');
+}
+
+export const CONCISE_VOICE_SYSTEM_PROMPT = promptRules();
 
 /**
  * Example exchanges, shown in the system prompt inside <examples> tags (EXAMPLES_PROMPT). Sent as
@@ -308,7 +333,6 @@ export class ConversationOrchestrator {
 
   private llmProvider: LlmRuntimeProvider;
   private ttsProvider?: TtsRuntimeProvider;
-  private tools = new Map<string, ToolDefinition>();
   private javascriptRuntime: JavascriptRuntime;
   private audioContextAccessor?: () => Promise<AudioContext | null> | AudioContext | null;
   private events: OrchestratorEvents;
@@ -371,12 +395,6 @@ export class ConversationOrchestrator {
       new JavascriptRuntime({ mode: 'eval', llmProvider: this.llmProvider });
     this.audioContextAccessor = options.audioContextAccessor;
 
-    if (options.tools) {
-      for (const tool of options.tools) {
-        this.tools.set(tool.name, tool);
-      }
-    }
-
     // So the context meter and the budgets count the system prompt from the start
     this.syncPromptReserve();
 
@@ -436,10 +454,6 @@ export class ConversationOrchestrator {
       this.speechDisabledWaiters.add(done);
       promise.then(done, done);
     });
-  }
-
-  registerTool(tool: ToolDefinition): void {
-    this.tools.set(tool.name, tool);
   }
 
   // --------------------------------------------------------------------------
@@ -647,9 +661,9 @@ export class ConversationOrchestrator {
     this.memoryStore.addMessage(userMsg);
     this.events.onMessageCreated?.(userMsg);
 
-    // Stage 4: Choose a response mode (direct, clarification, verification, tool_execution)
-    // Phone pipeline routes with Needle instead of keyword-matched tool execution
-    // (A fix request quotes the user's words, which must not pick a tool or a clarifying question)
+    // Stage 4: Choose a response mode (direct, clarification, verification)
+    // Phone pipeline routes with Needle instead
+    // (A fix request quotes the user's words, which must not pick a clarifying question)
     const responseMode =
       this.phonePipeline || options?.autoFix
         ? 'direct'
@@ -720,19 +734,8 @@ export class ConversationOrchestrator {
 
     const enqueuePhraseForSpeech = (canonicalPhrase: string) => {
       if (!this.scheduler.isTurnValid(turnId)) return;
-      // Do not synthesize raw tool invocation blocks or markdown code syntax as speech
-      if (
-        canonicalPhrase.includes('```tool_call') ||
-        canonicalPhrase.includes('call:') ||
-        canonicalPhrase.startsWith('```') ||
-        canonicalPhrase.includes('{"name":') ||
-        canonicalPhrase.includes('<|tool_call') ||
-        canonicalPhrase.includes('<tool_call') ||
-        canonicalPhrase.includes('tool_call|>') ||
-        canonicalPhrase.includes('<start_function_call')
-      ) {
-        return;
-      }
+      // Do not synthesize markdown code syntax as speech
+      if (canonicalPhrase.startsWith('```')) return;
       const speechNormalized = normalizeTextForSpeech(canonicalPhrase);
       if (!speechNormalized) return;
 
@@ -792,7 +795,7 @@ export class ConversationOrchestrator {
     };
 
     try {
-      // Stage 5: Generate incrementally (or execute tool if tool_execution mode)
+      // Stage 5: Generate incrementally (the phone pipeline may already have answered with a ready-made tool)
       let finalCanonicalText = '';
       let generationProvider = this.llmProvider;
       // What the program being written is for (remembered for follow-up edits)
@@ -854,19 +857,6 @@ export class ConversationOrchestrator {
         }
       }
 
-      if (responseMode === 'tool_execution') {
-        const toolExecutionOutcome = await this.tryExecuteMatchingTool(normalized, turnId);
-        if (toolExecutionOutcome) {
-          assistantMsg.toolCall = toolExecutionOutcome.toolCall;
-          finalCanonicalText = toolExecutionOutcome.responseText;
-          assistantMsg.canonicalContent = finalCanonicalText;
-          this.events.onTokenStream?.(turnId, finalCanonicalText, finalCanonicalText);
-          for (const phrase of segmenter.push(finalCanonicalText)) {
-            enqueuePhraseForSpeech(phrase);
-          }
-        }
-      }
-
       if (!finalCanonicalText) {
         let rawAccumulatedTokens = '';
         let lastSpokenTextEmitted = '';
@@ -894,7 +884,6 @@ export class ConversationOrchestrator {
           temperature: 0.1,
           maxOutputTokens: generationProvider.maxOutputTokens,
           signal: generationAbort.signal,
-          tools: Array.from(this.tools.values()),
           onToken: (chunk) => {
             if (!this.scheduler.isTurnValid(turnId) || stoppedRepeating) return;
 
@@ -1009,251 +998,9 @@ export class ConversationOrchestrator {
         turnMetrics.llmTimeToFirstTokenMs = genResult.timeToFirstTokenMs;
         turnMetrics.generationThroughputTps = genResult.tokensPerSecond;
 
-        // Check if the generated output contains a tool call from Gemma or legacy tool call format
         const rawContent = rawAccumulatedTokens || assistantMsg.canonicalContent || genResult.text;
 
-        let toolName = '';
-        let toolArgs: Record<string, unknown> = {};
-        let toolCallDetected = false;
-
-        // 1. Fenced code block ```tool_call or ```json
-        const fencedMatch = rawContent.match(/```(?:tool_call|json)\s*\n([\s\S]+?)\n```/i);
-        if (fencedMatch) {
-          try {
-            const parsed = JSON.parse(fencedMatch[1]);
-            toolName = parsed.name || parsed.tool || '';
-            toolArgs = (parsed.arguments || parsed.args || {}) as Record<string, unknown>;
-            toolCallDetected = true;
-          } catch {}
-        }
-
-        // 2. Native tag or bare call syntax: <|tool_call>call:func{args}<tool_call|> or call:func{args}
-        if (!toolCallDetected) {
-          const callMatch = rawContent.match(/(?:<\|tool_call>|<tool_call>)?\s*call:(\w+)\s*(\{[\s\S]+?\})(?:<tool_call\|>|<\/\|tool_call>|<\|tool_call_end\|>|<\/tool_call>|$)?/i);
-          if (callMatch) {
-            try {
-              toolName = callMatch[1];
-              toolArgs = JSON.parse(callMatch[2]);
-              toolCallDetected = true;
-            } catch {
-              toolName = callMatch[1];
-              toolArgs = {};
-              toolCallDetected = true;
-            }
-          }
-        }
-
-        // 3. Native tag with JSON: <|tool_call>{"name": "...", "arguments": {...}}<tool_call|>
-        if (!toolCallDetected) {
-          const tagJsonMatch = rawContent.match(/(?:<\|tool_call>|<tool_call>)\s*(\{[\s\S]+?\})\s*(?:<tool_call\|>|<\/\|tool_call>|<\|tool_call_end\|>|<\/tool_call>|$)?/i);
-          if (tagJsonMatch) {
-            try {
-              const parsed = JSON.parse(tagJsonMatch[1]);
-              toolName = parsed.name || parsed.tool || '';
-              toolArgs = (parsed.arguments || parsed.args || {}) as Record<string, unknown>;
-              toolCallDetected = true;
-            } catch {}
-          }
-        }
-
-        // 4. Bare JSON tool call object: {"name": "...", "arguments": {...}}
-        if (!toolCallDetected) {
-          const jsonMatch = rawContent.match(/\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"arguments"\s*:\s*(\{[\s\S]*?\})\s*\}/i);
-          if (jsonMatch) {
-            try {
-              const parsed = JSON.parse(jsonMatch[0]);
-              toolName = parsed.name || parsed.tool || '';
-              toolArgs = (parsed.arguments || parsed.args || {}) as Record<string, unknown>;
-              toolCallDetected = true;
-            } catch {}
-          }
-        }
-
-        // 5. Function call syntax: <|tool_call>coder_agent(...)<tool_call|>
-        if (!toolCallDetected) {
-          const funcMatch = rawContent.match(/(?:<\|tool_call>|<tool_call>)\s*(\w+)\s*\(([\s\S]*?)\)(?:<tool_call\|>|<\/\|tool_call>|<\|tool_call_end\|>|<\/tool_call>|$)?/i);
-          if (funcMatch) {
-            toolName = funcMatch[1];
-            try {
-              toolArgs = JSON.parse(funcMatch[2]);
-            } catch {
-              toolArgs = { task: funcMatch[2].trim() };
-            }
-            toolCallDetected = true;
-          }
-        }
-
-        // 6. Gemma emitted tool control tags without arguments or body: e.g. <|tool_call><tool_call|> or <|tool_call>
-        if (!toolCallDetected && (rawContent.includes('<|tool_call') || rawContent.includes('<tool_call') || rawContent.includes('tool_call|>'))) {
-          // Model intended to call a tool! Infer tool from normalized user message
-          const inferred = this.inferToolFromUserRequest(normalized);
-          if (inferred) {
-            toolName = inferred.toolName;
-            toolArgs = inferred.toolArgs;
-            toolCallDetected = true;
-          }
-        }
-
-        let executedLegacyTool = false;
-        if (toolCallDetected && this.scheduler.isTurnValid(turnId)) {
-          try {
-            const targetTool =
-              this.tools.get(toolName) ||
-              (toolName === 'browser_agent' ? (this.tools.get('coder_agent') || this.tools.get('javascript_runtime')) : null) ||
-              (toolName === 'coder_agent' ? (this.tools.get('browser_agent') || this.tools.get('javascript_runtime')) : null) ||
-              (toolName === 'javascript_runtime' ? (this.tools.get('coder_agent') || this.tools.get('browser_agent')) : null);
-            if (targetTool) {
-              const effectiveToolName = targetTool.name;
-
-              // Bulletproof fallback: If tool arguments are empty or missing meaningful string values, populate from user input!
-              const hasMeaningfulArg = Object.values(toolArgs).some(
-                (v) => typeof v === 'string' && v.trim().length > 0
-              );
-              if (!hasMeaningfulArg) {
-                if (
-                  effectiveToolName === 'coder_agent' ||
-                  effectiveToolName === 'browser_agent' ||
-                  effectiveToolName === 'javascript_runtime'
-                ) {
-                  toolArgs = { task: normalized };
-                } else if (effectiveToolName === 'draw_graphics') {
-                  toolArgs = { prompt: normalized };
-                } else if (effectiveToolName === 'play_music') {
-                  toolArgs = { notes: normalized, description: normalized };
-                } else if (effectiveToolName === 'wikipedia' || effectiveToolName === 'instant_answers') {
-                  toolArgs = { query: normalized };
-                }
-              }
-
-              // Notify message updated with running tool call
-              assistantMsg.toolCall = {
-                name: effectiveToolName,
-                arguments: toolArgs,
-                status: 'running',
-              };
-              this.events.onMessageUpdated?.({ ...assistantMsg });
-
-              let toolResult: unknown;
-              try {
-                toolResult = await targetTool.execute(toolArgs);
-              } catch (execErr) {
-                if (this.scheduler.isTurnValid(turnId)) {
-                  const errMessage = execErr instanceof Error ? execErr.message : String(execErr);
-                  console.warn('[Chatty Orchestrator] Tool execution failed:', execErr);
-                  assistantMsg.toolCall = {
-                    name: effectiveToolName,
-                    arguments: toolArgs,
-                    error: errMessage,
-                    status: 'failed',
-                  };
-                  const failureText = `Sorry, the ${effectiveToolName.replace(/_/g, ' ')} tool failed.`;
-                  assistantMsg.canonicalContent = failureText;
-                  this.events.onMessageUpdated?.({ ...assistantMsg });
-                  // Failure is reported to the user; do not fall through to the JS runtime
-                  executedLegacyTool = true;
-                  for (const phrase of segmenter.push(failureText)) {
-                    enqueuePhraseForSpeech(phrase);
-                  }
-                }
-                throw new ToolFailureHandled();
-              }
-              executedLegacyTool = true;
-              if (this.scheduler.isTurnValid(turnId)) {
-                let displayResult = '';
-                let isError = false;
-                let errorMsg: string | undefined;
-
-                if (toolResult && typeof toolResult === 'object') {
-                  const r = toolResult as any;
-                  if (r.error) {
-                    isError = true;
-                    errorMsg = String(r.error);
-                    displayResult = `Error: ${r.error}`;
-                  } else if (r.played) {
-                    displayResult = `played ${r.count} notes`;
-                  } else if (
-                    r.output !== undefined &&
-                    r.output !== null &&
-                    r.output !== 'undefined' &&
-                    r.output !== 'use strict'
-                  ) {
-                    displayResult = String(r.output);
-                  } else if (r.hasVisualOutput) {
-                    displayResult = 'visual output rendered on screen';
-                  } else if (r.logs && r.logs.length > 0) {
-                    displayResult = r.logs.join('; ');
-                  } else if (r.answer !== undefined) {
-                    displayResult = String(r.answer);
-                  } else if (r.summary !== undefined) {
-                    displayResult = r.title ? `${r.title}: ${r.summary}` : String(r.summary);
-                  } else {
-                    displayResult = '';
-                  }
-                } else if (
-                  toolResult !== undefined &&
-                  toolResult !== null &&
-                  toolResult !== 'undefined' &&
-                  toolResult !== 'use strict'
-                ) {
-                  displayResult = String(toolResult);
-                } else {
-                  displayResult = '';
-                }
-
-                assistantMsg.toolCall = {
-                  name: toolName,
-                  arguments: toolArgs,
-                  result: toolResult,
-                  error: errorMsg,
-                  status: isError ? 'failed' : 'completed',
-                };
-
-                const cleanPreText = stripToolCallMarkup(rawContent);
-
-                let spokenText: string;
-                if (cleanPreText) {
-                  const lower = cleanPreText.toLowerCase();
-                  const isAction =
-                    toolName === 'play_music' ||
-                    toolName === 'draw_graphics' ||
-                    lower.includes('play') ||
-                    lower.includes('draw') ||
-                    lower.includes('note');
-                  spokenText =
-                    displayResult && !isAction
-                      ? `${cleanPreText}. The result is ${displayResult}.`
-                      : cleanPreText;
-                } else if (toolName === 'play_music') {
-                  spokenText = 'I played those notes for you.';
-                } else if (toolName === 'draw_graphics') {
-                  spokenText = 'I drew that on your screen.';
-                } else if (displayResult) {
-                  spokenText = `I ran the ${toolName.replace(/_/g, ' ')} tool. The result is ${displayResult}.`;
-                } else if (
-                  toolName === 'coder_agent' ||
-                  toolName === 'browser_agent' ||
-                  toolName === 'javascript_runtime'
-                ) {
-                  spokenText = "I've built and launched that in your browser.";
-                } else {
-                  spokenText = `I ran the ${toolName.replace(/_/g, ' ')} tool.`;
-                }
-
-                assistantMsg.canonicalContent = spokenText;
-                this.events.onMessageUpdated?.({ ...assistantMsg });
-                for (const phrase of segmenter.push(spokenText)) {
-                  enqueuePhraseForSpeech(phrase);
-                }
-              }
-            }
-          } catch (err) {
-            if (!(err instanceof ToolFailureHandled)) {
-              console.warn('[Chatty Orchestrator] Failed to execute tool call from LLM:', err);
-            }
-          }
-        }
-
-        if (!executedLegacyTool && this.scheduler.isTurnValid(turnId)) {
+        if (this.scheduler.isTurnValid(turnId)) {
           const inspected = inspectExecutableCode(rawContent);
           const executableCode = inspected.code;
           const isProse = inspected.isProse || forceProse;
@@ -1295,10 +1042,11 @@ export class ConversationOrchestrator {
             // Set once the run returns: later speak() calls come from timers/handlers the code left
             // running, and are voiced outside the (finished) turn instead of being dropped.
             let runFinished = false;
-            // A new program that draws starts on a clean screen: old drawings, animation loops and
-            // sounds go away. Programs that only talk (desktop replies are speak() code) leave the
-            // screen alone, and nothing happens when the screen is already empty.
-            if (programDraws(executableCode) && this.javascriptRuntime.hasVisualContent?.()) {
+            // A new program starts on a clean slate: old drawings, animation loops, timers and
+            // sounds go away, whether or not the new one draws ("play it slower" must not layer a
+            // second loop over the first). Programs that only talk (desktop replies are speak()
+            // code) leave a running program alone, and nothing happens when nothing is running.
+            if (!isTalkOnly(executableCode) && this.javascriptRuntime.hasRunningProgram?.()) {
               await this.javascriptRuntime.resetVisual();
               // The old program's canvases and sounds are freed before the new one allocates
               await settle(AFTER_HEAVY_MS);
@@ -1759,90 +1507,8 @@ export class ConversationOrchestrator {
   }
 
   // --------------------------------------------------------------------------
-  // Tool Intent Inference & Prompt Construction (Addendum Sections 3 & 6)
+  // Response Mode & Prompt Construction (Addendum Sections 3 & 6)
   // --------------------------------------------------------------------------
-
-  private inferToolFromUserRequest(userPrompt: string): { toolName: string; toolArgs: Record<string, unknown> } | null {
-    const lower = userPrompt.toLowerCase();
-
-    // 1. Music / sound synthesis / notes / melody / MIDI
-    if (
-      this.tools.has('play_music') &&
-      (lower.includes('music') ||
-        lower.includes('note') ||
-        lower.includes('melody') ||
-        lower.includes('song') ||
-        lower.includes('tune') ||
-        lower.includes('midi') ||
-        lower.includes('piano') ||
-        lower.includes('sound') ||
-        lower.includes('chord') ||
-        lower.includes('play '))
-    ) {
-      return {
-        toolName: 'play_music',
-        toolArgs: { notes: userPrompt, description: userPrompt },
-      };
-    }
-
-    // 2. Drawing / graphics / canvas / art
-    if (
-      this.tools.has('draw_graphics') &&
-      (lower.includes('draw') ||
-        lower.includes('canvas') ||
-        lower.includes('sketch') ||
-        lower.includes('paint') ||
-        lower.includes('graphics') ||
-        lower.includes('spiral') ||
-        lower.includes('circle') ||
-        lower.includes('visual'))
-    ) {
-      return {
-        toolName: 'draw_graphics',
-        toolArgs: { prompt: userPrompt },
-      };
-    }
-
-    // 3. Wikipedia lookup
-    if (
-      this.tools.has('wikipedia') &&
-      (lower.startsWith('who is') ||
-        lower.startsWith('what is') ||
-        lower.includes('wikipedia') ||
-        lower.includes('look up') ||
-        lower.startsWith('search '))
-    ) {
-      return {
-        toolName: 'wikipedia',
-        toolArgs: { query: userPrompt },
-      };
-    }
-
-    // 4. DuckDuckGo / Instant answers
-    if (
-      this.tools.has('instant_answers') &&
-      (lower.includes('duckduckgo') || lower.includes('weather') || lower.includes('definition'))
-    ) {
-      return {
-        toolName: 'instant_answers',
-        toolArgs: { query: userPrompt },
-      };
-    }
-
-    // 5. Universal browser agent (games, widgets, interactive apps, JavaScript runtime)
-    const browserTool =
-      this.tools.get('coder_agent') ||
-      this.tools.get('browser_agent') ||
-      this.tools.get('javascript_runtime');
-    if (browserTool) {
-      return {
-        toolName: browserTool.name,
-        toolArgs: { task: userPrompt },
-      };
-    }
-
-    return null;
-  }
 
   selectResponseMode(
     normalizedQuery: string,
@@ -1850,20 +1516,7 @@ export class ConversationOrchestrator {
   ): ResponseMode {
     const lower = normalizedQuery.toLowerCase();
 
-    // 1. Check if a registered tool explicitly matches the user intent
-    if (this.tools.size > 0) {
-      if (
-        /\b(what time|current time|calculate|compute|\d+\s*[+*\/-]\s*\d+|set a timer|device status|run javascript|eval javascript|execute javascript|run js|eval js|play a sound|play sound|sound effect|synthesize sound|web audio|beep|chime|synthesizer|midi|web midi|play a tune|play music|draw|render canvas|webgl|fetch data|weather|wikipedia)\b/i.test(
-          lower
-        ) ||
-        lower.startsWith('eval:') ||
-        lower.startsWith('javascript:')
-      ) {
-        return 'tool_execution';
-      }
-    }
-
-    // 2. Check for genuinely ambiguous short input with no prior context
+    // 1. Check for genuinely ambiguous short input with no prior context
     const words = normalizedQuery.split(/\s+/);
     const isAmbiguousPronounOnly =
       words.length <= 4 &&
@@ -1873,7 +1526,7 @@ export class ConversationOrchestrator {
       return 'clarification';
     }
 
-    // 3. Check if high-impact factual verification is warranted
+    // 2. Check if high-impact factual verification is warranted
     if (
       /\b(verify|fact check|exact year|chemical formula|medical dosage|is it true that|speed of light|capital of)\b/i.test(
         lower
@@ -1891,37 +1544,27 @@ export class ConversationOrchestrator {
    * messages are sent again exactly as before, so anything that varies with a request
    * (memories, notes) goes into that request's message instead (see buildModelPrompt).
    */
-  private staticPromptParts(): { head: string[]; tools: string[]; tail: string[] } {
+  private staticPromptParts(request?: string): { head: string[]; tail: string[] } {
+    // The smallest models (a 4,096-token context) get only the rules this request needs
+    const rules =
+      request !== undefined && this.llmProvider.contextLimit <= 4096
+        ? promptRules(request, true)
+        : CONCISE_VOICE_SYSTEM_PROMPT;
     const head = this.phonePipeline
       ? [`${this.phonePipeline.chatSystemPrompt} Current date and time: ${new Date().toLocaleString()}.`]
-      : [CONCISE_VOICE_SYSTEM_PROMPT, EXAMPLES_PROMPT];
-
-    const tools: string[] = [];
-    if (this.tools.size > 0) {
-      const toolList = Array.from(this.tools.values())
-        .map((t) => {
-          const props = (t.parameters?.properties as Record<string, { type?: string; description?: string }>) || {};
-          const propNames = Object.keys(props);
-          const argsSignature = propNames.length > 0 ? propNames.join(', ') : '';
-          return `- ${t.name}(${argsSignature}): ${t.description}`;
-        })
-        .join('\n');
-      tools.push(
-        `Available Tools:\n${toolList}\nTo use a tool, output a single tool_call block:\n<|tool_call>call:<tool_name>{"<param>": "<value>"}<tool_call|>\nNever leave "arguments" empty.`
-      );
-    }
+      : [rules, EXAMPLES_PROMPT];
 
     // The format, restated after the examples and everything else
     const tail = this.phonePipeline
       ? []
       : ['Reply with perfect JavaScript syntax ONLY. ALL messages to the user go through speak().'];
-    return { head, tools, tail };
+    return { head, tail };
   }
 
   /** Estimated tokens of what every prompt carries: the system prompt and the format turns */
   private fixedPromptTokens(): number {
-    const { head, tools, tail } = this.staticPromptParts();
-    let tokens = this.memoryStore.estimateTokens([...head, ...tools, ...tail].join('\n'));
+    const { head, tail } = this.staticPromptParts();
+    let tokens = this.memoryStore.estimateTokens([...head, ...tail].join('\n'));
     if (!this.phonePipeline) {
       // A few tokens per message for the chat template's role markers
       for (const turn of FORMAT_TURNS) tokens += this.memoryStore.estimateTokens(turn.content) + 4;
@@ -1961,7 +1604,8 @@ export class ConversationOrchestrator {
     systemPrompt: string;
     promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   } {
-    const { head, tools, tail } = this.staticPromptParts();
+    // Rules are picked by the request and, for an edit or a fix, the program it changes
+    const { head, tail } = this.staticPromptParts(`${userMessage}\n${programBeingEdited ?? ''}`);
     const systemParts: string[] = [...head];
 
     // What applies to this request only: memories picked for it, a reference it makes, how to
@@ -1988,7 +1632,6 @@ export class ConversationOrchestrator {
     if (context.conversationSummary) {
       systemParts.push(`Earlier conversation summary: ${context.conversationSummary.summaryText}`);
     }
-    systemParts.push(...tools);
 
     const promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> =
       this.phonePipeline ? [] : FORMAT_TURNS.map((t) => ({ ...t }));
@@ -2156,111 +1799,6 @@ export class ConversationOrchestrator {
       const error = err instanceof Error ? err : new Error(String(err));
       this.events.onError?.(error, 'tts_synthesis');
     }
-  }
-
-  private async tryExecuteMatchingTool(
-    query: string,
-    turnId: string
-  ): Promise<{
-    toolCall: NonNullable<ConversationMessage['toolCall']>;
-    responseText: string;
-  } | null> {
-    const mathMatch = query.match(/(\d+(?:\.\d+)?)\s*([+*\/-])\s*(\d+(?:\.\d+)?)/);
-    const calcTool = this.tools.get('calculator');
-    if (mathMatch && calcTool) {
-      const a = Number(mathMatch[1]);
-      const op = mathMatch[2];
-      const b = Number(mathMatch[3]);
-      const args = { a, operator: op, b };
-      const result = await calcTool.execute(args);
-      if (!this.scheduler.isTurnValid(turnId)) return null;
-      return {
-        toolCall: { name: 'calculator', arguments: args, result, status: 'completed' },
-        responseText: `The result of ${a} ${op} ${b} is ${String(result)}.`,
-      };
-    }
-
-    const timeTool = this.tools.get('get_local_time');
-    if (/\b(what time|current time)\b/i.test(query) && timeTool) {
-      const result = await timeTool.execute({});
-      if (!this.scheduler.isTurnValid(turnId)) return null;
-      return {
-        toolCall: { name: 'get_local_time', arguments: {}, result, status: 'completed' },
-        responseText: `The current local time is ${String(result)}.`,
-      };
-    }
-
-    const codeTool = this.tools.get('coder_agent') || this.tools.get('javascript_runtime');
-    const jsMatch =
-      query.match(/^(?:run|eval|evaluate|execute)\s+(?:javascript|js):\s*([\s\S]+)$/i) ||
-      query.match(/^eval:\s*([\s\S]+)$/i) ||
-      query.match(/^```(?:javascript|js)\n([\s\S]+?)```$/i);
-    if (jsMatch && codeTool) {
-      const code = jsMatch[1].trim();
-      const res = (await codeTool.execute({ code })) as any;
-      if (!this.scheduler.isTurnValid(turnId)) return null;
-      const outputText = res.error
-        ? `JavaScript Error: ${res.error}`
-        : `JavaScript Output: ${typeof res.output === 'object' ? JSON.stringify(res.output) : String(res.output)}`;
-      return {
-        toolCall: {
-          name: codeTool.name,
-          arguments: { code },
-          result: res,
-          error: res.error,
-          status: res.error ? 'failed' : 'completed',
-        },
-        responseText: outputText,
-      };
-    }
-
-    const wikiTool = this.tools.get('wikipedia');
-    const wikiMatch =
-      query.match(/^(?:wiki|wikipedia):\s*(.+)$/i) ||
-      query.match(/^(?:search\s+wikipedia\s+for|lookup\s+on\s+wikipedia|summarize\s+wikipedia\s+for)\s+(.+)$/i);
-    if (wikiMatch && wikiTool) {
-      const q = wikiMatch[1].trim();
-      const res = (await wikiTool.execute({ query: q })) as any;
-      if (!this.scheduler.isTurnValid(turnId)) return null;
-      const responseText = res.error
-        ? `Wikipedia Error: ${res.error}`
-        : `${res.title ? `${res.title}: ` : ''}${res.summary}`;
-      return {
-        toolCall: {
-          name: 'wikipedia',
-          arguments: { query: q },
-          result: res,
-          error: res.error,
-          status: res.error ? 'failed' : 'completed',
-        },
-        responseText,
-      };
-    }
-
-    const instantTool = this.tools.get('instant_answers');
-    const instantMatch =
-      query.match(/^(?:instant\s*answer|ddg):\s*(.+)$/i) ||
-      query.match(/^(?:quick\s+fact|instant\s+fact\s+for)\s+(.+)$/i);
-    if (instantMatch && instantTool) {
-      const q = instantMatch[1].trim();
-      const res = (await instantTool.execute({ query: q })) as any;
-      if (!this.scheduler.isTurnValid(turnId)) return null;
-      const responseText = res.error
-        ? `Instant Answer Error: ${res.error}`
-        : `${res.heading ? `${res.heading}: ` : ''}${res.answer}`;
-      return {
-        toolCall: {
-          name: 'instant_answers',
-          arguments: { query: q },
-          result: res,
-          error: res.error,
-          status: res.error ? 'failed' : 'completed',
-        },
-        responseText,
-      };
-    }
-
-    return null;
   }
 
   // --------------------------------------------------------------------------

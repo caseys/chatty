@@ -46,11 +46,7 @@ export type AppLifecycleState =
   | 'backgrounded'
   | 'recovering';
 
-export type ResponseMode =
-  | 'direct'
-  | 'clarification'
-  | 'verification'
-  | 'tool_execution';
+export type ResponseMode = 'direct' | 'clarification' | 'verification';
 
 export type DeviceProfile =
   | 'constrained_mobile'
@@ -239,7 +235,6 @@ export interface LlmGenerationOptions {
   topP?: number;
   stopSequences?: string[];
   signal?: AbortSignal;
-  tools?: ToolDefinition[];
   onToken?: (chunk: string, sequence: number) => void;
 }
 

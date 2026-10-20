@@ -790,53 +790,6 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
       expect(errorCallbackCalled).toBe(true);
     });
 
-    it('integrates as a tool in ConversationOrchestrator and routes execution directly', async () => {
-      const { JavascriptRuntime, createJavascriptRuntimeTool } = await import(
-        '../src/tools/javascript-runtime.ts'
-      );
-      const runtime = new JavascriptRuntime({ mode: 'eval' });
-      const tool = createJavascriptRuntimeTool(runtime);
-
-      const stateCoordinator = new StateMachineCoordinator();
-      const orchestrator = new ConversationOrchestrator({
-        stateCoordinator,
-        llmProvider: new TestStubLlmProvider(),
-        enableSpeechOutput: false,
-        tools: [tool],
-      });
-
-      const msg = await orchestrator.submitUserInput('run javascript: Math.pow(2, 8)');
-      expect(msg).not.toBeNull();
-      expect(msg?.toolCall?.name).toBe('javascript_runtime');
-      expect(msg?.canonicalContent).toContain('256');
-    });
-
-    it('executes tool call block emitted by Gemma', async () => {
-      const { JavascriptRuntime, createJavascriptRuntimeTool } = await import(
-        '../src/tools/javascript-runtime.ts'
-      );
-      const runtime = new JavascriptRuntime({ mode: 'eval' });
-      const tool = createJavascriptRuntimeTool(runtime);
-
-      const stateCoordinator = new StateMachineCoordinator();
-      const stubLlm = new TestStubLlmProvider({
-        responseOverride:
-          '```tool_call\n{"name": "javascript_runtime", "arguments": {"code": "3 * 7"}}\n```',
-      });
-
-      const orchestrator = new ConversationOrchestrator({
-        stateCoordinator,
-        llmProvider: stubLlm,
-        enableSpeechOutput: false,
-        tools: [tool],
-      });
-
-      const msg = await orchestrator.submitUserInput('Calculate 3 times 7 using JavaScript');
-      expect(msg).not.toBeNull();
-      expect(msg?.toolCall?.name).toBe('javascript_runtime');
-      expect(msg?.canonicalContent).toContain('21');
-    });
-
     it('executes asynchronous code with top-level await in JavascriptRuntime', async () => {
       const { JavascriptRuntime } = await import('../src/tools/javascript-runtime.ts');
       const runtime = new JavascriptRuntime({ mode: 'eval' });
@@ -960,7 +913,6 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
     it('spins up a single-use coding agent from a task query, chooses runtime mode, and returns result', async () => {
       const {
         JavascriptRuntime,
-        createJavascriptRuntimeTool,
         detectRecommendedMode,
         parseCodingAgentOutput,
       } = await import('../src/tools/javascript-runtime.ts');
@@ -987,25 +939,6 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
       expect(res.mode).toBe('iframe');
       expect(res.output).toBe('Synthesized audio chime');
       expect(res.task).toBe('play a three-tone chime');
-
-      // Test integration as tool with orchestrator
-      const tool = createJavascriptRuntimeTool(runtime);
-      const stateCoordinator = new StateMachineCoordinator();
-      const orchestrator = new ConversationOrchestrator({
-        stateCoordinator,
-        llmProvider: new TestStubLlmProvider({
-          responseOverride:
-            '```tool_call\n{"name": "javascript_runtime", "arguments": {"task": "play a chime"}}\n```',
-        }),
-        enableSpeechOutput: false,
-        tools: [tool],
-      });
-
-      const msg = await orchestrator.submitUserInput('Play a nice chime');
-      expect(msg).not.toBeNull();
-      expect(msg?.toolCall?.name).toBe('javascript_runtime');
-      expect(msg?.toolCall?.arguments.task).toBe('play a chime');
-      expect(msg?.canonicalContent).toContain('Synthesized audio chime');
     });
 
     it('supports Coder Agent (coder_agent) as tool name and card representation', async () => {
@@ -1022,27 +955,14 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
       expect(coderTool.description).toContain('audio');
       expect(coderTool.description).toContain('visuals');
 
-      const stateCoordinator = new StateMachineCoordinator();
-      const orchestrator = new ConversationOrchestrator({
-        stateCoordinator,
-        llmProvider: new TestStubLlmProvider({
-          responseOverride:
-            '```tool_call\n{"name": "coder_agent", "arguments": {"task": "draw a 2d circle"}}\n```',
-        }),
-        enableSpeechOutput: false,
-        tools: [coderTool],
-      });
-
-      const msg = await orchestrator.submitUserInput('Draw a circle for me');
-      expect(msg).not.toBeNull();
-      expect(msg?.toolCall?.name).toBe('coder_agent');
-      expect(msg?.toolCall?.status).toBe('completed');
-
       // Test card representation for coder_agent
       let cardClicked = false;
-      const el = createToolSummaryElement(msg!.toolCall!, () => {
-        cardClicked = true;
-      });
+      const el = createToolSummaryElement(
+        { name: 'coder_agent', arguments: { task: 'draw a 2d circle' }, status: 'completed' },
+        () => {
+          cardClicked = true;
+        }
+      );
       expect(el.classList.contains('chat-tool-summary-card')).toBe(true);
       expect(el.classList.contains('clickable')).toBe(true);
       expect(el.title).toContain('Coder Agent Overlay');
@@ -1269,22 +1189,6 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
       expect(card.textContent).toContain('play_music');
       expect(card.textContent).toContain('🎵');
       expect(card.textContent).toContain('Played 6 notes');
-
-      // 5. Test orchestrator direct execution with play_music
-      const stateCoordinator = new StateMachineCoordinator();
-      const orchestrator = new ConversationOrchestrator({
-        stateCoordinator,
-        llmProvider: new TestStubLlmProvider({
-          responseOverride:
-            '```tool_call\n{"name": "play_music", "arguments": {"notes": "C, G, G, F, C, G"}}\n```',
-        }),
-        enableSpeechOutput: false,
-        tools: [musicTool],
-      });
-
-      const msg = await orchestrator.submitUserInput('Play notes C, G, G, F, C, G');
-      expect(msg?.toolCall?.name).toBe('play_music');
-      expect(msg?.canonicalContent).toContain('I played those notes for you.');
     });
 
     it('draws graphics and canvas animations via draw_graphics tool without mentioning code', async () => {
@@ -1316,7 +1220,6 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
       const orchestrator = new ConversationOrchestrator({
         stateCoordinator,
         llmProvider: mockLlm,
-        tools: [drawTool],
       });
 
       const built = (orchestrator as any).buildModelPrompt(
@@ -1331,14 +1234,9 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
       expect(built.systemPrompt).toContain('never offer code');
     });
 
-    it('implements universal browser tasks via agent for games, widgets, and browser capabilities', async () => {
-      const {
-        JavascriptRuntime,
-        createCoderAgentTool,
-        detectRecommendedMode,
-      } = await import('../src/tools/javascript-runtime.ts');
+    it('runs interactive widgets and canvas games in iframe mode', async () => {
+      const { detectRecommendedMode } = await import('../src/tools/javascript-runtime.ts');
 
-      // 1. Verify interactive DOM widget code triggers iframe mode
       const stopwatchCode = `
         const root = document.getElementById("root");
         const btn = document.createElement("button");
@@ -1354,103 +1252,9 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         requestAnimationFrame(() => {});
       `;
       expect(detectRecommendedMode(canvasGameCode)).toBe('iframe');
+    });
 
-      // 2. Test universal browser execution via coder_agent / browser_agent
-      const mockLlm = new TestStubLlmProvider();
-      const runtime = new JavascriptRuntime({ mode: 'eval', llmProvider: mockLlm });
-      const tool = createCoderAgentTool(runtime);
-
-      const stateCoordinator = new StateMachineCoordinator();
-      const orchestrator = new ConversationOrchestrator({
-        stateCoordinator,
-        llmProvider: new TestStubLlmProvider({
-          responseOverride:
-            '```tool_call\n{"name": "browser_agent", "arguments": {"task": "create a playable pong game"}}\n```',
-        }),
-        enableSpeechOutput: false,
-        tools: [tool],
-      });
-
-      const msg = await orchestrator.submitUserInput('Make a pong game for me');
-      expect(msg?.toolCall).not.toBeNull();
-      expect(msg?.toolCall?.status).toBe('completed');
-
-      // 3. Verify empty arguments fallback automatically injects userMessage query
-      const emptyArgsOrchestrator = new ConversationOrchestrator({
-        stateCoordinator,
-        llmProvider: new TestStubLlmProvider({
-          responseOverride:
-            '```tool_call\n{"name": "coder_agent", "arguments": {}}\n```',
-        }),
-        enableSpeechOutput: false,
-        tools: [tool],
-      });
-      const emptyMsg = await emptyArgsOrchestrator.submitUserInput('Build a stopwatch');
-      expect(emptyMsg?.toolCall).not.toBeNull();
-      expect(emptyMsg?.toolCall?.arguments.task).toBe('Build a stopwatch');
-      expect(emptyMsg?.toolCall?.status).toBe('completed');
-
-      // 4. Verify raw JSON tool call without markdown code fences
-      const rawJsonOrchestrator = new ConversationOrchestrator({
-        stateCoordinator,
-        llmProvider: new TestStubLlmProvider({
-          responseOverride:
-            '{"name": "coder_agent", "arguments": {"task": "calculate pi"}}',
-        }),
-        enableSpeechOutput: false,
-        tools: [tool],
-      });
-      const rawJsonMsg = await rawJsonOrchestrator.submitUserInput('What is pi?');
-      expect(rawJsonMsg?.toolCall).not.toBeNull();
-      expect(rawJsonMsg?.toolCall?.name).toBe('coder_agent');
-      expect(rawJsonMsg?.toolCall?.status).toBe('completed');
-
-      // 5. Verify universal browser capability instructions and tool signatures in prompt
-      const promptData = (orchestrator as any).buildModelPrompt(
-        '',
-        { workingMessages: [], relevantMemories: [] },
-        'standard'
-      );
-      expect(promptData.systemPrompt).toContain('acts by writing JavaScript');
-      expect(promptData.systemPrompt).toContain('coder_agent(task)');
-      expect(promptData.systemPrompt).toContain('Never leave "arguments" empty');
-
-      // 6. Verify native Gemma 4 <|tool_call>call:...<tool_call|> tags execute and do not leak markup
-      const nativeTagOrchestrator = new ConversationOrchestrator({
-        stateCoordinator,
-        llmProvider: new TestStubLlmProvider({
-          responseOverride:
-            '<|tool_call>call:coder_agent{"task": "play midi notes"}<tool_call|>',
-        }),
-        enableSpeechOutput: false,
-        tools: [tool],
-      });
-      const nativeMsg = await nativeTagOrchestrator.submitUserInput('Play some midi chords');
-      expect(nativeMsg?.toolCall).not.toBeNull();
-      expect(nativeMsg?.toolCall?.name).toBe('coder_agent');
-      expect(nativeMsg?.toolCall?.arguments.task).toBe('play midi notes');
-      expect(nativeMsg?.canonicalContent).not.toContain('<|tool_call');
-      expect(nativeMsg?.canonicalContent).not.toContain('tool_call|>');
-      expect(nativeMsg?.canonicalContent).toContain('I ran the coder agent tool. The result is 84.');
-
-      // 7. Verify empty control tags <|tool_call><tool_call|> trigger intent inference and execute tool without leakage
-      const emptyTagOrchestrator = new ConversationOrchestrator({
-        stateCoordinator,
-        llmProvider: new TestStubLlmProvider({
-          responseOverride: '<|tool_call><tool_call|>',
-        }),
-        enableSpeechOutput: false,
-        tools: [tool],
-      });
-      const emptyTagMsg = await emptyTagOrchestrator.submitUserInput('Create a snake game');
-      expect(emptyTagMsg?.toolCall).not.toBeNull();
-      expect(emptyTagMsg?.toolCall?.name).toBe('coder_agent');
-      expect(emptyTagMsg?.toolCall?.arguments.task).toBe('Create a snake game');
-      expect(emptyTagMsg?.canonicalContent).not.toContain('<|tool_call');
-      expect(emptyTagMsg?.canonicalContent).not.toContain('tool_call|>');
-      expect(emptyTagMsg?.canonicalContent).toContain('The result is 84.');
-
-      // 8. Verify stripToolCallMarkup strips all tool control tags, blocks, and call syntax
+    it('strips tool control tags, blocks and call syntax from text', async () => {
       const { stripToolCallMarkup } = await import('../src/core/speech-normalizer.ts');
       expect(stripToolCallMarkup('<|tool_call><tool_call|>')).toBe('');
       expect(stripToolCallMarkup('<|tool_call>call:coder_agent{"task": "foo"}<tool_call|>')).toBe('');
