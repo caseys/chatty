@@ -149,6 +149,23 @@ function htmlToCode(html: string): string {
   ].join('\n');
 }
 
+/**
+ * A whole HTML page with its <script> written into `x.innerHTML = \`` and the string never closed
+ * (the program can't parse): its markup goes on screen and its scripts run, as with an HTML reply.
+ * Null when that isn't what broke the program.
+ */
+function unclosedPage(code: string): string | null {
+  for (const match of code.matchAll(/^([^\n]*\.innerHTML\s*\+?=\s*)`/gm)) {
+    const at = match.index ?? 0;
+    const rest = code.slice(at + match[0].length);
+    if (!/<script\b/i.test(rest)) continue;
+    const repaired = `${code.slice(0, at)}${htmlToCode(rest.replace(/`;?\s*$/, ''))}`;
+    // (await in a plain function is fixed before it runs: see makeAwaitingFunctionsAsync)
+    if (parsesAsJs(repaired) || parsesAsJs(repaired.replace(/\bawait\s+/g, ''))) return repaired;
+  }
+  return null;
+}
+
 const CODE_LINE =
   /^\s*(?:const |let |var |(?:async\s+)?function\b|class |await |speak\(|playNotes\(|root\.|document\.|window\.|canvas\.|ctx\.|for\s*\(|\/\/)/;
 
@@ -563,6 +580,11 @@ export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
 
   if (isValidJs) {
     return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(cleaned)), isProse: false };
+  }
+
+  const page = unclosedPage(cleaned);
+  if (page) {
+    return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(page)), isProse: false };
   }
 
   // 4b. Explanation wrapped around unfenced code: run the code part. After fences were taken

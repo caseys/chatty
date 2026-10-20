@@ -54,6 +54,15 @@ describe('running code the model wrapped or forgot to call', () => {
     expect(code).toBe('speak("Here is a loop.");\n' + body);
   });
 
+  it('runs a page written into innerHTML whose template string was never closed', () => {
+    const reply = '```javascript\nclear();\ndocument.body.innerHTML = `\n<div>\n  <button id="go">Go</button>\n</div>\n<script>\n  const go = document.getElementById("go");\n  go.addEventListener("click", () => speak("Hi"));\n  function init() { const a = await navigator.requestMIDIAccess(); }\n</script>\n```\nspeak("Here is a button.");';
+    const code = inspectExecutableCode(reply).code;
+    expect(code).toContain('clear();\ndocument.body.insertAdjacentHTML("beforeend", "<div>');
+    expect(code).toContain('const go = document.getElementById("go");');
+    expect(code).toContain('speak("Here is a button.");');
+    expect(code).not.toContain('<script>');
+  });
+
   it('keeps plain text inside a template string as code', () => {
     const reply = 'root.innerHTML = `<h2>Notes</h2>\n\nWelcome to your notes app\n\n<p>Add one below</p>`;';
     expect(inspectExecutableCode(reply).code).toBe(reply);
