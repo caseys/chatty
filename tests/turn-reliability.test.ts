@@ -626,3 +626,25 @@ describe('missing methods', () => {
     expect(llm.turns[1].messages.at(-1)!.content).toMatch(/box is a HTMLElement, which has no vanish\(\)\. Its closest methods: /);
   });
 });
+
+describe('a reply that only talks', () => {
+  it('is written again once, cooler, when the request asks for something to be made', async () => {
+    const llm = new QueueLlm(['speak("Starting the loop now.");', 'const x = 1;\nspeak("Here it is.");']);
+    const { executed, runtime } = fakeRuntime([]);
+    const orchestrator = orchestratorFor(llm, { javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Play a music loop');
+    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+    expect(llm.turns.length).toBe(2);
+    expect(llm.turns[1].retry).toBe(1);
+    expect(llm.turns[1].messages.at(-1)!.content).toBe('Play a music loop\n(Write the JavaScript program that does this, then one speak() sentence about it.)');
+    expect(executed).toEqual(['const x = 1;\nspeak("Here it is.");']);
+  });
+
+  it('is left alone for plain conversation', async () => {
+    const llm = new QueueLlm(['speak("Doing well, thanks!");']);
+    const orchestrator = orchestratorFor(llm, { javascriptRuntime: fakeRuntime([]).runtime });
+    await orchestrator.submitUserInput('How are you?');
+    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+    expect(llm.turns.length).toBe(1);
+  });
+});

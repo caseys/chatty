@@ -239,6 +239,12 @@ function codeView(text: string): string {
   return [...text.matchAll(/```[\w-]*[^\n]*\n([\s\S]*?)(?:```|$)/g)].map((m) => m[1]).join('\n');
 }
 
+/** Requests to make or do something: a reply that only talks hasn't done it */
+const ACTION_REQUEST =
+  /\b(?:play|draw|make|build|create|show|animate|code|program|design|generate|paint|sketch|render|display|chart|plot|graph|count ?down|timer|stopwatch|calculator|converter|simulate|game|app)\b/i;
+/** Goes with the retry only (not into history) */
+const TALK_RETRY_NOTE = '\n(Write the JavaScript program that does this, then one speak() sentence about it.)';
+
 /** Markup in a streaming reply */
 const STREAM_MARKUP = /<(?:script|canvas|html|!doctype)\b/i;
 
@@ -813,7 +819,7 @@ export class ConversationOrchestrator {
         let stoppedRepeating = false;
         let repeatCheckedAt = 0;
 
-        const generateReply = (messages: typeof promptMessages) => withActivity('generating a reply', () => generationProvider.generate({
+        const generateReply = (messages: typeof promptMessages, retry = 0) => withActivity('generating a reply', () => generationProvider.generate({
           turnId,
           systemPrompt,
           messages,
@@ -821,6 +827,7 @@ export class ConversationOrchestrator {
           maxOutputTokens: generationProvider.maxOutputTokens,
           // A fix wants the one most likely line, not a varied one
           ...(options?.autoFix ? { exact: true } : {}),
+          ...(retry > 0 ? { retry } : {}),
           signal: generationAbort.signal,
           onToken: (chunk) => {
             if (!this.scheduler.isTurnValid(turnId) || stoppedRepeating) return;
@@ -917,7 +924,31 @@ export class ConversationOrchestrator {
             ].join('\n')
           );
         }
-        const genResult = await generateReply(promptMessages);
+        let genResult = await generateReply(promptMessages);
+        // A request to make something that got only talk back ("Starting the loop now.") is
+        // written again once, cooler: the same prompt alone would give the same reply
+        const firstReply = rawAccumulatedTokens || genResult.text;
+        if (
+          !options?.autoFix &&
+          !this.phonePipeline &&
+          this.scheduler.isTurnValid(turnId) &&
+          !signal.aborted &&
+          !genResult.aborted &&
+          ACTION_REQUEST.test(normalized) &&
+          isTalkOnly(inspectExecutableCode(firstReply).code)
+        ) {
+          appendRunLog('retry', 'the reply only talked, but the request asks for something to be made: writing it again, cooler');
+          appendRunLog('discarded', firstReply);
+          rawAccumulatedTokens = '';
+          lastSpokenTextEmitted = '';
+          processedSpeakMatches = 0;
+          streamMode = forceProse ? 'prose' : 'unknown';
+          stoppedRepeating = false;
+          repeatCheckedAt = 0;
+          generationAbort = new AbortController();
+          const last = promptMessages[promptMessages.length - 1];
+          genResult = await generateReply([...promptMessages.slice(0, -1), { ...last, content: `${last.content}${TALK_RETRY_NOTE}` }], 1);
+        }
 
         if (generationProvider !== this.llmProvider) this.events.onStatusChange?.(null);
 

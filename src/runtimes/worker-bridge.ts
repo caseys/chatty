@@ -340,6 +340,9 @@ export class WorkerLlmProvider implements LlmRuntimeProvider {
           systemPrompt: options.systemPrompt,
           messages: options.messages,
           maxOutputTokens: options.maxOutputTokens,
+          // A fix turn's near-greedy sampling and a retry's cooler one (they were lost here before)
+          exact: options.exact,
+          retry: options.retry,
         },
         timestamp: performance.now(),
       };

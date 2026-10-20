@@ -68,6 +68,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequestMessage<any>>) => {
             systemPrompt: payload.systemPrompt,
             messages: payload.messages,
             maxOutputTokens: payload.maxOutputTokens,
+            exact: payload.exact,
+            retry: payload.retry,
             signal: controller.signal,
             onToken: (token, tokenSeq) => {
               reply('token', { token, tokenSeq });
