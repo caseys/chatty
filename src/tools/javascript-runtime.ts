@@ -1301,6 +1301,16 @@ export class JavascriptRuntime {
       if (programWork.delete('f' + id)) workChanged();
     };
 
+    // The MIDI output a program gets as \`out\` when it uses one without asking for it; MIDI
+    // starts only when it first plays a note
+    let defaultMidi = null;
+    const defaultMidiOut = {
+      send(data, time) {
+        defaultMidi ??= navigator.requestMIDIAccess().then((access) => access.outputs.values().next().value);
+        defaultMidi.then((output) => output && output.send(data, time)).catch(() => {});
+      },
+    };
+
     // Programs often wait for the page to load (DOMContentLoaded, load, window.onload), but it
     // already has, so that setup would never run: it runs right away instead
     const LOAD_EVENTS = new Set(['DOMContentLoaded', 'load']);
@@ -1462,6 +1472,12 @@ export class JavascriptRuntime {
       if (data.type !== 'execute') return;
       const { id, code } = data;
       currentExecId = id;
+      // The names the music rule tells programs to declare (bpm, beat, start, out): a program
+      // that forgets one gets a default instead of an error. Its own declarations win.
+      window.bpm = 100;
+      window.beat = 60000 / 100;
+      window.start = performance.now() + 100;
+      window.out = defaultMidiOut;
       const logs = [];
       const origLog = console.log;
       const origWarn = console.warn;

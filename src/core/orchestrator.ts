@@ -1032,6 +1032,8 @@ export class ConversationOrchestrator {
           if (lostProgram || unchangedProgram) {
             const failed = this.lastRun;
             const why = lostProgram ? 'The fix lost the program' : "The fix didn't change the program";
+            // The code panel shows what the model sent instead, to see why it didn't apply
+            this.events.onRawOutput?.(turnId, `// ${why}. The model replied:\n${rawContent}`);
             this.events.onRunStatus?.(turnId, {
               kind: 'error',
               text: `${why}, so it was not run. ${failed?.error ? errorText(failed.error, failed.errorLine) : 'The program failed.'}`,
