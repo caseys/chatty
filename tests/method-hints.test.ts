@@ -24,7 +24,7 @@ describe('missing methods', () => {
   it('works out what an object is from the code that made it', () => {
     const code = "const canvas = document.createElement('canvas');\nconst ctx = canvas.getContext('2d');";
     expect(objectType(code, 'ctx')).toBe('CanvasRenderingContext2D');
-    expect(objectType(code, 'canvas')).toBe('HTMLCanvasElement');
+    expect(objectType(code, 'canvas')).toBe('element:canvas');
     expect(objectType(code, 'document.body')).toBe('HTMLElement');
     expect(objectType('const box = document.getElementById("b");', 'box')).toBe('HTMLElement');
     expect(objectType('', 'mystery')).toBeNull();

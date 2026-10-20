@@ -11,11 +11,12 @@
  * calls are checked.
  */
 import { parse } from 'acorn';
-import { closestMethods, nearMiss, objectType } from './method-hints.ts';
+import { closestMethods, namesSources, nearMiss, objectType, typeLabel } from './method-hints.ts';
 
 const PROPERTY_CHECKED = new Set([
   'CanvasRenderingContext2D',
   'WebGLRenderingContext',
+  'WebGL2RenderingContext',
   'AudioContext',
   'OscillatorNode',
   'GainNode',
@@ -42,7 +43,6 @@ export interface UnknownMember {
 /** Every member name (property or method, own or inherited) of a browser type or known object */
 export function memberNames(type: string, scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>): string[] {
   const names = new Set<string>();
-  let target: unknown;
   if (type === 'CSSStyleDeclaration') {
     // Style properties live on instances in some browsers: ask a real one
     try {
@@ -53,10 +53,12 @@ export function memberNames(type: string, scope: Record<string, unknown> = globa
       // No document here
     }
   }
-  target = type.startsWith('@') ? scope[type.slice(1)] : (scope[type] as { prototype?: unknown } | undefined)?.prototype;
-  while (target && target !== Object.prototype) {
-    for (const key of Object.getOwnPropertyNames(target)) if (key !== 'constructor') names.add(key);
-    target = Object.getPrototypeOf(target);
+  for (const source of namesSources(type, scope)) {
+    let target: unknown = source;
+    while (target && target !== Object.prototype) {
+      for (const key of Object.getOwnPropertyNames(target)) if (key !== 'constructor') names.add(key);
+      target = Object.getPrototypeOf(target);
+    }
   }
   // Only names that can follow a dot ('background-color' can't)
   return [...names].filter((name) => /^[A-Za-z_$][\w$]*$/.test(name));
@@ -118,24 +120,27 @@ export function unknownMembers(code: string, scope?: Record<string, unknown>): U
     if (!types.has(use.object)) types.set(use.object, objectType(code, use.object));
     const type = types.get(use.object);
     if (!type) continue;
-    const checked = PROPERTY_CHECKED.has(type) || (use.isCall && /^HTML/.test(type));
+    const key = `${use.object}.${use.member}`;
+    if (seen.has(key)) continue;
+    const checked = PROPERTY_CHECKED.has(type) || (use.isCall && /^HTML|^SVG|^element:/.test(type));
     if (!checked) continue;
     if (!namesOf.has(type)) namesOf.set(type, memberNames(type, scope));
     const names = namesOf.get(type)!;
     if (names.length === 0 || names.includes(use.member)) continue;
-    // A property the program both sets and reads is its own (an expando), not a slip
-    const key = `${use.object}.${use.member}`;
-    const sameUses = uses.filter((u) => u.object === use.object && u.member === use.member);
-    if (!use.isCall && sameUses.some((u) => u.isWrite) && sameUses.some((u) => !u.isWrite)) continue;
-    if (seen.has(key)) continue;
     seen.add(key);
+    const slip = nearMiss(use.member, names);
+    // A member the program sets and then uses itself is its own (Math.clamp = …; Math.clamp(x)),
+    // unless it is a sure slip of a real one (style.backgroundColour). One only ever set
+    // (ctx.fillColor = 'red') does nothing, and is reported.
+    const same = uses.filter((u) => u.object === use.object && u.member === use.member);
+    if (!slip && same.some((u) => u.isWrite) && same.some((u) => !u.isWrite)) continue;
     found.push({
       line: (use.node.loc as { start: { line: number } }).start.line,
       object: use.object,
       member: use.member,
       type,
       isCall: use.isCall,
-      slip: nearMiss(use.member, names),
+      slip,
       closest: closestMethods(use.member, names),
     });
   }
@@ -154,7 +159,7 @@ export function renameMembers(code: string, renames: Array<{ object: string; fro
 
 /** The error a program gets for a member its object doesn't have */
 export function unknownMemberError(issue: UnknownMember): string {
-  const kind = issue.type.startsWith('@') ? issue.object : `a ${issue.type}`;
+  const kind = typeLabel(issue.type, issue.object);
   const what = issue.isCall ? 'method' : 'property';
   return `${issue.object}.${issue.member} is not a ${what} of ${kind}. Its closest: ${issue.closest.join(', ')}.`;
 }

@@ -39,3 +39,45 @@ describe('members an object does not have', () => {
     expect(unknownMembers(canvasCode('ctx.myAngle = 1;\nctx.arc(0, 0, 5, 0, ctx.myAngle);'), scope)).toEqual([]);
   });
 });
+
+describe('no false alarms', () => {
+  class FakeWebGL2 {
+    createVertexArray() {}
+    bindVertexArray() {}
+  }
+  const wider = { ...scope, WebGL2RenderingContext: FakeWebGL2, HTMLElement, HTMLCanvasElement, HTMLInputElement, HTMLVideoElement } as unknown as Record<string, unknown>;
+
+  it('(A) knows an element found by id may be any element: canvas.getContext, video.play', () => {
+    const code = "const canvas = document.getElementById('c');\nconst g = canvas.getContext('2d');\nconst v = document.querySelector('video');\nv.play();\nv.vanishNow();";
+    expect(unknownMembers(code, wider).map((i) => i.member)).toEqual(['vanishNow']);
+  });
+
+  it('(A) asks a real element made by tag', () => {
+    const code = "const input = document.createElement('input');\ninput.select();\ninput.focus();";
+    expect(unknownMembers(code, wider)).toEqual([]);
+  });
+
+  it('(B) types a name from its declaration, not from what it is called', () => {
+    const code = "const style = document.createElement('style');\nstyle.textContent = 'p { color: red }';\nconst body = JSON.parse('[]');\nbody.forEach((x) => x);";
+    expect(unknownMembers(code, wider)).toEqual([]);
+  });
+
+  it('(C) leaves a name alone when it is also a parameter', () => {
+    const code = "const ctx = c.getContext('2d');\nfunction tone(ctx) {\n  ctx.createOscillator();\n}";
+    expect(unknownMembers(code, wider)).toEqual([]);
+  });
+
+  it('(D) leaves a helper the program adds and uses itself', () => {
+    expect(unknownMembers('Math.clamp = (v, a, b) => Math.min(b, Math.max(a, v));\nMath.clamp(5, 0, 1);', wider)).toEqual([]);
+  });
+
+  it('(D) still reports a slip even when it is set and read back', () => {
+    const code = "const b = document.getElementById('b');\nb.style.backgroundColour = 'red';\nspeak(b.style.backgroundColour);";
+    expect(unknownMembers(code, wider)[0]).toMatchObject({ member: 'backgroundColour', slip: 'backgroundColor' });
+  });
+
+  it('(E) types webgl2 as WebGL2', () => {
+    const code = "const gl = c.getContext('webgl2');\ngl.createVertexArray();\ngl.bindVertexArray(null);";
+    expect(unknownMembers(code, wider)).toEqual([]);
+  });
+});

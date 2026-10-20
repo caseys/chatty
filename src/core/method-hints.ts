@@ -16,15 +16,13 @@ export function missingMethod(error: string): { object: string; method: string }
 /** What a value made by this code is: a browser type name, or a known object */
 const MADE_BY: ReadonlyArray<[RegExp, string]> = [
   [/getContext\(\s*['"]2d['"]/, 'CanvasRenderingContext2D'],
-  [/getContext\(\s*['"](?:webgl2|experimental-webgl|webgl)['"]/, 'WebGLRenderingContext'],
+  [/getContext\(\s*['"]webgl2['"]/, 'WebGL2RenderingContext'],
+  [/getContext\(\s*['"](?:experimental-webgl|webgl)['"]/, 'WebGLRenderingContext'],
   [/new\s+(?:window\.)?(?:webkit)?AudioContext\b|AudioContext\s*\|\|/, 'AudioContext'],
   [/\.createOscillator\(/, 'OscillatorNode'],
   [/\.createGain\(/, 'GainNode'],
   [/\.createBiquadFilter\(/, 'BiquadFilterNode'],
-  [/createElement\(\s*['"]canvas['"]/, 'HTMLCanvasElement'],
-  [/(?:getElementById|querySelector|createElement|closest)\(|\.(?:parentElement|firstElementChild|lastElementChild)\b/, 'HTMLElement'],
-  [/\.classList\s*;?\s*$/, 'DOMTokenList'],
-  [/\.style\s*;?\s*$/, 'CSSStyleDeclaration'],
+  [/(?:getElementById|querySelector|closest)\(|\.(?:parentElement|firstElementChild|lastElementChild)\b/, 'HTMLElement'],
   [/^\s*\[/, 'Array'],
   [/^\s*['"`]/, 'String'],
   [/^\s*new\s+Map\b/, 'Map'],
@@ -52,33 +50,91 @@ const OWN_METHODS: Record<string, string[]> = {
 };
 
 /** The type (or named object) the object expression refers to in this program, or null */
+/** A name the program declares exactly once, and never as a parameter or loop variable */
+function declaredOnce(code: string, name: string): boolean {
+  const n = name.replace(/\$/g, '\\$');
+  const declarations = code.match(new RegExp(`\\b(?:const|let|var)\\s+${n}\\b`, 'g'))?.length ?? 0;
+  const asParameter =
+    [...code.matchAll(/function\b[^(]*\(([^)]*)\)|\(([^()]*)\)\s*=>/g)].some((m) => new RegExp(`(^|[^\\w$])${n}([^\\w$]|$)`).test(m[1] ?? m[2] ?? '')) ||
+    new RegExp(`(^|[^\\w$.])${n}\\s*=>`).test(code);
+  return declarations === 1 && !asParameter;
+}
+
+/** The type of what an expression makes: `canvas.getContext('2d')`, `createElement('canvas')` */
+function typeMadeBy(expression: string): string | null {
+  const tag = expression.match(/createElement\(\s*['"]([\w-]+)['"]/)?.[1];
+  if (tag) return `element:${tag.toLowerCase()}`;
+  for (const [made, type] of MADE_BY) if (made.test(expression)) return type;
+  return null;
+}
+
+/**
+ * The type (or named object) an object path refers to in this program, or null when unsure:
+ * a name is typed only from its own single declaration, and a member path (`canvas.style`,
+ * `document.body`) only when what it hangs off is itself a known element or document
+ */
 export function objectType(code: string, object: string): string | null {
   if (NAMED[object]) return NAMED[object];
-  for (const [made, type] of MADE_BY) if (made.test(object)) return type;
-  const last = object.split('.').pop() ?? object;
-  if (last === 'classList') return 'DOMTokenList';
+  const segments = object.split('.');
+  if (segments.length === 1) {
+    const name = segments[0];
+    if (!declaredOnce(code, name)) return null;
+    const init = code.match(new RegExp(`\\b(?:const|let|var)\\s+${name.replace(/\$/g, '\\$')}\\s*=(?!=)\\s*([^;\\n]+)`))?.[1];
+    return init ? typeMadeBy(init) : null;
+  }
+  const last = segments[segments.length - 1];
+  const headType = objectType(code, segments.slice(0, -1).join('.'));
+  const elementish = !!headType && (/^HTML|^SVG|^element:/.test(headType) || headType === 'Document');
+  if (!elementish) return null;
   if (last === 'style') return 'CSSStyleDeclaration';
-  if (last === 'body' || last === 'parentElement') return 'HTMLElement';
-  // What the program assigned to it: `const ctx = canvas.getContext('2d')`
-  const name = object.replace(/^this\./, '').replace(/[.$]/g, (c) => `\\${c}`);
-  const assignment = code.match(new RegExp(`(?:^|[^\\w$.])${name}\\s*=(?!=)\\s*([^;\\n]+)`, 'm'));
-  if (!assignment) return null;
-  for (const [made, type] of MADE_BY) if (made.test(assignment[1])) return type;
+  if (last === 'classList') return 'DOMTokenList';
+  if (/^(body|parentElement|firstElementChild|lastElementChild|documentElement)$/.test(last)) return 'HTMLElement';
   return null;
+}
+
+/** How a type reads in a message: 'a CanvasRenderingContext2D', 'a <canvas> element' */
+export function typeLabel(type: string, object: string): string {
+  if (type.startsWith('@')) return object;
+  if (type.startsWith('element:')) return `a <${type.slice(8)}> element`;
+  return `a ${type}`;
+}
+
+/**
+ * What to read names from for a type: an element made by tag is asked directly (a real one);
+ * an element of unknown tag gets the names of every element type (a name only needs to exist on
+ * some element); a named object is itself; anything else is its prototype
+ */
+export function namesSources(type: string, scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>): unknown[] {
+  if (type.startsWith('@')) return [scope[type.slice(1)]];
+  if (type.startsWith('element:')) {
+    try {
+      return [(scope.document as Document | undefined)?.createElement(type.slice(8))];
+    } catch {
+      return [];
+    }
+  }
+  if (type === 'HTMLElement') {
+    return Object.getOwnPropertyNames(scope)
+      .filter((key) => /^(?:HTML|SVG)\w*Element$/.test(key))
+      .map((key) => (scope[key] as { prototype?: unknown } | undefined)?.prototype);
+  }
+  return [(scope[type] as { prototype?: unknown } | undefined)?.prototype];
 }
 
 /** Every method name of a browser type or known object (own and inherited) */
 export function methodNames(type: string, scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>): string[] {
   if (OWN_METHODS[type]) return OWN_METHODS[type];
-  let target: unknown = type.startsWith('@') ? scope[type.slice(1)] : (scope[type] as { prototype?: unknown } | undefined)?.prototype;
   const names = new Set<string>();
-  while (target && target !== Object.prototype) {
-    for (const key of Object.getOwnPropertyNames(target)) {
-      if (key === 'constructor' || key.startsWith('_')) continue;
-      const descriptor = Object.getOwnPropertyDescriptor(target, key);
-      if (descriptor && typeof descriptor.value === 'function') names.add(key);
+  for (const source of namesSources(type, scope)) {
+    let target: unknown = source;
+    while (target && target !== Object.prototype) {
+      for (const key of Object.getOwnPropertyNames(target)) {
+        if (key === 'constructor' || key.startsWith('_')) continue;
+        const descriptor = Object.getOwnPropertyDescriptor(target, key);
+        if (descriptor && typeof descriptor.value === 'function') names.add(key);
+      }
+      target = Object.getPrototypeOf(target);
     }
-    target = Object.getPrototypeOf(target);
   }
   return [...names];
 }
@@ -136,7 +192,7 @@ export function methodHint(code: string, error: string, scope?: Record<string, u
   if (!type) return null;
   const names = methodNames(type, scope);
   if (names.length === 0) return null;
-  const typeName = type.startsWith('@') ? missing.object : `a ${type}`;
+  const typeName = typeLabel(type, missing.object);
   const fix = nearMiss(missing.method, names);
   const closest = closestMethods(missing.method, names);
   return {
