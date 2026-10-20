@@ -706,13 +706,14 @@ export class MinimalVoiceApp {
     this.chatLogEl?.appendChild(this.createSystemNote(`Earlier in this chat: ${summaryText}`));
   }
 
-  /** Empties the chat log and the raw output panel. */
+  /** Empties the chat log, the raw output panel and its run status. */
   private clearChatLog(): void {
     if (this.chatLogEl) this.chatLogEl.innerHTML = '';
     this.bubbles.clear();
     this.turnBubbles.clear();
     this.interimUserBubble = null;
     this.setRawOutput('');
+    this.setRunStatus(null);
     this.showChatExamples(true);
   }
 

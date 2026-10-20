@@ -2104,6 +2104,11 @@ body {
     gap: 8px;
   }
 
+  /* Until the model has written code, the output panel is half as tall and the chat gets the rest */
+  .chat-workspace:has(#raw-output:empty) {
+    grid-template-rows: minmax(0, 3fr) minmax(0, 1fr);
+  }
+
   /* The text input sits at the very bottom of the screen (main.ts moves it there) */
   .minimal-stage > .chat-input {
     width: 100%;
@@ -2114,7 +2119,7 @@ body {
      input follows them up. With a flex-grow under 1 the panels take only that share of the
      free space, and the rest goes below the input. */
   .chat-workspace {
-    transition: flex-grow 0.25s ease;
+    transition: flex-grow 0.25s ease, grid-template-rows 0.25s ease;
   }
 
   .minimal-stage:has(.chat-input-field:focus) {
@@ -2288,6 +2293,20 @@ body {
 
   .chat-bubble {
     font-size: 13.5px;
+  }
+}
+
+/* Very narrow phones: New and Clear show just their icons so the top row fits */
+@media (max-width: 359px) {
+  .minimal-corner-btn.btn-new-chat,
+  .minimal-corner-btn.btn-clear-screen {
+    width: 38px;
+    padding: 0;
+  }
+
+  .minimal-corner-btn.btn-new-chat > span:not(.btn-emoji),
+  .minimal-corner-btn.btn-clear-screen > span:not(.btn-emoji) {
+    display: none;
   }
 }
 
