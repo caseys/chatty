@@ -325,6 +325,42 @@ function missingAwait(code: string, error: string): ErrorHint | null {
   return { correction: { code: code.replace(assignment, '$1await $2'), note: `${subject} was a promise → await` } };
 }
 
+/**
+ * When the failing line is inside a function: the calls of that function that pass fewer values
+ * than it needs, where a missing value turns up as NaN, undefined or a wrong type inside it
+ * (`playNote(kick, start, 'kick')` for playNote(frequency, duration, startTime, type))
+ */
+function shortCalls(code: string, errorLine?: number): string | null {
+  if (!errorLine) return null;
+  const ast = tryParse(code);
+  if (!ast) return null;
+  let inside: AnyNode | null = null;
+  walk(ast, (node) => {
+    const loc = node.loc as { start: { line: number }; end: { line: number } } | undefined;
+    if (node.type === 'FunctionDeclaration' && node.id && loc && loc.start.line <= errorLine && loc.end.line >= errorLine) {
+      if (!inside || lineOf(node) > lineOf(inside)) inside = node;
+    }
+  });
+  if (!inside) return null;
+  const fn = inside as AnyNode;
+  const name = (fn.id as AnyNode).name as string;
+  const params = fn.params as AnyNode[];
+  const needed = params.filter((p) => p.type === 'Identifier').length;
+  const signature = `${name}(${params.map((p) => code.slice(p.start, p.end).split('=')[0].trim()).join(', ')})`;
+  const calls: AnyNode[] = [];
+  walk(ast, (node) => {
+    const callee = node.callee as AnyNode | undefined;
+    if (node.type === 'CallExpression' && callee?.type === 'Identifier' && callee.name === name) calls.push(node);
+  });
+  // Short: fewer values than it needs, or than its other calls pass (a value left out in between
+  // shifts the rest: playNote(kick, start, 'kick') puts 'kick' where the start time goes)
+  const most = Math.max(needed, ...calls.map((call) => (call.arguments as AnyNode[]).length));
+  const short = calls.filter((call) => (call.arguments as AnyNode[]).length < most);
+  if (short.length === 0 || short.length === calls.length) return null;
+  const listed = short.slice(0, 4).map((call) => `line ${lineOf(call)}: ${code.slice(call.start, call.end)}`);
+  return `${signature} is called with ${most} values elsewhere, but with fewer here: ${listed.join('; ')}.`;
+}
+
 /** Help for a failed program: a correction, or facts for the fix request */
 export function errorHint(code: string, error: string, errorLine?: number, page?: PageFacts): ErrorHint | null {
   // Corrections by rule first: they need no model
@@ -341,5 +377,10 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
         }
       : { text: method.text };
   }
-  return notDefined(code, error, errorLine) ?? nothingThere(code, error, errorLine, page) ?? leftOpen(code, error) ?? tooEarly(code, error, errorLine);
+  const found = notDefined(code, error, errorLine) ?? nothingThere(code, error, errorLine, page) ?? leftOpen(code, error) ?? tooEarly(code, error, errorLine);
+  if (found?.correction) return found;
+  // Calls of the failing function that pass too few values, added to whatever else was found
+  const calls = shortCalls(code, errorLine);
+  const text = [found?.text, calls].filter(Boolean).join(' ');
+  return text ? { text } : null;
 }

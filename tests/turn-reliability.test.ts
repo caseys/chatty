@@ -603,14 +603,14 @@ describe('the fix log', () => {
 });
 
 describe('missing methods', () => {
-  it('corrects a slipped method name and runs the program again, without the model', async () => {
+  it('corrects a slipped method name before the program runs, without the model', async () => {
     const program = 'document.body.innerHTML = "<p></p>";\nconst box = document.getElementById("b");\nbox.querySelectorall("p");\nspeak("Done.");';
     const llm = new QueueLlm([program]);
-    const { executed, runtime } = fakeRuntime([{ error: 'box.querySelectorall is not a function', errorLine: 3 }]);
+    const { executed, runtime } = fakeRuntime([]);
     const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
     await orchestrator.submitUserInput('Make a box');
-    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 5000 });
-    expect(executed[1]).toContain('box.querySelectorAll("p");');
+    await vi.waitFor(() => expect(executed.length).toBe(1), { timeout: 5000 });
+    expect(executed[0]).toContain('box.querySelectorAll("p");');
     // No fix turn: the model was asked once, for the program
     expect(llm.turns.length).toBe(1);
   });

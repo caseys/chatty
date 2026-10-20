@@ -96,3 +96,18 @@ describe('a program that makes its own copy of a helper', () => {
     expect(hint.correction!.code).toBe("out.send({ notes: 'C4' });");
   });
 });
+
+describe('calls that pass too few values', () => {
+  it('points at the call, not the line inside the function', () => {
+    const code = [
+      'function playNote(frequency, duration, startTime, type = "note") {',
+      '  osc.frequency.setValueAtTime(frequency, startTime);',
+      '}',
+      "playNote(440, 500, 0, 'piano');",
+      "playNote(100, start, 'kick');",
+    ].join('\n');
+    expect(errorHint(code, 'The provided value is non-finite', 2)!.text).toBe(
+      "playNote(frequency, duration, startTime, type) is called with 4 values elsewhere, but with fewer here: line 5: playNote(100, start, 'kick')."
+    );
+  });
+});
