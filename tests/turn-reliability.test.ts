@@ -188,15 +188,12 @@ describe('a fix that loses the program', () => {
 
     // The fix asked for the program again, led by the original request
     const fixAsk = llm.turns[1].messages.at(-1)!.content;
-    expect(fixAsk.startsWith('Your program failed at line 3: boom is not defined\nLine 3: ')).toBe(true);
+    expect(fixAsk.startsWith('This program was written for: draw a red circle\nIt failed at the marked line: boom is not defined\n')).toBe(true);
+    expect(fixAsk).toContain('// >>> ERROR: boom is not defined');
     // A fix turn has its own short prompt and only the fix request
     expect(llm.turns[1].systemPrompt).toBe(FIX_SYSTEM_PROMPT);
-    // The request, the failed program as the model's reply, then the fix request
-    expect(llm.turns[1].messages).toEqual([
-      { role: 'user', content: 'draw a red circle' },
-      { role: 'assistant', content: DRAWING },
-      { role: 'user', content: fixAsk },
-    ]);
+    // One message, the user's, with the program in it
+    expect(llm.turns[1].messages).toEqual([{ role: 'user', content: fixAsk }]);
 
     // Only the original program ran; the fix's text was neither spoken nor shown
     expect(executed).toEqual([DRAWING]);
@@ -469,14 +466,35 @@ describe('context shared between the conversation and a fix turn', () => {
     await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
 
     const fixAsk = llm.turns[2].messages.at(-1)!.content;
-    expect(llm.turns[2].messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
-    expect(llm.turns[2].messages[0].content).toBe('make it faster');
-    expect(fixAsk.startsWith('Your program failed at line 6: t is not defined\nLine 6: setTimeout(() => send(t), 100);')).toBe(true);
+    expect(llm.turns[2].messages.map((m) => m.role)).toEqual(['user']);
+    expect(fixAsk.startsWith('This program was written for: make it faster\nIt failed at the marked line: t is not defined\n')).toBe(true);
+    expect(fixAsk).toContain('// >>> ERROR: t is not defined\nsetTimeout(() => send(t), 100);\n// <<< ERROR');
     const fixed = FASTER.replace('send(t)', 'send(1)');
     expect(executed[2]).toBe(fixed);
     // The conversation now holds the working program as the reply to "make it faster"
     const messages = orchestrator.memoryStore.getMessages();
     const fasterTurn = messages.find((m) => m.role === 'user' && m.canonicalContent === 'make it faster')!.turnId;
     expect(messages.find((m) => m.id === `msg_assistant_${fasterTurn}`)?.rawCode).toBe(fixed);
+  });
+});
+
+describe('a fix that says the same thing again', () => {
+  it('adds no second bubble with the same words', async () => {
+    const FIXED = DRAWING.replace('"red"', '"crimson"');
+    const llm = new QueueLlm([DRAWING, FIXED]);
+    const { executed, runtime } = fakeRuntime([
+      { error: 'boom is not defined', errorLine: 3, spokenTexts: ['Drawing a red circle.'] },
+      { spokenTexts: ['Drawing a red circle.'] },
+    ]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('draw a red circle');
+    await vi.waitFor(() => expect(llm.turns).toHaveLength(2), { timeout: 3000 });
+    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+    const said = orchestrator.memoryStore
+      .getMessages()
+      .filter((m) => m.role === 'assistant' && m.canonicalContent === 'Drawing a red circle.');
+    expect(said).toHaveLength(1);
+    // The fix did run
+    expect(executed).toEqual([DRAWING, FIXED]);
   });
 });

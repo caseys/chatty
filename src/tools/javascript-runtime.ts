@@ -292,6 +292,54 @@ export async function makeAwaitingFunctionsAsync(code: string): Promise<string> 
 }
 
 /**
+ * Small models declare with const and then change the value ("Assignment to constant variable",
+ * like a bouncing ball's x += dx): such a const becomes let, which never breaks working code.
+ * Names are matched across the whole program, which is fine at this size. Same line count.
+ */
+export async function letReassignedConsts(code: string): Promise<string> {
+  if (!/\bconst\b/.test(code)) return code;
+  const { parse } = await import('acorn');
+  let ast: unknown;
+  try {
+    ast = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true });
+  } catch {
+    return code;
+  }
+  type Node = { type?: string; start?: number; [key: string]: unknown };
+  const consts: Array<{ start: number; names: string[] }> = [];
+  const changed = new Set<string>();
+  const targets = (node: Node | undefined): string[] => {
+    if (!node) return [];
+    if (node.type === 'Identifier') return [node.name as string];
+    if (node.type === 'ArrayPattern') return (node.elements as Node[]).flatMap((n) => targets(n ?? undefined));
+    if (node.type === 'ObjectPattern') return (node.properties as Node[]).flatMap((p) => targets((p.value ?? p.argument) as Node));
+    return [];
+  };
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) return node.forEach(walk);
+    const n = node as Node;
+    if (n.type === 'VariableDeclaration' && n.kind === 'const') {
+      consts.push({ start: n.start ?? 0, names: (n.declarations as Node[]).flatMap((d) => targets(d.id as Node)) });
+    } else if (n.type === 'AssignmentExpression') {
+      targets(n.left as Node).forEach((name) => changed.add(name));
+    } else if (n.type === 'UpdateExpression') {
+      targets(n.argument as Node).forEach((name) => changed.add(name));
+    }
+    for (const key of Object.keys(n)) if (key !== 'type') walk(n[key]);
+  };
+  walk(ast);
+  let src = code;
+  // Last first, so earlier positions stay right ("const" and "let  " are the same length)
+  for (const { start, names } of consts.reverse()) {
+    if (names.some((name) => changed.has(name)) && src.startsWith('const', start)) {
+      src = `${src.slice(0, start)}let  ${src.slice(start + 5)}`;
+    }
+  }
+  return src;
+}
+
+/**
  * Inline handlers in a program's HTML (onclick="calc()") look names up globally, but programs run
  * as function bodies, where their functions stay local: those functions are made global too.
  */
@@ -845,7 +893,7 @@ export class JavascriptRuntime {
     execOptions?: ExecutionContextOptions,
     modeOverride?: JavascriptExecutionMode
   ): Promise<JavascriptExecutionResult> {
-    const trimmedCode = (await makeAwaitingFunctionsAsync(code)).trim();
+    const trimmedCode = (await letReassignedConsts(await makeAwaitingFunctionsAsync(code))).trim();
     const options = execOptions ?? this.defaultOptions;
     const runMode = modeOverride ?? this.mode;
     let result: JavascriptExecutionResult;
@@ -1381,6 +1429,8 @@ export class JavascriptRuntime {
         defaultMidi ??= navigator.requestMIDIAccess().then((access) => access.outputs.values().next().value);
         defaultMidi.then((output) => output && output.send(data, time)).catch(() => {});
       },
+      play(data, time) { this.send(data, time); },
+      playNote(data, time) { this.send(data, time); },
     };
 
     // Programs often wait for the page to load (DOMContentLoaded, load, window.onload), but it

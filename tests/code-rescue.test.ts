@@ -229,3 +229,12 @@ describe('await inside a function that is not async', () => {
     expect(await makeAwaitingFunctionsAsync(broken)).toBe(broken);
   });
 });
+
+describe('const that a program changes', () => {
+  it('becomes let, keeping columns and lines; other consts stay', async () => {
+    const { letReassignedConsts } = await import('../src/tools/javascript-runtime.ts');
+    const code = 'const x = 50, y = 50;\nconst dx = 3;\nfunction f() { x += dx; y++; }\nconst [a, b] = [1, 2];\na = 3;';
+    expect(await letReassignedConsts(code)).toBe('let   x = 50, y = 50;\nconst dx = 3;\nfunction f() { x += dx; y++; }\nlet   [a, b] = [1, 2];\na = 3;');
+    expect(await letReassignedConsts('const a = 1;\nspeak(a);')).toBe('const a = 1;\nspeak(a);');
+  });
+});

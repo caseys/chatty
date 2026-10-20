@@ -688,14 +688,9 @@ export class ConversationOrchestrator {
     const fixedTurnId = options?.autoFix ? this.lastRun?.turnId : undefined;
     if (options?.autoFix) {
       systemPrompt = FIX_SYSTEM_PROMPT;
-      // The failed program is the model's last reply, after the request it answered; the fix
-      // request itself is just the error and its line
-      const task = this.lastRun?.task;
-      promptMessages = [
-        ...(task ? [{ role: 'user' as const, content: task }] : []),
-        { role: 'assistant', content: options.autoFix },
-        { role: 'user', content: normalized },
-      ];
+      // One message, the user's: the failed program is handed over to fix, not shown as the
+      // model's own reply (which it copied back)
+      promptMessages = [{ role: 'user', content: normalized }];
     }
     // Notes added to the request go out with it again in every later prompt (see buildModelPrompt)
     const sentRequest = promptMessages[promptMessages.length - 1]?.content;
@@ -1076,8 +1071,14 @@ export class ConversationOrchestrator {
               // The old program's canvases and sounds are freed before the new one allocates
               await settle(AFTER_HEAVY_MS);
             }
+            // What the failed program already said: a fix doesn't say it again
+            const fixSaid = fixedTurnId
+              ? (this.memoryStore.getMessages().find((m) => m.id === `msg_assistant_${fixedTurnId}`)?.canonicalContent ?? '')
+              : '';
+            const saidBefore = (phrase: string) => !!fixSaid && !!phrase.trim() && fixSaid.includes(phrase.trim());
             const execResult = await this.javascriptRuntime.execute(executableCode, undefined, {
               onSpeak: (phrase) => {
+                if (saidBefore(phrase)) return;
                 if (runFinished) {
                   void this.speakOutOfTurn(phrase);
                 } else if (this.scheduler.isTurnValid(turnId)) {
@@ -1132,18 +1133,21 @@ export class ConversationOrchestrator {
             if (this.scheduler.isTurnValid(turnId)) {
               let spokenText = '';
               let spokenTextsHandled = false;
-              if (execResult.spokenTexts && execResult.spokenTexts.length > 0) {
-                spokenText = execResult.spokenTexts.join(' ');
+              const spokenTexts = (execResult.spokenTexts ?? []).filter((t) => !saidBefore(t));
+              if (spokenTexts.length > 0) {
+                spokenText = spokenTexts.join(' ');
                 spokenTextsHandled = true;
                 // Only speak phrases that were not already streamed / delivered via onSpeak
                 const remaining = new Map(spokenSpeakCounts);
-                for (const t of execResult.spokenTexts) {
+                for (const t of spokenTexts) {
                   if (consume(remaining, speakKey(t))) continue;
                   spokenPhrasesSeen.add(t);
                   for (const phrase of segmenter.push(t + ' ')) {
                     enqueuePhraseForSpeech(phrase);
                   }
                 }
+              } else if (options?.autoFix && !execResult.error && (execResult.spokenTexts?.length ?? 0) > 0) {
+                // A working fix that only repeats what was already said adds no bubble
               } else if (
                 execResult.output !== undefined &&
                 execResult.output !== null &&
@@ -1337,7 +1341,7 @@ export class ConversationOrchestrator {
       kind: 'error',
       text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
-    const request = fixRequest(run.code, run.errorLine, run.error);
+    const request = fixRequest(run.task, run.code, run.errorLine, run.error);
     // A short pause before the model runs again, unless the user moves on meanwhile
     void settle(AFTER_HEAVY_MS).then(() => {
       if (this.scheduler.getActiveTurnId()) return;

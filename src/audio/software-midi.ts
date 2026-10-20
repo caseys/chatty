@@ -125,6 +125,15 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
    *   another every stepMs (default: the duration)
    * - durationMs stops each note by itself (under 20 it's taken as seconds)
    */
+  /** Names small models invent for send() ("piano.play([...])"): the same thing */
+  play(data: unknown, timestamp = 0): void {
+    this.send(data, timestamp);
+  }
+
+  playNote(data: unknown, timestamp = 0): void {
+    this.send(data, timestamp);
+  }
+
   send(data: unknown, timestamp = 0): void {
     // Forgiving, like the rest of the sandbox: a bad time plays now, bad bytes are fixed or skipped
     if (!Number.isFinite(timestamp)) timestamp = 0;

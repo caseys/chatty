@@ -142,3 +142,17 @@ describe('arguments out of place', () => {
     vi.useRealTimers();
   });
 });
+
+describe('invented method names', () => {
+  it('plays with play() and playNote() as with send()', () => {
+    const sent: number[][] = [];
+    const output = new SoftwareMIDIOutput({
+      synth: { send: (message: number[]) => sent.push(message), setAudioContext() {}, setTsMode() {}, reset() {} },
+      now: () => 0,
+      resumeFromCurrentCall() {},
+    });
+    output.play(['piano', 'C4']);
+    output.playNote(['piano', 'E4']);
+    expect(sent.filter((m) => (m[0] & 0xf0) === 0x90).map((m) => m[1])).toEqual([60, 64]);
+  });
+});
