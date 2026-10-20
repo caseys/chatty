@@ -244,3 +244,22 @@ describe('a missing name that an element on the page is named after', () => {
     expect(text).not.toContain('#result');
   });
 });
+
+describe("a program that declares one of Chatty's helpers", () => {
+  // The whole program wrapped in its own speak(), left unclosed (it doesn't parse)
+  const code = "const speak = () => {\n  const bpm = 120;\n  out.send({ notes: 'G major' });\nspeak('Playing.');";
+  it("says the helper is ready-made, in each browser's words, even when the program doesn't parse", () => {
+    for (const error of [
+      "Cannot declare a const variable twice: 'speak'.",
+      "Identifier 'speak' has already been declared",
+      'redeclaration of const speak',
+    ]) {
+      const text = errorHint(code, error, 1)?.text ?? '';
+      expect(text, error).toContain('speak is ready-made in Chatty: speak(text) says text to the user.');
+    }
+  });
+
+  it('says nothing for a name of the program’s own', () => {
+    expect(errorHint('const total = 1;\nconst total = 2;', "Identifier 'total' has already been declared", 2)?.text ?? '').not.toContain('ready-made');
+  });
+});

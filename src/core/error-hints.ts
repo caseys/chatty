@@ -628,10 +628,36 @@ function standInElement(code: string, error: string, errorLine: number | undefin
   return null;
 }
 
+/** What each ready-made helper is, for a program that declares its own of the same name */
+const HELPER_ROLES: Record<string, string> = {
+  speak: 'speak(text) says text to the user',
+  clear: 'clear() empties the card',
+  out: 'out.send({ notes, … }) plays notes',
+  root: 'root is the card element',
+};
+
+/**
+ * A program that declares a name Chatty already provides (`const speak = () => { …the whole
+ * program… }`): the browser says it is declared twice, which doesn't tell the model why. Works on
+ * programs that don't parse too, since the declaration is found by its shape.
+ */
+function helperDeclared(code: string, error: string): ErrorHint | null {
+  const named = error.match(/(?:already been declared|declare a const variable twice|redeclaration of|Cannot redeclare|duplicate)[^'"]*['"]?([A-Za-z_$][\w$]*)/i)?.[1]
+    ?? error.match(/['"]([A-Za-z_$][\w$]*)['"] has already been declared/)?.[1];
+  const declared = HELPERS.filter((h) => new RegExp(`\\b(?:const|let|var|function|class)\\s+${h}\\b`).test(code));
+  const helper = named && HELPERS.includes(named) ? named : declared.length === 1 && /declared|declare|redeclar/i.test(error) ? declared[0] : null;
+  if (!helper) return null;
+  return {
+    text: `${helper} is ready-made in Chatty: ${HELPER_ROLES[helper]}. Use it as it is, and give the program's own functions and variables other names (for example main).`,
+  };
+}
+
 export function errorHint(code: string, error: string, errorLine?: number, page?: PageFacts): ErrorHint | null {
   // Corrections by rule first: they need no model
   const rule = redeclaredHelper(code, error) ?? missingAwait(code, error, errorLine) ?? syntaxSlip(code, error, errorLine);
   if (rule) return rule;
+  const helper = helperDeclared(code, error);
+  if (helper) return helper;
   const method = methodHint(code, error);
   // A sure slip of a real member (getcontext) is corrected; otherwise a stand-in explains the error
   const standIn = method?.correction ? null : standInElement(code, error, errorLine, page);

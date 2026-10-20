@@ -10,6 +10,7 @@ import { MODEL_REGISTRY } from './core/model-manager.ts';
 import { FluidAudioVisualizer } from './audio/visualizer.ts';
 import { clearModelCache, getModelCacheBytes } from './core/model-cache.ts';
 import { isAppleMobile, SUPPORTED_CHAT_MODELS } from './core/settings.ts';
+import { AFTER_LOAD_MS, settle } from './core/settle.ts';
 import { decodeProgramHash, encodeProgramHash } from './share-link.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
 import type { RunStatus } from './core/orchestrator.ts';
@@ -129,6 +130,7 @@ export class MinimalVoiceApp {
   /** What the combined bottom button does now: Stop has priority, Clear is the last resort */
   /** The main button runs this chat's newest program again (voice off, nothing running) */
   private mainButtonReplays = false;
+  private modelsReadyAnnounced = false;
   private clearScreenBtn = document.getElementById('btn-clear-screen') as HTMLButtonElement | null;
 
   private jsIframeContainer = document.getElementById('js-runtime-iframe-container');
@@ -1087,6 +1089,12 @@ export class MinimalVoiceApp {
     // on) > Clear (something on screen, nothing else to do) > hidden
     const speechOn = this.engine.isSpeechEnabled();
     const stopping = isActive || programActive;
+    // The first time loading is done, the page hears of it (the service worker waits for it on iPhone)
+    if (!isModelLoading && !this.modelsReadyAnnounced && this.engine.getSnapshot().models.llm === 'ready') {
+      this.modelsReadyAnnounced = true;
+      (window as unknown as { __chattyModelsReady?: boolean }).__chattyModelsReady = true;
+      window.dispatchEvent(new Event('chatty:models-ready'));
+    }
     this.mainButtonReplays = !isModelLoading && !stopping && !speechOn && this.engine.canReplay();
     if (this.micBtn) {
       this.micBtn.disabled = isModelLoading;
@@ -1555,7 +1563,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
           });
       };
 
-      if (document.readyState === 'complete') {
+      if (isAppleMobile()) {
+        // iPhone Safari: the worker's first install downloads and stores the app's chunks; that
+        // waits until the models have loaded and settled, so the two don't run at the same time
+        const afterModels = () => void settle(AFTER_LOAD_MS).then(registerSw);
+        if ((window as unknown as { __chattyModelsReady?: boolean }).__chattyModelsReady) afterModels();
+        else window.addEventListener('chatty:models-ready', afterModels, { once: true });
+      } else if (document.readyState === 'complete') {
         registerSw();
       } else {
         window.addEventListener('load', registerSw);

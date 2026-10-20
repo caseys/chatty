@@ -42,7 +42,7 @@ import { blankChoices, blankRequest, choiceRequest, fillBlank, findBlank, type B
 import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest } from './line-fix.ts';
 import { dropHelperCopies, dropUnusedPackages, errorHint, fixCaseSlips } from './error-hints.ts';
 import { applyAssignmentFixes, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
-import { AFTER_HEAVY_MS, settle } from './settle.ts';
+import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { LOCAL_CHAT_MODELS } from './settings.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 
@@ -253,30 +253,59 @@ const ACTION_REQUEST =
 const TALK_RETRY_NOTE = '\n(Write the JavaScript program that does this, then one speak() sentence about it.)';
 
 /** How many times the model may try to fix one request's program */
-const MAX_FIX_ATTEMPTS = 5;
+/**
+ * The most replies the model gets to fix one request: each is a try, whether it asks a new
+ * question (the line, the whole function, the blank) or the same one again sampled differently
+ */
+const MAX_FIX_TRIES = 5;
+/** Each try asks a new question (and samples differently, see fixSampling): never the same twice */
+const TRIES_PER_QUESTION = 1;
+/**
+ * The questions a fix can ask, in the order each try takes the next one that fits: the blank
+ * (fill in the failing expression), the marked line, the whole function, the whole program, and
+ * the line once more, told the replies that didn't work. A large model starts with the line.
+ */
+type FixKind = 'blank' | 'line' | 'function' | 'program' | 'different';
+const FIX_ORDER_SMALL: ReadonlyArray<FixKind> = ['blank', 'line', 'function', 'program', 'different'];
+const FIX_ORDER_LARGE: ReadonlyArray<FixKind> = ['line', 'function', 'blank', 'program', 'different'];
+/** The progress note a try adds to the chat */
+const fixNote = (n: number, text: string) => `Fixing (${n} of ${MAX_FIX_TRIES}): ${text}`;
 
 /**
- * How each fix attempt samples: the first takes the most likely fix; each later one samples
- * warmer and wider, so a model that gives one prompt the same reply every time gives another
+ * How each fix attempt samples. Neighbouring attempts sit far apart (cool and greedy, then wide,
+ * then cool and narrow, then hot, then in between), so a model that gives one prompt the same
+ * reply every time gives a really different one next: small steps barely changed the reply.
  */
+export const SAMPLING_SWINGS: ReadonlyArray<{ temperature: number; topP: number }> = [
+  { temperature: 0.2, topP: 0.9 },
+  { temperature: 1, topP: 0.99 },
+  { temperature: 0.5, topP: 0.6 },
+  { temperature: 1.3, topP: 0.95 },
+  { temperature: 0.8, topP: 0.75 },
+];
+
+/** Attempt 1 takes the runtime's near-greedy decoding (exact); each later one its swing */
 export function fixSampling(attempt: number): { temperature: number; topP: number } | undefined {
-  if (attempt <= 1) return undefined; // exact: the runtime's near-greedy decoding
-  const step = Math.min(attempt, MAX_FIX_ATTEMPTS) - 1; // 1 to 4
-  return { temperature: Number((0.2 + 0.2 * step).toFixed(2)), topP: Number((0.85 + 0.035 * step).toFixed(3)) };
+  if (attempt <= 1) return undefined;
+  return SAMPLING_SWINGS[(attempt - 1) % SAMPLING_SWINGS.length];
 }
 
-/** The sampling of re-ask number `extra` (1 to 3) within one fix attempt: warmer than the attempt's own */
 /**
- * Sampling far from the one just used: wide (hot, full nucleus) after a cool one, cool and narrow
- * after a warm one, so the last re-ask doesn't land near the replies that already failed
+ * The swing farthest from the one just used, among those not used yet in this attempt, so the
+ * last re-ask doesn't land near the replies that already failed
  */
-export function contrastSampling(previous: { temperature: number; topP: number }): { temperature: number; topP: number } {
-  return previous.temperature < 0.7 ? { temperature: 1, topP: 0.99 } : { temperature: 0.3, topP: 0.7 };
+export function contrastSampling(
+  previous: { temperature: number; topP: number },
+  used: ReadonlyArray<{ temperature: number; topP: number }> = []
+): { temperature: number; topP: number } {
+  const distance = (s: { temperature: number; topP: number }) => Math.abs(s.temperature - previous.temperature) + Math.abs(s.topP - previous.topP);
+  const fresh = SAMPLING_SWINGS.filter((s) => !used.some((u) => u.temperature === s.temperature && u.topP === s.topP));
+  return [...(fresh.length ? fresh : SAMPLING_SWINGS)].sort((a, b) => distance(b) - distance(a))[0];
 }
 
+/** The sampling of re-ask number `extra` within one fix attempt: the swings after the attempt's own */
 export function reaskSampling(attempt: number, extra: number): { temperature: number; topP: number } {
-  const step = Math.max(attempt, 1) - 1 + extra;
-  return { temperature: Number(Math.min(0.2 + 0.2 * step, 1).toFixed(2)), topP: Number(Math.min(0.85 + 0.035 * step, 0.99).toFixed(3)) };
+  return SAMPLING_SWINGS[(Math.max(attempt, 1) - 1 + extra) % SAMPLING_SWINGS.length];
 }
 
 /** The blank stage's system prompt: one small answer, in the shape the request names */
@@ -308,7 +337,6 @@ export function firstExpression(reply: string): string | null {
 }
 
 /** How many times a fix attempt asks again, at warmer sampling, when its reply is unusable */
-const MAX_FIX_REASKS = 3;
 
 type FixError = { attempt: number; error: string; line?: number };
 
@@ -357,7 +385,7 @@ export function prefersLineFix(modelId: string): boolean {
 /** What Chatty says when the last fix attempt failed too */
 function gaveUpText(error: string): string {
   const short = error.length > 80 ? `${error.slice(0, 77)}…` : error;
-  return `I couldn't get this working after ${MAX_FIX_ATTEMPTS} tries (the last error: ${short}). You could ask again in other words, or choose a larger model in Settings.`;
+  return `I couldn't get this working after ${MAX_FIX_TRIES} tries (the last error: ${short}). You could ask again in other words, or choose a larger model in Settings.`;
 }
 
 /** A run's error history with its own error added */
@@ -404,7 +432,10 @@ export class ConversationOrchestrator {
   /** Aborts the blank stage's model calls when the user starts a new turn (see blankStage) */
   private blankAbort: AbortController | null = null;
   /** Requests (by original turn) whose blank stage has run: a large model gets it once, after its line fix fails */
-  private blankTried = new Set<string>();
+  /** The questions each request's fixes have asked (by requestKey) */
+  private fixKindsUsed = new Map<string, Set<FixKind>>();
+  /** Fix replies that were not used, by request: the last question lists them */
+  private failedReplies = new Map<string, string[]>();
   /** Requests (by original turn) that Chatty has given up on: nothing is corrected or fixed after that */
   private gaveUp = new Set<string>();
   /** When the last test run ended, to pause between them */
@@ -668,9 +699,11 @@ export class ConversationOrchestrator {
       sttFinalizationLatencyMs?: number;
       /** The program that failed: this turn asks the model to fix it (see maybeAutoFix) */
       autoFix?: string;
-      /** A fix for the whole function around the failing line (see escalateFix) */
+      /** A fix for the whole function around the failing line, or for lines that don't parse (see askFix) */
       fixBlock?: { start: number; end: number; name?: string };
-      /** Which fix attempt this turn is (1 to MAX_FIX_ATTEMPTS) */
+      /** The whole program is asked for (no marked line) */
+      fixWhole?: boolean;
+      /** Which fix attempt this turn is (1 to MAX_FIX_TRIES) */
       fixAttempt?: number;
       /** Errors of the earlier programs for this request (see earlierErrors) */
       errorHistory?: FixError[];
@@ -712,6 +745,8 @@ export class ConversationOrchestrator {
       )
     ) {
       await this.performContextCompaction(signal, turnId);
+      // (the summary's generation and the reply's don't follow each other at once on iPhone)
+      await settleOnIos(AFTER_HEAVY_MS);
       if (!this.scheduler.isTurnValid(turnId) || signal.aborted) {
         // Only reset state if a newer turn has not taken over
         if (this.ownsState(turnId)) {
@@ -730,7 +765,7 @@ export class ConversationOrchestrator {
       canonicalContent: normalized,
       rawTranscript: options?.isVoiceTranscript ? rawTranscript : undefined,
       ...(options?.autoFix
-        ? { autoFix: true, fixNotice: `Trying to fix (${options.fixAttempt ?? 1} of ${MAX_FIX_ATTEMPTS}): ${this.lastRun?.error ?? 'the error'}` }
+        ? { autoFix: true, fixNotice: fixNote(options.fixAttempt ?? 1, this.lastRun?.error ?? 'the error') }
         : {}),
       timestamp: Date.now(),
     };
@@ -766,7 +801,8 @@ export class ConversationOrchestrator {
     // program they saw there, bug and all). The turn whose program it fixes:
     const fixedTurnId = options?.autoFix ? (this.lastRun?.originalTurnId ?? this.lastRun?.turnId) : undefined;
     // The line the fix request marked, where the corrected line goes back
-    const fixLine = options?.autoFix ? (options.fixBlock?.start ?? this.lastRun?.errorLine) : undefined;
+    // (none for a whole-program fix: the reply is the program)
+    const fixLine = options?.autoFix && !options.fixWhole ? (options.fixBlock?.start ?? this.lastRun?.errorLine) : undefined;
     if (options?.autoFix) {
       systemPrompt = FIX_SYSTEM_PROMPT;
       // One message, the user's: the failed program is handed over to fix, not shown as the
@@ -999,8 +1035,9 @@ export class ConversationOrchestrator {
               }
             }
             const currentFull = rawAccumulatedTokens;
-            // The code panel shows only code: the fenced part once a fence starts
-            this.events.onRawOutput?.(turnId, codeView(currentFull));
+            // The code panel shows only code: the fenced part once a fence starts. A fix's reply
+            // stays out of it: the panel keeps the program until a fix is used
+            if (!options?.autoFix) this.events.onRawOutput?.(turnId, codeView(currentFull));
 
             if (streamMode === 'unknown') {
               // Markup counts as code too: an HTML reply
@@ -1105,6 +1142,8 @@ export class ConversationOrchestrator {
         // A reply that passes is test-run once (hidden): one that fails the way the program did
         // has made no progress, and is not run for real either
         let repeatedTrial = false;
+        // Replies asked for again in this turn: each is a try of its own
+        let reasksDone = 0;
         if (options?.autoFix) {
           const original = options.autoFix;
           const failedError = this.lastRun?.error ?? null;
@@ -1115,6 +1154,8 @@ export class ConversationOrchestrator {
             const problem = await unusableFix(original, program, code, options.fixBlock?.name);
             if (problem) return UNUSABLE_WHY[problem];
             if (failedError && typeof this.javascriptRuntime.trialRun === 'function') {
+              // (the reply's generation and the hidden test run don't follow each other at once on iPhone)
+              await settleOnIos(AFTER_HEAVY_MS);
               const trial = await this.trial(code);
               appendRunLog('retry', `a test run of the fix gave ${trial.error ? errorText(trial.error, trial.errorLine) : 'no error'}`);
               if (trial.error === failedError) {
@@ -1124,19 +1165,24 @@ export class ConversationOrchestrator {
             }
             return undefined;
           };
-          // At least two re-asks, the last one sampled far from the one before; a small model's
-          // one-line reply is quick, so it gets one more
-          const reasks = fixLine && !options.fixBlock && !prefersLineFix(generationProvider.modelId) ? MAX_FIX_REASKS : 2;
-          let lastSampling = fixSampling(options.fixAttempt ?? 1) ?? { temperature: 0.2, topP: 0.9 };
+          // The same question again (at most TRIES_PER_QUESTION tries in all, within the budget),
+          // the last sampled far from the one before
+          const reasks = Math.max(0, Math.min(TRIES_PER_QUESTION - 1, MAX_FIX_TRIES - (options.fixAttempt ?? 1)));
+          let lastSampling = fixSampling(options.fixAttempt ?? 1) ?? SAMPLING_SWINGS[0];
+          const usedSamplings = [lastSampling];
           // The last reply is judged too (it is not asked for again)
           for (let extra = 0; extra <= reasks; extra++) {
             if (!this.scheduler.isTurnValid(turnId) || signal.aborted || (genResult.aborted && !stoppedRepeating)) break;
             const why = await unusableWhy(rawAccumulatedTokens || assistantMsg.canonicalContent || genResult.text);
             if (!why || extra === reasks) break;
-            const sampling = extra + 1 === reasks ? contrastSampling(lastSampling) : reaskSampling(options.fixAttempt ?? 1, extra + 1);
+            const sampling = extra + 1 === reasks ? contrastSampling(lastSampling, usedSamplings) : reaskSampling(options.fixAttempt ?? 1, extra + 1);
             lastSampling = sampling;
+            usedSamplings.push(sampling);
             appendRunLog('discarded', `// ${why}, so it was asked for again. The model replied:\n${rawAccumulatedTokens || genResult.text}`);
-            appendRunLog('retry', `${why.toLowerCase()}: asked again at temperature ${sampling.temperature}, top-p ${sampling.topP} (${extra + 1} of ${reasks})`);
+            reasksDone++;
+            const tryNumber = (options.fixAttempt ?? 1) + reasksDone;
+            appendRunLog('retry', `${why.toLowerCase()}: asked again at temperature ${sampling.temperature}, top-p ${sampling.topP} (try ${tryNumber} of ${MAX_FIX_TRIES})`);
+            this.addFixNote(fixNote(tryNumber, `${why.toLowerCase()}, asking again`), turnId);
             rawAccumulatedTokens = '';
             assistantMsg.canonicalContent = '';
             lastSpokenTextEmitted = '';
@@ -1168,7 +1214,7 @@ export class ConversationOrchestrator {
           // A fix reply is search/replace edits to the failed program: they're applied, and the
           // code panel shows the whole program that runs
           const fixedProgram = options?.autoFix ? applyFixReply(options.autoFix, rawContent, fixLine, options.fixBlock?.end) : rawContent;
-          if (fixedProgram !== rawContent) this.events.onRawOutput?.(turnId, fixedProgram);
+          if (fixedProgram !== rawContent && !options?.autoFix) this.events.onRawOutput?.(turnId, fixedProgram);
           const inspected = inspectExecutableCode(fixedProgram);
           // Comments go before it runs (and before it enters the history); a fix's program
           // already came without them
@@ -1237,17 +1283,24 @@ export class ConversationOrchestrator {
             const failed = this.lastRun;
             const why = UNUSABLE_WHY[problem!];
             appendRunLog('discarded', `// ${why}, so it was not run. The model replied:\n${rawContent}`);
-            // The code panel keeps the program that is still current; the reply is in the run log
-            this.events.onRawOutput?.(turnId, `// ${why} (its reply is in the log)\n${originalCode}`);
+            // The code panel keeps the program that is still current (untouched); the reply is in
+            // the run log and the status says why
             this.events.onRunStatus?.(turnId, {
               kind: 'error',
               text: `${why}, so it was not run. ${failed?.error ? errorText(failed.error, failed.errorLine) : 'The program failed.'}`,
             });
-            // Another attempt, while there are any: the whole function around the failing line,
-            // with what went wrong with this reply
-            const attempt = options?.fixAttempt ?? 1;
-            if (failed?.error && attempt < MAX_FIX_ATTEMPTS) {
-              this.escalateFix(failed, attempt + 1, `Your last reply was not a working corrected ${options?.fixBlock ? 'function' : 'line'} (${why.toLowerCase()}).`);
+            // The reply is remembered (the last question lists those that didn't work), and the next
+            // try asks the next question, told what went wrong with this reply
+            const attempt = (options?.fixAttempt ?? 1) + reasksDone;
+            if (failed) {
+              const shown = rawContent.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('//') && !l.startsWith('```'));
+              if (shown) {
+                const key = this.requestKey(failed);
+                this.failedReplies.set(key, [...(this.failedReplies.get(key) ?? []), shown.slice(0, 100)]);
+              }
+            }
+            if (failed?.error && attempt < MAX_FIX_TRIES) {
+              this.nextTry(failed, attempt + 1, `Your last reply was not a working fix (${why.toLowerCase()}).`);
             } else if (failed?.error && options?.autoFix) {
               // That was the last attempt: say so, and what the user can do
               this.markGaveUp(failed);
@@ -1279,6 +1332,10 @@ export class ConversationOrchestrator {
               }
             }
           } else {
+            // A fix that is used: now the code panel shows the program that runs
+            if (options?.autoFix) this.events.onRawOutput?.(turnId, executableCode);
+            // On iPhone the reply's generation (and a fix's test run) settle before the program runs
+            await settleOnIos(AFTER_HEAVY_MS);
             // Execute the generated output through the Universal Programmatic Agent Harness
             // Set once the run returns: later speak() calls come from timers/handlers the code left
             // running, and are voiced outside the (finished) turn instead of being dropped.
@@ -1341,7 +1398,7 @@ export class ConversationOrchestrator {
               fixRequested: false,
               error: execResult.error ?? null,
               errorLine: execResult.errorLine,
-              fixAttempt: options?.fixAttempt ?? 0,
+              fixAttempt: options?.autoFix ? (options.fixAttempt ?? 1) + reasksDone : 0,
               originalTurnId: fixedTurnId ?? turnId,
               errorHistory: options?.errorHistory,
             };
@@ -1397,7 +1454,7 @@ export class ConversationOrchestrator {
                   typeof execResult.output === 'object'
                     ? JSON.stringify(execResult.output)
                     : String(execResult.output);
-              } else if (execResult.error && options?.autoFix && (options.fixAttempt ?? 0) >= MAX_FIX_ATTEMPTS) {
+              } else if (execResult.error && options?.autoFix && (options.fixAttempt ?? 0) + reasksDone >= MAX_FIX_TRIES) {
                 // The last fix failed too: say so, and what the user can do
                 this.gaveUp.add(fixedTurnId ?? turnId);
                 spokenText = gaveUpText(execResult.error);
@@ -1615,7 +1672,7 @@ export class ConversationOrchestrator {
         ? { kind: 'error', text: errorText(result.error, result.errorLine) }
         : { kind: 'ok', text: `Ran in ${Math.max(1, Math.round(result.executionTimeMs))} ms (corrected ${named})` }
     );
-    if (result.error && blankFix && blankFix.fixAttempt >= MAX_FIX_ATTEMPTS) this.sayGaveUp(run.turnId, result.error);
+    if (result.error && blankFix && blankFix.fixAttempt >= MAX_FIX_TRIES) this.sayGaveUp(run.turnId, result.error);
     if (result.error) this.maybeAutoFix(run.turnId);
   }
 
@@ -1640,22 +1697,53 @@ export class ConversationOrchestrator {
       void this.runCorrected(run, hint.correction);
       return;
     }
-    // A fix's own program can fail too: the model gets up to MAX_FIX_ATTEMPTS tries per request
+    // A fix's own program can fail too: the model gets up to MAX_FIX_TRIES tries per request
     const attempt = (run.fixAttempt ?? 0) + 1;
-    if (attempt > MAX_FIX_ATTEMPTS) return;
+    if (attempt > MAX_FIX_TRIES) return;
     run.fixRequested = true;
-    // The blank stage: the expression the error names (found with the parser) is replaced by
-    // candidates, each tried in a hidden run. A program that doesn't parse has no such blank.
-    // A large model is asked for the line fix first; the blank stage follows if that fails.
-    const blank = this.blankFor(run);
-    const lineFirst = this.largeModel() && attempt === 1;
-    if (blank && !lineFirst && !(this.largeModel() && this.blankTried.has(this.requestKey(run)))) {
-      this.blankTried.add(this.requestKey(run));
-      this.events.onRunStatus?.(turnId, { kind: 'error', text: `${errorText(run.error, run.errorLine)} (trying fixes for ${blank.text})` });
-      void this.blankStage(run, blank, attempt, hint?.text);
+    this.nextTry(run, attempt, undefined, hint?.text);
+  }
+
+  /**
+   * Try `attempt`: the next question in the order for this model that fits the error and hasn't
+   * been asked for this request yet (see FixKind); the whole program when none is left
+   */
+  private nextTry(run: NonNullable<typeof this.lastRun>, attempt: number, note?: string, hintText?: string): void {
+    if (!run.error) return;
+    if (attempt > MAX_FIX_TRIES) {
+      this.sayGaveUp(run.turnId, run.error);
       return;
     }
-    this.askLineFix(run, attempt, hint?.text);
+    const key = this.requestKey(run);
+    const used = this.fixKindsUsed.get(key) ?? new Set<FixKind>();
+    this.fixKindsUsed.set(key, used);
+    const broken = brokenLines(run.code);
+    const blank = this.blankFor(run);
+    const fits = (kind: FixKind) =>
+      kind === 'blank'
+        ? !!blank
+        : kind === 'function'
+          ? !broken && !!enclosingFunction(run.code, run.errorLine)
+          : kind === 'line' || kind === 'different'
+            ? !!run.errorLine || !!broken
+            : true;
+    const unused = (this.largeModel() ? FIX_ORDER_LARGE : FIX_ORDER_SMALL).find((k) => !used.has(k) && fits(k));
+    // Every kind asked already (one didn't fit): the whole program, told the replies that failed,
+    // so this question too differs from every one before
+    const kind = unused ?? 'program';
+    used.add(kind);
+    const hint = hintText ?? errorHint(run.code, run.error, run.errorLine, { ids: this.javascriptRuntime.pageIds?.() ?? [], standIns: this.javascriptRuntime.standInIds?.() ?? [] })?.text;
+    if (kind === 'blank' && blank) {
+      run.fixRequested = true;
+      this.events.onRunStatus?.(run.turnId, { kind: 'error', text: `${errorText(run.error, run.errorLine)} (trying fixes for ${blank.text})` });
+      void this.blankStage(run, blank, attempt, hint);
+      return;
+    }
+    const tried = this.failedReplies.get(key) ?? [];
+    const different = (kind === 'different' || !unused) && tried.length
+      ? `Write a fix different from these, which didn't work: ${tried.slice(-3).map((r) => `\`${r}\``).join('; ')}.`
+      : undefined;
+    this.askFix(run, attempt, kind === 'blank' ? 'line' : kind, [note, different, hint].filter(Boolean).join(' ') || undefined);
   }
 
   /** The request a run belongs to (every fix of it shares the key) */
@@ -1689,27 +1777,34 @@ export class ConversationOrchestrator {
     }
   }
 
-  /** The line (or syntax block) fix: a fix turn for the marked line, as attempt `attempt` */
-  private askLineFix(run: NonNullable<typeof this.lastRun>, attempt: number, hintText?: string): void {
+  /**
+   * A fix turn: the marked line (or the statements that don't parse), the whole function around
+   * it, or the whole program, as try `attempt`
+   */
+  private askFix(run: NonNullable<typeof this.lastRun>, attempt: number, kind: Exclude<FixKind, 'blank'>, factsText?: string): void {
     if (!run.error) return;
-    if (attempt > MAX_FIX_ATTEMPTS) {
-      this.sayGaveUp(run.turnId, run.error);
-      return;
-    }
+    run.fixRequested = true;
     this.events.onRunStatus?.(run.turnId, {
       kind: 'error',
       text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
-    // A program that doesn't parse: every statement that doesn't is marked, not just one line
-    const broken = brokenLines(run.code);
-    const block = broken ? { ...broken, why: 'syntax' as const } : undefined;
-    const facts = [earlierErrors(run.errorHistory, run.error), hintText].filter(Boolean).join(' ') || undefined;
-    const request = fixRequest(run.task, run.code, run.errorLine, run.error, facts, block);
+    const broken = kind === 'program' ? null : brokenLines(run.code);
+    const fn = kind === 'function' ? enclosingFunction(run.code, run.errorLine) : null;
+    const block = broken ? { ...broken, why: 'syntax' as const } : fn ? { start: fn.start, end: fn.end, name: fn.name || undefined } : undefined;
+    const line = kind === 'program' ? undefined : run.errorLine;
+    const facts = [earlierErrors(run.errorHistory, run.error), factsText].filter(Boolean).join(' ') || undefined;
+    const request = fixRequest(run.task, run.code, line, run.error, facts, block);
     this.startFixLog(run);
-    appendRunLog(
-      'retry',
-      `the program failed (${errorText(run.error, run.errorLine)}): asking the model to fix ${block ? `lines ${block.start}-${block.end}, which don't parse` : 'the marked line'} (attempt ${attempt} of ${MAX_FIX_ATTEMPTS})`
-    );
+    const what = broken
+      ? `lines ${broken.start}-${broken.end}, which don't parse`
+      : fn
+        ? `the whole function${fn.name ? ` ${fn.name}()` : ''} (lines ${fn.start}-${fn.end})`
+        : kind === 'program'
+          ? 'the whole program'
+          : kind === 'different'
+            ? 'the marked line, unlike the replies that failed'
+            : 'the marked line';
+    appendRunLog('retry', `the program failed (${errorText(run.error, run.errorLine)}): asking the model for ${what} (try ${attempt} of ${MAX_FIX_TRIES})`);
     // A short pause before the model runs again, unless the user moves on meanwhile
     void settle(AFTER_HEAVY_MS).then(() => {
       if (this.scheduler.getActiveTurnId()) return;
@@ -1717,7 +1812,8 @@ export class ConversationOrchestrator {
         autoFix: run.code,
         fixAttempt: attempt,
         errorHistory: withError(run),
-        ...(block ? { fixBlock: { start: block.start, end: block.end } } : {}),
+        ...(kind === 'program' ? { fixWhole: true } : {}),
+        ...(block ? { fixBlock: { start: block.start, end: block.end, ...(fn?.name ? { name: fn.name } : {}) } } : {}),
       });
     });
   }
@@ -1749,6 +1845,22 @@ export class ConversationOrchestrator {
    * are tried; the first that passes is run for real. When none does, the line fix follows as the
    * next attempt. Stops at once when the user starts a new turn.
    */
+  /** A fix's progress note in the chat ("Fixing (3 of 10): …"): added like a fix turn's own */
+  private addFixNote(text: string, turnId: string): void {
+    const stamp = Date.now();
+    const note: ConversationMessage = {
+      id: `msg_user_fixnote_${turnId}_${stamp}_${Math.random().toString(36).slice(2, 6)}`,
+      turnId: `fixnote_${turnId}_${stamp}`,
+      role: 'user',
+      canonicalContent: text,
+      autoFix: true,
+      fixNotice: text,
+      timestamp: stamp,
+    };
+    this.memoryStore.addMessage(note);
+    this.events.onMessageCreated?.(note);
+  }
+
   private async blankStage(run: NonNullable<typeof this.lastRun>, blank: Blank, attempt: number, hintText?: string): Promise<void> {
     const error = run.error;
     if (!error) return;
@@ -1756,19 +1868,9 @@ export class ConversationOrchestrator {
     // A pause before the stage's hidden runs and model calls, for phones' memory
     await settle(AFTER_HEAVY_MS);
     if (moved()) return;
-    const notice: ConversationMessage = {
-      id: `msg_user_blank_${run.turnId}_${attempt}_${Date.now()}`,
-      turnId: `blank_${run.turnId}_${attempt}_${Date.now()}`,
-      role: 'user',
-      canonicalContent: `Trying to fix (${attempt} of ${MAX_FIX_ATTEMPTS}): ${error}`,
-      autoFix: true,
-      fixNotice: `Trying to fix (${attempt} of ${MAX_FIX_ATTEMPTS}): ${error}`,
-      timestamp: Date.now(),
-    };
-    this.memoryStore.addMessage(notice);
-    this.events.onMessageCreated?.(notice);
+    this.addFixNote(fixNote(attempt, error), `blank_${run.turnId}`);
     this.startFixLog(run);
-    appendRunLog('retry', `the program failed (${errorText(error, run.errorLine)}): trying expressions for the blank \`${blank.text}\` (${blank.why}), each in a test run (attempt ${attempt} of ${MAX_FIX_ATTEMPTS})`);
+    appendRunLog('retry', `the program failed (${errorText(error, run.errorLine)}): trying expressions for the blank \`${blank.text}\` (${blank.why}), each in a test run (try ${attempt} of ${MAX_FIX_TRIES})`);
 
     const abort = new AbortController();
     this.blankAbort = abort;
@@ -1853,7 +1955,8 @@ export class ConversationOrchestrator {
       // The best-fitting choice first: when it runs cleanly, the model needn't write anything
       if (choices.length > 0) await test(choices[0]);
       if (!settled()) {
-        for (const sampling of [{ exact: true }, { sampling: fixSampling(2) }, { sampling: fixSampling(4) }]) {
+        // Greedy, then wide, then narrow: three really different answers
+        for (const sampling of [{ exact: true }, { sampling: fixSampling(2) }, { sampling: fixSampling(3) }]) {
           if (moved() || abort.signal.aborted) break;
           const reply = await ask(blankRequest(run.task, run.code, blank, error, facts), { ...sampling, fixShape: 'expression', maxOutputTokens: 96 });
           vote(reply === null ? null : firstExpression(reply));
@@ -1879,50 +1982,14 @@ export class ConversationOrchestrator {
     if (found) {
       this.finishFixLog('ran');
       appendRunLog('imagined', `${blank.text} → ${found.expr}: corrected by a test run (${found.level === 3 ? 'it ran' : 'it got further'}, the best of ${count})`);
+      // (the test runs settle before the real one on iPhone)
+      await settleOnIos(AFTER_HEAVY_MS);
       await this.runCorrected(run, { code: found.code, note: `${blank.text} → ${found.expr}` }, { fixAttempt: attempt, errorHistory: withError(run) });
       return;
     }
     this.finishFixLog('unchanged');
     appendRunLog('retry', `no expression passed a test run (${count} tried for \`${blank.text}\`): asking for the marked line instead`);
-    this.askLineFix(run, attempt + 1, hintText);
-  }
-
-  /**
-   * Another fix, after one that was not used (lost, unchanged or not parsing): the whole function
-   * around the failing line is marked and asked for (line-fix.ts), and the reply replaces that
-   * function; outside any function, the marked line is asked for again.
-   */
-  private escalateFix(run: NonNullable<typeof this.lastRun>, attempt: number, note?: string): void {
-    if (!run.error) return;
-    // A large model's line fix failed: the blank stage now, once
-    const blank = this.largeModel() && !this.blankTried.has(this.requestKey(run)) ? this.blankFor(run) : null;
-    if (blank) {
-      this.blankTried.add(this.requestKey(run));
-      this.events.onRunStatus?.(run.turnId, { kind: 'error', text: `${errorText(run.error, run.errorLine)} (trying fixes for ${blank.text})` });
-      void this.blankStage(run, blank, attempt);
-      return;
-    }
-    // Outside any function, the marked line is asked for again (sampled differently, see fixSampling)
-    const block = enclosingFunction(run.code, run.errorLine);
-    const hint = errorHint(run.code, run.error, run.errorLine, { ids: this.javascriptRuntime.pageIds?.() ?? [], standIns: this.javascriptRuntime.standInIds?.() ?? [] });
-    const facts = [note, earlierErrors(run.errorHistory, run.error), hint?.text].filter(Boolean).join(' ') || undefined;
-    const request = fixRequest(run.task, run.code, run.errorLine, run.error, facts, block ?? undefined);
-    appendRunLog(
-      'retry',
-      block
-        ? `the fix was not used: asking for the whole function${block.name ? ` ${block.name}()` : ''} (lines ${block.start}-${block.end}, attempt ${attempt} of ${MAX_FIX_ATTEMPTS})`
-        : `the fix was not used: asking for the marked line again (attempt ${attempt} of ${MAX_FIX_ATTEMPTS})`
-    );
-    this.startFixLog(run);
-    void settle(AFTER_HEAVY_MS).then(() => {
-      if (this.scheduler.getActiveTurnId()) return;
-      return this.submitUserInput(request, {
-        autoFix: run.code,
-        fixAttempt: attempt,
-        errorHistory: withError(run),
-        ...(block ? { fixBlock: { start: block.start, end: block.end, name: block.name || undefined } } : {}),
-      });
-    });
+    this.nextTry(run, attempt + 1, undefined, hintText);
   }
 
   /**
@@ -2003,10 +2070,10 @@ export class ConversationOrchestrator {
   async replayLastProgram(): Promise<boolean> {
     const code = this.replayableProgram();
     if (!code || this.scheduler.getActiveTurnId()) return false;
-    if (this.javascriptRuntime.hasRunningProgram?.()) {
-      await this.javascriptRuntime.resetVisual();
-      await settle(AFTER_HEAVY_MS);
-    }
+    // Always from a clean slate: the last run's timers, notes and card go first (a program that
+    // only scheduled notes doesn't count as running, and would otherwise play on top)
+    await this.javascriptRuntime.resetVisual();
+    await settle(AFTER_HEAVY_MS);
     appendRunLog('request', '(Replay: the program ran again)');
     const result = await this.javascriptRuntime.execute(code, undefined, { onSpeak: (phrase) => void this.speakOutOfTurn(phrase) });
     this.events.onRunStatus?.(
