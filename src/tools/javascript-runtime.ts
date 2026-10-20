@@ -1165,7 +1165,9 @@ export class JavascriptRuntime {
       gap: 8px;
       padding: 16px;
       background: #505050;
-      color: #f8fafc;
+      /* Black by default: programs often give their own boxes a light background, and white
+         text inherited from the card vanished on it */
+      color: #000;
       border-radius: 4px;
       contain: paint;
       /* Scrolling inside the card never carries on to the page behind it */
