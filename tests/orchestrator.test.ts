@@ -93,8 +93,9 @@ class TestStubLlmProvider implements LlmRuntimeProvider {
     } else if (lower.includes('summarize our entire conversation')) {
       response = 'User and assistant discussed WebGPU inference and memory compaction. Decisions: use structured summary.';
     } else if (lower.includes('what did we discuss')) {
+      // The conversation so far, without the prompt's example exchanges
       const historyText = options.messages
-        .slice(0, -1)
+        .slice(EXAMPLE_TURNS.length, -1)
         .map((m) => m.content)
         .join(' ');
       response = `Earlier we discussed: ${historyText}`;

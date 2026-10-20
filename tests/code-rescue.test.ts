@@ -41,6 +41,15 @@ describe('running code the model wrapped or forgot to call', () => {
   });
 });
 
+describe('syntax errors are not hidden', () => {
+  it('runs the whole program when the part that would be cut off is code', () => {
+    const broken = 'const a = 1;\nout.send([1, 2);\nconst b = 2;\nspeak("done");';
+    const out = inspectExecutableCode(broken);
+    expect(out.isProse).toBe(false);
+    expect(out.code).toContain('speak("done")');
+  });
+});
+
 describe('inline handlers in written HTML', () => {
   it('makes top-level functions global only when the HTML calls them inline', () => {
     const withHandler = exposeFunctionsToInlineHandlers('function calc() {}\nconst reset = () => {};\ndocument.write(\'<button onclick="calc()">Go</button>\');');
@@ -131,5 +140,13 @@ describe('echo guard', () => {
     expect(classifyTranscript('Here is a red circle on your screen.', false, true)).toBe('ignore');
     expect(classifyTranscript('Stop!', true, true)).toBe('stop');
     expect(classifyTranscript('Draw a dog', false, false)).toBe('submit');
+  });
+});
+
+describe('syntax error lines', () => {
+  it('finds the line of a syntax error, and nothing for code that parses', async () => {
+    const { syntaxErrorLine } = await import('../src/tools/javascript-runtime.ts');
+    expect(await syntaxErrorLine("const a = 1;\nout.send(['bass', 'D', beat + beat);\nconst b = 2;")).toBe(2);
+    expect(await syntaxErrorLine('const a = await fetch("x");\nreturn a;')).toBeUndefined();
   });
 });

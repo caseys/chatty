@@ -35,6 +35,7 @@ import {
 import {
   JavascriptRuntime,
   inspectExecutableCode,
+  syntaxErrorLine,
 } from '../tools/javascript-runtime.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 
@@ -172,7 +173,7 @@ export const CONCISE_VOICE_SYSTEM_PROMPT = [
   '3. speak(text) talks to the user; plain conversation is just speak(). It accepts computed values: speak(`The total is ${total}.`). Never mention code, JavaScript or programming in what you say, and never offer code.',
   '4. What you add to document.body appears in a card in the middle of the screen. Use <canvas> for visuals: drawings, art, animations, games and simulations (2D or WebGL). Use HTML and CSS for interfaces: buttons, forms, cards, notes, tables, gauges, dashboards and widgets. <svg> works for diagrams and icons.',
   '   The screen is wiped with clear(): to completely update the screen, call clear() first.',
-  '5. For sound and music, use Web Audio and Web MIDI: create an AudioContext and await ctx.resume() before scheduling notes.',
+  '5. Sound: Web Audio (create an AudioContext and await ctx.resume() first), or Web MIDI for instruments: out = (await navigator.requestMIDIAccess()).outputs.values().next().value; then call out.send([instrument, notes, velocity, durationMs], time) once per note, chord or drum hit, at its own time. Instruments: piano, bass, organ, guitar, strings, violin, trumpet, sax, flute, drums. Notes: one note (\'G3\'), a chord by name (\'G major\', \'Am7\'), a scale (\'G pentatonic down\' plays its notes in order), drum hits (\'kick\', \'snare\', \'hihat\'), or an array (up to 4 notes sound together; 5 or more play one after another). Timing: declare const bpm, beat = 60000 / bpm and start = performance.now() at the top; beat n plays at start + n * beat, and a 4/4 measure is 4 beats. Play it once unless asked to loop or repeat. To loop: put the bars in a function that ends with start += their length, call it, then setInterval it with that same length. A beat or groove means drums. Boom-chuck: kick on beats 1 and 3, snare on 2 and 4. Walking bass: one bass note per beat, stepping through the chord\'s notes. Shuffle: hi-hats on each beat and two-thirds of the way through it.',
   '6. Answer what you know directly. To look up facts you don\'t know, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it, not the whole text.',
   '7. Write code instead of guessing results.',
   '8. If you define a function, call it.',
@@ -188,28 +189,27 @@ export const EXAMPLE_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content:
   { role: 'assistant', content: 'speak("Morning! Work in short focused bursts with a quick break in between, and keep your phone out of reach.");' },
   { role: 'user', content: "What's 15 percent of 2,340?" },
   { role: 'assistant', content: 'const result = 2340 * 0.15;\nspeak(`15 percent of 2,340 is ${result}.`);' },
-  { role: 'user', content: 'Play the opening of Ode to Joy, slowly' },
+  { role: 'user', content: 'Play a spooky organ riff in D minor with strings and a slow beat, on repeat' },
   {
     role: 'assistant',
     content: [
-      'const ctx = new AudioContext();',
-      'await ctx.resume();',
-      '// Notes as MIDI numbers (60 is middle C); hz() turns one into a frequency',
-      'const hz = (midi) => 440 * 2 ** ((midi - 69) / 12);',
-      'const tune = [64, 64, 65, 67, 67, 65, 64, 62, 60, 60, 62, 64, 64, 62, 62];',
-      'const beat = 0.6;',
-      'tune.forEach((note, i) => {',
-      '  const start = ctx.currentTime + i * beat;',
-      '  const osc = ctx.createOscillator();',
-      '  const gain = ctx.createGain();',
-      '  osc.frequency.value = hz(note);',
-      '  gain.gain.setValueAtTime(0.2, start);',
-      '  gain.gain.exponentialRampToValueAtTime(0.001, start + beat);',
-      '  osc.connect(gain).connect(ctx.destination);',
-      '  osc.start(start);',
-      '  osc.stop(start + beat);',
-      '});',
-      'speak("Playing the opening of Ode to Joy.");',
+      'const out = (await navigator.requestMIDIAccess()).outputs.values().next().value;',
+      'const bpm = 90;',
+      'const beat = 60000 / bpm;',
+      "const riff = ['D4', 'F4', 'A4', 'G4', 'F4', 'E4', 'D4', 'A3'];",
+      'let start = performance.now() + 100;',
+      'function playRiff() {',
+      '  for (let i = 0; i < riff.length; i++) {',
+      '    const t = start + i * beat;',
+      "    out.send(['organ', riff[i], 80, beat], t);",
+      "    if (i % 4 === 0) out.send(['strings', 'D minor', 60, 4 * beat], t);",
+      "    out.send(['drums', i % 2 ? 'snare' : 'kick', 90], t);",
+      '  }',
+      '  start += riff.length * beat;',
+      '}',
+      'playRiff();',
+      'setInterval(playRiff, riff.length * beat);',
+      'speak("Here\'s a spooky riff in D minor, on repeat.");',
     ].join('\n'),
   },
   { role: 'user', content: 'Draw a night sky with a crescent moon' },
@@ -1220,6 +1220,10 @@ export class ConversationOrchestrator {
               audioContextAccessor: this.audioContextAccessor,
             });
             runFinished = true;
+            // A syntax error comes without a line: a parser finds it, so the fix can point at it
+            if (execResult.error && execResult.errorLine === undefined) {
+              execResult.errorLine = await syntaxErrorLine(executableCode);
+            }
             this.lastRun = {
               turnId,
               code: executableCode,

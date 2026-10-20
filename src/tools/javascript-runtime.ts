@@ -152,11 +152,25 @@ function extractProgram(text: string): { code: string; lead: string } | null {
   const lines = text.split('\n');
   const start = lines.findIndex((l) => CODE_LINE.test(l));
   if (start < 0) return null;
+  const lead = lines.slice(0, start).join(' ').trim();
+  const looksLikeCode = (line: string) => CODE_LINE.test(line) || /[;{}()[\]]\s*(\/\/.*)?$/.test(line.trim());
+  // A line that is, or ends in, a sentence ("…; Then we play it."), but not a // comment
+  const looksLikeProse = (line: string) => {
+    const t = line.trim();
+    return !t.startsWith('//') && (/^[A-Z][^;{}=]*[.!?]$/.test(t) || /\b[A-Z][\w']*,?( [\w'-]+,?){2,}[.!?]$/.test(t));
+  };
   for (let end = lines.length; end > start && lines.length - end < 40; end--) {
     const code = lines.slice(start, end).join('\n').trim();
-    if (parsesAsJs(code)) return { code, lead: lines.slice(0, start).join(' ').trim() };
+    if (!parsesAsJs(code)) continue;
+    // Only explanation may be cut off the end. Cut-off code means a syntax error broke the
+    // program: run it whole, so the error reaches the model to fix instead of a fragment running
+    const cut = lines.slice(end).filter((line) => line.trim());
+    if (cut.some(looksLikeCode) && !cut.some(looksLikeProse)) break;
+    return { code, lead };
   }
-  return null;
+  // Nothing parses: run it whole if it's all code (the error goes to the model), else it's prose
+  const tail = lines.slice(start).filter((line) => line.trim());
+  return tail.some(looksLikeProse) ? null : { code: lines.slice(start).join('\n').trim(), lead };
 }
 
 /**
@@ -174,6 +188,21 @@ export function callUncalledFunctions(code: string): string {
   let toCall = roots.filter((name) => /^(?:main|init|start|run|setup|draw|play|render|animate|create|build|show|make)/i.test(name));
   if (toCall.length === 0 && roots.length === declared.length) toCall = [declared[declared.length - 1]];
   return toCall.length ? `${code}\n${toCall.map((name) => `await ${name}();`).join('\n')}` : code;
+}
+
+/**
+ * Where a syntax error is (1-based line), found with a parser since browsers don't say. Undefined
+ * when the code parses (the error happened while running). The parser loads only when needed.
+ */
+export async function syntaxErrorLine(code: string): Promise<number | undefined> {
+  try {
+    const { parse } = await import('acorn');
+    parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true });
+    return undefined;
+  } catch (err) {
+    const line = (err as { loc?: { line?: number } }).loc?.line;
+    return typeof line === 'number' ? line : undefined;
+  }
 }
 
 /**
