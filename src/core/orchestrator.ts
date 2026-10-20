@@ -264,6 +264,16 @@ export const EXAMPLE_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content:
   },
 ];
 
+/**
+ * One real chat exchange before the conversation, there only to show the reply format (a
+ * JavaScript program, no prose): without it small models answer like a chat assistant offering
+ * code ("you can use the following code: …"). It holds nothing worth copying.
+ */
+export const FORMAT_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content: string }> = [
+  { role: 'user', content: 'Hi Chatty!' },
+  { role: 'assistant', content: 'speak("Hi! What would you like me to make?");' },
+];
+
 /** The example exchanges as the system prompt shows them (see EXAMPLE_TURNS) */
 const EXAMPLES_PROMPT = [
   'Examples of requests and replies (made up, not part of this conversation):',
@@ -1842,10 +1852,11 @@ export class ConversationOrchestrator {
       );
     }
 
-    const promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
+    const promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> =
+      this.phonePipeline ? [] : FORMAT_TURNS.map((t) => ({ ...t }));
     const pastPrograms: string[] = [];
-    // Assistant messages before the user's first one are the app's own (the welcome greeting):
-    // left out, so the conversation starts with the user.
+    // Assistant messages before the user's first one are the app's own (the welcome greeting).
+    // Sent, they'd merge into the format turn's reply (consecutive turns are joined): left out.
     let userHasSpoken = false;
 
     for (const msg of context.workingMessages) {

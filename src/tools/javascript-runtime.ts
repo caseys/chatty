@@ -1196,6 +1196,26 @@ export class JavascriptRuntime {
       await probe('expr', () => new ProgramFunction('speak', 'playNotes', 'searchWikipedia', 'root', 'return (null.probe);' + SOURCE_TAG)());
     })();
 
+    // Programs often wait for the page to load (DOMContentLoaded, load, window.onload), but it
+    // already has, so that setup would never run: it runs right away instead
+    const LOAD_EVENTS = new Set(['DOMContentLoaded', 'load']);
+    for (const target of [document, window]) {
+      const addListener = target.addEventListener.bind(target);
+      target.addEventListener = (type, listener, options) => {
+        if (!LOAD_EVENTS.has(type) || !listener) return addListener(type, listener, options);
+        setTimeout(() => {
+          const event = new Event(type);
+          if (typeof listener === 'function') listener.call(target, event);
+          else listener.handleEvent?.(event);
+        }, 0);
+      };
+    }
+    Object.defineProperty(window, 'onload', {
+      configurable: true,
+      get: () => null,
+      set: (fn) => { if (typeof fn === 'function') setTimeout(() => fn.call(window, new Event('load')), 0); },
+    });
+
     // Small models often fill an element they never made (getElementById('app').innerHTML = ...):
     // a missing id gets an empty <div> on the page instead of null
     const findElementById = document.getElementById.bind(document);

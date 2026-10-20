@@ -8,7 +8,7 @@ import {
 import { BoundedQueue, TurnResourceScheduler } from '../src/core/bounded-queue.ts';
 import { ConversationMemoryStore } from '../src/core/memory-store.ts';
 import { computeSha256Hex, ModelManager } from '../src/core/model-manager.ts';
-import { ConversationOrchestrator } from '../src/core/orchestrator.ts';
+import { ConversationOrchestrator, FORMAT_TURNS } from '../src/core/orchestrator.ts';
 import {
   IncrementalPhraseSegmenter,
   normalizeTextForSpeech,
@@ -93,9 +93,9 @@ class TestStubLlmProvider implements LlmRuntimeProvider {
     } else if (lower.includes('summarize our entire conversation')) {
       response = 'User and assistant discussed WebGPU inference and memory compaction. Decisions: use structured summary.';
     } else if (lower.includes('what did we discuss')) {
-      // The conversation so far
+      // The conversation so far, after the format turn
       const historyText = options.messages
-        .slice(0, -1)
+        .slice(FORMAT_TURNS.length, -1)
         .map((m) => m.content)
         .join(' ');
       response = `Earlier we discussed: ${historyText}`;
@@ -1508,8 +1508,9 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         (orchestrator as any).memoryStore.resolveContextForQuery('Can you play another?', 4000),
         'direct'
       );
-      // The conversation's own turns
+      // The conversation's own turns, after the format turn
       const assistantPromptTurn = promptData.promptMessages
+        .slice(FORMAT_TURNS.length)
         .find((m: { role: string }) => m.role === 'assistant');
       expect(assistantPromptTurn).toBeDefined();
       expect(assistantPromptTurn.content).toBe(jsCodeFromModel);
