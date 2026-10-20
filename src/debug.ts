@@ -593,7 +593,7 @@ export class ChattyAppController {
     roleSpan.className = 'msg-role';
     if (msg.role === 'assistant') {
       const avatarImg = document.createElement('img');
-      avatarImg.src = `${import.meta.env.BASE_URL}mascott.png`;
+      avatarImg.src = `${import.meta.env.BASE_URL}mascot.png`;
       avatarImg.alt = 'Chatty';
       avatarImg.className = 'msg-avatar-mascot';
       roleSpan.appendChild(avatarImg);
