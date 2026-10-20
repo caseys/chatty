@@ -54,6 +54,7 @@ import type {
   SystemTelemetry,
 } from '../types/index.ts';
 import { clearSpeechModelCache } from './model-cache.ts';
+import { AFTER_HEAVY_MS, AFTER_LOAD_MS, settle, settleAfterLoad } from './settle.ts';
 
 const WELCOME_MESSAGE =
   'Welcome to Chatty, I can do anything your browser can do. For example: ask me to make MIDI music, ' +
@@ -192,8 +193,6 @@ export class VoiceAssistantEngine {
   private codingModelId: string = DEFAULT_SETTINGS.codingModelId;
   private voiceId: string = DEFAULT_SETTINGS.voiceId;
   private speechEnabled: boolean = DEFAULT_SETTINGS.speechEnabled;
-  // Pause between model loads (?gap=<ms>), set in initialize()
-  private loadGapMs = 250;
   // Deleting the speech models' downloads (speech off); loading them again waits for it
   private speechEviction: Promise<void> = Promise.resolve();
   private sidebarOpen: boolean = DEFAULT_SETTINGS.sidebarOpen;
@@ -535,12 +534,9 @@ export class VoiceAssistantEngine {
     this.stateCoordinator.setModelState('tts', this.speechEnabled ? 'downloading' : 'unloaded');
 
     // Phone tuning, overridable from the URL for on-device testing:
-    //   ?stt=native|whistle   ?chat=270m   ?gap=<ms between model loads>
+    //   ?stt=native|whistle   ?chat=270m
     const params = typeof location !== 'undefined' ? new URLSearchParams(location.search) : null;
     const sttPref = params?.get('stt');
-    // Short pause between model loads, the same on every device (?gap=<ms> to change)
-    const loadGapMs = Number(params?.get('gap') ?? 250) || 0;
-    this.loadGapMs = loadGapMs;
     // Whistle on every device; the browser's own recognizer only on request (?stt=native)
     if (sttPref === 'native' && NativeSpeechRecognizer.isSupported()) {
       this.setupNativeStt();
@@ -562,7 +558,7 @@ export class VoiceAssistantEngine {
       if (splitPipeline) {
         const phoneModels = new PhoneModelSet({
           smallChat: params?.get('chat') === '270m',
-          loadGapMs,
+          loadGapMs: AFTER_LOAD_MS,
           onModelLoadStart: writeLoadStage,
         });
         this.phoneModels = phoneModels;
@@ -591,6 +587,7 @@ export class VoiceAssistantEngine {
             // The UI renders the status line from this (which model, N of M)
             this.events.onLlmProgress?.(loaded, total, pct, mb, totalMb, current);
           })
+          .finally(settleAfterLoad)
           .then(() => {
             clearLlmLoadMarker();
             if (ticket !== this.llmLoadTicket) return;
@@ -625,7 +622,7 @@ export class VoiceAssistantEngine {
       .then(() => startLlm())
       .catch(() => {})
       .then(() =>
-        this.speechEnabled ? this.loadGap().then(() => this.loadSpeechModels()) : this.events.onSttLoadSettled?.()
+        this.speechEnabled ? this.loadSpeechModels() : this.events.onSttLoadSettled?.()
       )
       .finally(clearLoadStage);
 
@@ -656,13 +653,12 @@ export class VoiceAssistantEngine {
     await this.events.beforeModelDownload?.();
   }
 
-  private loadGap(): Promise<void> {
-    return this.loadGapMs > 0 ? new Promise((r) => setTimeout(r, this.loadGapMs)) : Promise.resolve();
-  }
-
   /** Speech is off: its models' downloads are deleted (they download again if it's turned on). */
   private evictSpeechModels(): void {
-    this.speechEviction = this.speechEviction.then(() => clearSpeechModelCache()).catch(() => {});
+    this.speechEviction = this.speechEviction
+      .then(() => clearSpeechModelCache())
+      .then(() => settle(AFTER_HEAVY_MS))
+      .catch(() => {});
   }
 
   /** Piper, then Whistle, one at a time. Stops (and frees them) if speech is turned off meanwhile. */
@@ -679,6 +675,7 @@ export class VoiceAssistantEngine {
         const totalMb = (total / (1024 * 1024)).toFixed(0);
         this.events.onTtsProgress?.(loaded, total, pct, mb, totalMb);
       })
+      .finally(settleAfterLoad)
       .then(() => {
         if (this.speechEnabled) this.stateCoordinator.setModelState('tts', 'ready');
       })
@@ -697,12 +694,12 @@ export class VoiceAssistantEngine {
       this.events.onSttLoadSettled?.();
       return;
     }
-    await this.loadGap();
     await this.downloadsAllowed();
     if (!this.speechEnabled) return;
     writeLoadStage('speech recognition');
     await this.sttProvider
       .initialize((loaded, total) => this.events.onSttProgress?.(loaded, total))
+      .finally(settleAfterLoad)
       .catch((err) => {
         console.warn('Whistle STT pre-warm warning:', err);
       })
@@ -1394,6 +1391,7 @@ export class VoiceAssistantEngine {
       if (localModel) await this.llmProvider.dispose();
       if (this.localChat && this.localChat.modelId !== localModel?.id) await this.localChat.dispose();
       this.useLocalChat(localModel?.id ?? null);
+      await settle(AFTER_HEAVY_MS);
     }
 
     if (this.codingModelId === modelId) {
@@ -1440,6 +1438,7 @@ export class VoiceAssistantEngine {
           // Same status line and meter as startup loading (with live MB/s)
           this.events.onLlmProgress?.(loaded, total, pct, mb, totalMb, { label: modelName, loaded, total });
         })
+        .finally(settleAfterLoad)
         .then(() => {
           if (ticket !== this.llmLoadTicket) return;
           clearLoadFailure();
@@ -1472,11 +1471,12 @@ export class VoiceAssistantEngine {
     const models = this.stateCoordinator.getSnapshot().models;
     if (models.llm === 'ready') {
       await this.chatLlm.dispose();
+      await settle(AFTER_HEAVY_MS);
       await this.loadChatModel();
     }
     if (this.speechEnabled && models.tts === 'ready') {
       await Promise.all([this.ttsProvider.dispose(), this.sttProvider.dispose()]);
-      await this.loadGap();
+      await settle(AFTER_HEAVY_MS);
       await this.loadSpeechModels().finally(clearLoadStage);
     }
   }
@@ -1542,6 +1542,7 @@ export class VoiceAssistantEngine {
           `Pulling Piper Voice: ${mb} / ${totalMb} MB (${pct}%)...`
         );
       })
+      .finally(settleAfterLoad)
       .then(() => {
         this.stateCoordinator.setModelState('tts', 'ready');
         this.events.onStatusChange?.(null);

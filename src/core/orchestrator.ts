@@ -37,6 +37,7 @@ import {
   inspectExecutableCode,
   syntaxErrorLine,
 } from '../tools/javascript-runtime.ts';
+import { AFTER_HEAVY_MS, settle } from './settle.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 
 /** "Error at line 7: x is not defined" (the line when the browser reported it) */
@@ -1197,6 +1198,8 @@ export class ConversationOrchestrator {
             // screen alone, and nothing happens when the screen is already empty.
             if (programDraws(executableCode) && this.javascriptRuntime.hasVisualContent?.()) {
               await this.javascriptRuntime.resetVisual();
+              // The old program's canvases and sounds are freed before the new one allocates
+              await settle(AFTER_HEAVY_MS);
             }
             const execResult = await this.javascriptRuntime.execute(executableCode, undefined, {
               onSpeak: (phrase) => {
@@ -1447,10 +1450,14 @@ export class ConversationOrchestrator {
     // Small models fix the right thing when shown the exact line
     const lineText = run.errorLine ? run.code.split('\n')[run.errorLine - 1]?.trim() : '';
     const where = lineText ? ` at line ${run.errorLine} (\`${lineText.slice(0, 160)}\`)` : '';
-    void this.submitUserInput(
-      `Your program failed${where}: ${run.error}\nReply with the complete corrected program, JavaScript only.`,
-      { autoFix: run.code }
-    );
+    // A short pause before the model runs again, unless the user moves on meanwhile
+    void settle(AFTER_HEAVY_MS).then(() => {
+      if (this.scheduler.getActiveTurnId()) return;
+      return this.submitUserInput(
+        `Your program failed${where}: ${run.error}\nReply with the complete corrected program, JavaScript only.`,
+        { autoFix: run.code }
+      );
+    });
   }
 
   speakOutOfTurn(text: string): Promise<void> {
