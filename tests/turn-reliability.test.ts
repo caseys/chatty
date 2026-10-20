@@ -160,7 +160,7 @@ describe('a fix whose edits match nothing', () => {
 describe('a fix that loses the program', () => {
   const lostFixes = [
     ['chat plus a bare speak() in a block', 'Here\'s the corrected program:\n```javascript\nspeak("Sorry about that.");\n```'],
-    ['a program that no longer draws', 'const n = 1 + 1;\nspeak(n);'],
+    ['a program that no longer draws', 'const a = 1;\nconst b = 2;\nconst c = 3;\nconst n = a + b + c;\nconst m = n * 2;\nspeak(m);'],
     ['prose only', 'Sure, let me fix that for you right away.'],
   ] as const;
 
@@ -496,5 +496,23 @@ describe('a fix that says the same thing again', () => {
     expect(said).toHaveLength(1);
     // The fix did run
     expect(executed).toEqual([DRAWING, FIXED]);
+  });
+});
+
+describe('a fix that comes back cut off', () => {
+  it('is not run, and the status says so', async () => {
+    const CUT = DRAWING.slice(0, DRAWING.indexOf(', 0, Math.PI'));
+    const llm = new QueueLlm([DRAWING, CUT]);
+    const { executed, runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 3 }]);
+    const statuses: RunStatus[] = [];
+    const orchestrator = orchestratorFor(llm, {
+      autoFixErrors: true,
+      javascriptRuntime: runtime,
+      events: { onRunStatus: (_id, status) => statuses.push(status) },
+    });
+    await orchestrator.submitUserInput('draw a red circle');
+    await vi.waitFor(() => expect(statuses.some((s) => s.text.includes('came back incomplete'))).toBe(true), { timeout: 3000 });
+    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+    expect(executed).toEqual([DRAWING]);
   });
 });

@@ -686,6 +686,8 @@ export class ConversationOrchestrator {
     // rules, examples and history are for writing programs, and small models rewrote the
     // program they saw there, bug and all). The turn whose program it fixes:
     const fixedTurnId = options?.autoFix ? this.lastRun?.turnId : undefined;
+    // The line the fix request marked, where the corrected line goes back
+    const fixLine = options?.autoFix ? this.lastRun?.errorLine : undefined;
     if (options?.autoFix) {
       systemPrompt = FIX_SYSTEM_PROMPT;
       // One message, the user's: the failed program is handed over to fix, not shown as the
@@ -1013,7 +1015,7 @@ export class ConversationOrchestrator {
         if (this.scheduler.isTurnValid(turnId)) {
           // A fix reply is search/replace edits to the failed program: they're applied, and the
           // code panel shows the whole program that runs
-          const fixedProgram = options?.autoFix ? applyFixReply(options.autoFix, rawContent) : rawContent;
+          const fixedProgram = options?.autoFix ? applyFixReply(options.autoFix, rawContent, fixLine) : rawContent;
           if (fixedProgram !== rawContent) this.events.onRawOutput?.(turnId, fixedProgram);
           const inspected = inspectExecutableCode(fixedProgram);
           const executableCode = inspected.code;
@@ -1030,10 +1032,17 @@ export class ConversationOrchestrator {
           // Edits that matched nothing leave the same failing program: running it again would
           // only repeat the error (and its sounds and words)
           const unchangedProgram = !!originalCode && fixedProgram.replace(/\s+/g, '') === originalCode.replace(/\s+/g, '');
+          // A fix that came back cut off: it doesn't parse, so running it would only fail
+          const incompleteProgram =
+            !!originalCode && !lostProgram && !unchangedProgram && (await syntaxErrorLine(executableCode)) !== undefined;
 
-          if (lostProgram || unchangedProgram) {
+          if (lostProgram || unchangedProgram || incompleteProgram) {
             const failed = this.lastRun;
-            const why = lostProgram ? 'The fix lost the program' : "The fix didn't change the program";
+            const why = lostProgram
+              ? 'The fix lost the program'
+              : unchangedProgram
+                ? "The fix didn't change the program"
+                : 'The fix came back incomplete';
             // The code panel shows what the model sent instead, to see why it didn't apply
             this.events.onRawOutput?.(turnId, `// ${why}. The model replied:\n${rawContent}`);
             this.events.onRunStatus?.(turnId, {
