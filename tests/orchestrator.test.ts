@@ -426,7 +426,7 @@ describe('Model Manager & Storage Integrity', () => {
   });
 });
 
-describe('Full 10-Case Conversation Quality & Interruption Evaluation Suite', () => {
+describe('Full 9-Case Conversation Quality & Interruption Evaluation Suite', () => {
   it('passes 100% of the conversation quality, reference resolution, memory, and barge-in tests', async () => {
     const report = await runConversationEvaluationSuite({
       createLlmProvider: () => new TestStubLlmProvider({ tokenDelayMs: 5 }),
@@ -436,7 +436,7 @@ describe('Full 10-Case Conversation Quality & Interruption Evaluation Suite', ()
       expect(r.passed, `${r.id} (${r.name}): ${r.details}`).toBe(true);
     }
     expect(report.passRatePercent).toBe(100);
-    expect(report.totalCases).toBe(10);
+    expect(report.totalCases).toBe(9);
   });
 
   it('ignores partial transcripts from triggering duplicate LLM responses', async () => {
@@ -1231,7 +1231,7 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         },
         'standard'
       );
-      expect(built.systemPrompt).toContain('ALL messages to the user go through speak(text)');
+      expect(built.systemPrompt).toContain('All messages to the user go through speak(text)');
     });
 
     it('runs interactive widgets and canvas games in iframe mode', async () => {
@@ -1307,8 +1307,7 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
       // Verify that next prompt history uses rawCode for assistant turns
       const promptData = (orchestrator as any).buildModelPrompt(
         'Can you play another?',
-        (orchestrator as any).memoryStore.resolveContextForQuery('Can you play another?', 4000),
-        'direct'
+        (orchestrator as any).memoryStore.resolveContextForQuery('Can you play another?', 4000)
       );
       // The conversation's own turns, after the format turn
       const assistantPromptTurn = promptData.promptMessages

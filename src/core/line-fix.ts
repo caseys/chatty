@@ -1,3 +1,4 @@
+import { parse } from 'acorn';
 /**
  * Fixing a failed program. A fix turn has its own short system prompt (FIX_SYSTEM_PROMPT) and one
  * message, the user's: what the program is for, the error, what to reply, then the whole program
@@ -8,10 +9,37 @@
  * reply that is a whole program, or search/replace blocks, is still taken.
  */
 
+/** The function (declaration, expression or arrow with a body) around a line: its first and last line */
+export function enclosingFunction(code: string, line: number | undefined): { start: number; end: number; name: string } | null {
+  if (!line) return null;
+  let ast: unknown;
+  try {
+    ast = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true, locations: true });
+  } catch {
+    return null;
+  }
+  let best: { start: number; end: number; name: string } | null = null;
+  const visit = (node: Record<string, unknown>) => {
+    const loc = node.loc as { start: { line: number }; end: { line: number } } | undefined;
+    if (/Function/.test(String(node.type)) && loc && loc.start.line <= line && loc.end.line >= line && loc.end.line > loc.start.line) {
+      if (!best || loc.end.line - loc.start.line < best.end - best.start) {
+        const id = node.id as { name?: string } | null;
+        best = { start: loc.start.line, end: loc.end.line, name: id?.name ?? '' };
+      }
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach((child) => child && typeof child.type === 'string' && visit(child));
+      else if (value && typeof value === 'object' && typeof (value as { type?: unknown }).type === 'string') visit(value as Record<string, unknown>);
+    }
+  };
+  visit(ast as Record<string, unknown>);
+  return best;
+}
+
 /** The system prompt of a fix turn: only what fixing needs */
 export const FIX_SYSTEM_PROMPT = [
-  "You fix JavaScript programs that run in the user's browser. Each request gives the error and the program, with the failing line between // >>> ERROR and // <<< ERROR comments.",
-  'Reply with one comment line naming the cause (// Cause: ...), then only the corrected line (a few lines if needed): JavaScript, without the ERROR comments, nothing else.',
+  "You fix JavaScript programs that run in the user's browser. Each request gives the error and the program, with the failing code between // >>> ERROR and // <<< ERROR comments.",
+  'Reply with one comment line naming the cause (// Cause: ...), then only the corrected marked code (the line, or the whole function when one is marked), without the ERROR comments.',
 ].join('\n');
 
 const MARK_START = '// >>> ERROR';
@@ -22,12 +50,37 @@ const MARKER_LINE = /^\s*\/\/\s*(?:>>>|<<<)\s*ERROR\b.*$/;
 const INSTRUCTION_LINE =
   /^\s*(?:(?:Reply with|First write|Then write|Second write)\b.*(?:Cause|corrected|program)|(?:Marked line|Corrected line):?\s*$)/i;
 
-export function fixRequest(request: string, code: string, line: number | undefined, error: string, hint?: string): string {
+/**
+ * The fix request. With `block` (a second try, after a fix that changed nothing), the whole
+ * function around the failing line is marked and asked for instead of the one line.
+ */
+export function fixRequest(
+  request: string,
+  code: string,
+  line: number | undefined,
+  error: string,
+  hint?: string,
+  block?: { start: number; end: number }
+): string {
   const task = request.replace(/\s+/g, ' ').trim().replace(/[.!?:,;\s]+$/, '').slice(0, 200);
   const problem = error.trim().replace(/\.+$/, '');
   const lines = code.split('\n');
   const at = line && line >= 1 && line <= lines.length ? line : undefined;
   const failing = at ? lines[at - 1].trim() : '';
+  if (block && block.start >= 1 && block.end <= lines.length && block.start <= block.end) {
+    const indent = lines[block.start - 1].match(/^\s*/)?.[0] ?? '';
+    lines.splice(block.end, 0, `${indent}${MARK_END}`);
+    lines.splice(block.start - 1, 0, `${indent}${MARK_START}: ${problem}${at ? ` (at line ${at})` : ''}`);
+    return [
+      ...(task ? [`This program was written for: ${task}`] : []),
+      `It failed in the marked function: ${problem}`,
+      ...(hint ? [hint] : []),
+      'Changing only the failing line did not fix it. Reply with one comment line saying what caused the error (// Cause: ...), then the whole marked function, corrected, without the ERROR comments.',
+      '```js',
+      lines.join('\n'),
+      '```',
+    ].join('\n');
+  }
   if (at) {
     const indent = lines[at - 1].match(/^\s*/)?.[0] ?? '';
     lines.splice(at - 1, 1, `${indent}${MARK_START}: ${problem}`, lines[at - 1], `${indent}${MARK_END}`);
@@ -102,14 +155,15 @@ function replyCode(reply: string): string[] {
     .split('\n')
     // "Corrected line: foo();" copied the label the request ended with
     .map((l, i) => (i === 0 ? l.replace(/^\s*Corrected line:[ \t]*/i, '') : l))
-    .filter((l) => !MARKER_LINE.test(l) && !INSTRUCTION_LINE.test(l) && !/^\s*```/.test(l));
+    // …nor the "// Cause:" line, which explains the fix and isn't part of it
+    .filter((l) => !MARKER_LINE.test(l) && !INSTRUCTION_LINE.test(l) && !/^\s*```/.test(l) && !/^\s*\/\/\s*Cause\b/i.test(l));
 }
 
 /**
  * The program after a fix reply: the corrected marked line put back in its place (`line`), or
  * search/replace blocks applied. A reply as long as the program is taken as a whole new program.
  */
-export function applyFixReply(program: string, reply: string, line?: number): string {
+export function applyFixReply(program: string, reply: string, line?: number, endLine?: number): string {
   const blocks = [...reply.matchAll(SEARCH_REPLACE)];
   // Edit markers but no edit that can be read: nothing to apply (running it would only fail)
   if (blocks.length === 0 && /^\s*(?:<{5,}|>{5,}|={5,})/m.test(reply)) return program;
@@ -128,7 +182,10 @@ export function applyFixReply(program: string, reply: string, line?: number): st
   while (code.length > 0 && !code[0].trim()) code.shift();
   const lines = program.split('\n');
   const substantial = code.filter((l) => l.trim() && !/^\s*\/\//.test(l)).length;
-  if (!line || line < 1 || line > lines.length || substantial >= Math.max(5, lines.length * 0.6)) {
+  const last = endLine && endLine >= (line ?? 0) && endLine <= lines.length ? endLine : line;
+  const replaced = line && last ? last - line + 1 : 1;
+  // As long as the program (and clearly longer than what it replaces): a whole new program
+  if (!line || !last || line < 1 || line > lines.length || substantial >= Math.max(5, replaced + 5, lines.length * 0.6)) {
     return code.join('\n');
   }
   if (substantial === 0) return program;
@@ -138,5 +195,5 @@ export function applyFixReply(program: string, reply: string, line?: number): st
   // The corrected line, at the failing line's indentation when it came back without one
   const indent = lines[line - 1].match(/^\s*/)?.[0] ?? '';
   const fixed = code.map((l) => (l.trim() && !/^\s/.test(l) ? indent + l : l));
-  return [...lines.slice(0, line - 1), ...fixed, ...lines.slice(line)].join('\n');
+  return [...lines.slice(0, line - 1), ...fixed, ...lines.slice(last)].join('\n');
 }

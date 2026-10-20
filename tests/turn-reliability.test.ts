@@ -222,7 +222,7 @@ describe('a fix that loses the program', () => {
   });
 
   it('lets a fix that still draws run, and makes it the current program', async () => {
-    const fixed = DRAWING.replace('ctx.fill();', 'ctx.fill(); // fixed');
+    const fixed = DRAWING.replace('ctx.fill();', 'ctx.fill();\nctx.stroke();');
     const llm = new QueueLlm([DRAWING, fixed]);
     const { executed, runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 3 }, {}]);
     const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
@@ -245,7 +245,7 @@ describe('a fix that loses the program', () => {
       ...extra,
     });
     const built = (orchestrator as unknown as {
-      buildModelPrompt(u: string, c: unknown, m: string): { promptMessages: Array<{ role: string; content: string }> };
+      buildModelPrompt(u: string, c: unknown): { promptMessages: Array<{ role: string; content: string }> };
     }).buildModelPrompt(
       'and now?',
       {
@@ -260,8 +260,7 @@ describe('a fix that loses the program', () => {
         relevantMemories: [],
         conversationSummary: null,
         resolvedReferencesNote: null,
-      },
-      'direct'
+      }
     );
     expect(built.promptMessages.slice(FORMAT_TURNS.length)).toEqual([
       { role: 'user', content: 'hello' },
@@ -359,7 +358,7 @@ describe('the prompt budget counts what the prompt really holds', () => {
     const orchestrator = orchestratorFor(new QueueLlm([], 4096, 1536), { memoryStore: store });
     store.addMessage({ id: 'u1', turnId: 't1', role: 'user', canonicalContent: 'Hi', timestamp: 0 });
     // The system prompt's rules and the format turns come to a few hundred tokens
-    expect(store.getCurrentContextTokens()).toBeGreaterThan(250);
+    expect(store.getCurrentContextTokens()).toBeGreaterThan(150);
     expect(orchestrator).toBeDefined();
   });
 
@@ -427,18 +426,18 @@ describe('rules picked for small models', () => {
     const tip = promptRules('Code a tip calculator app with a UI for the bill and tip %', true);
     expect(tip).toContain('- What you add to document.body appears in a card');
     expect(tip).toContain('Use HTML and CSS for interfaces');
-    expect(tip).not.toContain('Web MIDI');
+    expect(tip).not.toContain('MIDI output');
     expect(tip).not.toContain('<canvas>');
     expect(tip).not.toMatch(/^\d+\. /m);
     const music = promptRules('Play a music loop with a G major chord on piano', true);
-    expect(music).toContain('Web MIDI');
+    expect(music).toContain('MIDI output');
     // An edit is matched against the program it changes too
-    expect(promptRules('make it faster\nconst out = (await navigator.requestMIDIAccess())', true)).toContain('Web MIDI');
+    expect(promptRules('make it faster\nconst out = (await navigator.requestMIDIAccess())', true)).toContain('MIDI output');
     expect(promptRules('Draw a rainbow over green hills', true)).toContain('<canvas>');
     expect(promptRules('Who was Ada Lovelace?', true)).toContain('Wikipedia');
     // Unfiltered: every rule
     const all = promptRules();
-    for (const part of ['Web MIDI', '<canvas>', '<svg>', 'WebGL', 'Wikipedia']) expect(all).toContain(part);
+    for (const part of ['MIDI output', '<canvas>', '<svg>', 'WebGL', 'Wikipedia']) expect(all).toContain(part);
   });
 });
 
@@ -556,7 +555,7 @@ describe('fix turns and compaction', () => {
 
 describe('the optional rules follow the request', () => {
   const canvas = 'Use <canvas>';
-  const sound = 'Sound: music and instruments use Web MIDI';
+  const sound = 'Sound: music and instruments go to the MIDI output out';
   const facts = 'public API';
   const cases: Array<[string, { canvas?: boolean; sound?: boolean; facts?: boolean }]> = [
     ['Draw a rainbow over green hills on a canvas', { canvas: true }],
@@ -646,5 +645,21 @@ describe('a reply that only talks', () => {
     await orchestrator.submitUserInput('How are you?');
     await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
     expect(llm.turns.length).toBe(1);
+  });
+});
+
+describe('a fix that changes nothing', () => {
+  it('is followed once by a fix of the whole function around the failing line', async () => {
+    const program = 'function playAll() {\n  const plays = [1, 2].map((n) => play(n));\n  plays.forEach((p) => p.stop());\n}\nplayAll();\nspeak("Playing.");';
+    const fixedFunction = 'function playAll() {\n  [1, 2].forEach((n) => play(n));\n}';
+    const llm = new QueueLlm([program, '// Cause: p is undefined\nplays.forEach((p) => p.stop());', `// Cause: play() returns nothing\n${fixedFunction}`]);
+    const { executed, runtime } = fakeRuntime([{ error: "undefined is not an object (evaluating 'p.stop')", errorLine: 3 }]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Play two notes');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 8000 });
+    const blockAsk = llm.turns[2].messages.at(-1)!.content;
+    expect(blockAsk).toContain('the whole marked function, corrected');
+    expect(blockAsk).toContain('// >>> ERROR');
+    expect(executed[1]).toBe(`${fixedFunction}\nplayAll();\nspeak("Playing.");`);
   });
 });

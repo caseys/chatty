@@ -375,6 +375,42 @@ export async function syntaxErrorLine(code: string): Promise<number | undefined>
   }
 }
 
+/**
+ * The program without its comments: they cost tokens in every later prompt and fix request, and
+ * models write long ones. Found by the parser, so // inside a string or a template stays. A line
+ * that held only a comment goes; code before a comment on its line stays. Code that doesn't
+ * parse is left as it is.
+ */
+export function stripComments(code: string): string {
+  const comments: Array<{ start: number; end: number }> = [];
+  try {
+    parse(code, {
+      ecmaVersion: 'latest',
+      sourceType: 'script',
+      allowAwaitOutsideFunction: true,
+      allowReturnOutsideFunction: true,
+      onComment: (_block: boolean, _text: string, start: number, end: number) => comments.push({ start, end }),
+    });
+  } catch {
+    return code;
+  }
+  let out = code;
+  for (const { start, end } of comments.reverse()) {
+    const lineStart = out.lastIndexOf('\n', start - 1) + 1;
+    const nextNewline = out.indexOf('\n', end);
+    const lineEnd = nextNewline < 0 ? out.length : nextNewline;
+    const before = out.slice(lineStart, start);
+    const after = out.slice(end, lineEnd);
+    if (!before.trim() && !after.trim()) {
+      // The whole line was the comment: the line goes, with its newline
+      out = out.slice(0, lineStart) + out.slice(nextNewline < 0 ? lineEnd : lineEnd + 1);
+    } else {
+      out = out.slice(0, start).replace(/[ \t]+$/, '') + out.slice(end);
+    }
+  }
+  return out;
+}
+
 /** Where the bracket that `close` closes opens (scanning back), or -1 */
 function matchingOpen(text: string, close: number, open: string, shut: string): number {
   let depth = 0;
@@ -1475,11 +1511,28 @@ export class JavascriptRuntime {
       } catch {}
       if (!shared) return new NativeAudioContext(options);
       const local = {};
-      return new Proxy(shared.context, {
+      const contextProxy = new Proxy(shared.context, {
         get(target, prop) {
           if (prop in local) return local[prop];
           if (prop === 'destination') return shared.output;
           if (prop === 'close' || prop === 'suspend') return () => Promise.resolve();
+          // A method Web Audio doesn't have: a play-like one (ctx.createNote('G2', 0.5),
+          // ctx.playChord(...)) plays on the synth, a made-up create…() gives a stand-in node whose
+          // play-like methods play, and anything else does nothing and returns the context (so
+          // chains keep going). Each is logged as imagined.
+          if (typeof prop === 'string' && !(prop in target) && !PROTOCOL_NAMES.has(prop)) {
+            return (...args) => {
+              imagined('audioContext.' + prop + '(' + argText(args) + ')');
+              // createDrumMachine() makes something; createNote('G2', 500) plays
+              if (/^create/i.test(prop) && args.length === 0) return standInNode(prop.replace(/^create/i, '') || 'node');
+              if (PLAY_NAME.test(prop)) {
+                if (args.length > 0) forgivingOut.send(sendArgs(args));
+                return contextProxy;
+              }
+              if (/^create/i.test(prop)) return standInNode(prop.replace(/^create/i, '') || 'node');
+              return contextProxy;
+            };
+          }
           const value = Reflect.get(target, prop, target);
           return typeof value === 'function' ? value.bind(target) : value;
         },
@@ -1488,6 +1541,7 @@ export class JavascriptRuntime {
           return true;
         },
       });
+      return contextProxy;
     }
     window.AudioContext = SharedAudioContext;
     window.webkitAudioContext = SharedAudioContext;
@@ -1604,6 +1658,22 @@ export class JavascriptRuntime {
     function argText(args) {
       try { return args.map((a) => typeof a === 'function' ? 'fn' : JSON.stringify(a)).join(', '); } catch { return '…'; }
     }
+    // A made-up play call's arguments as a send() message: a bare note ('G2', 500) or a frequency
+    // in Hz (440, 0.5) gets an instrument in front, and a frequency becomes its note number
+    function sendArgs(args) {
+      const [first, ...rest] = args;
+      // An array is a whole message when it starts with an instrument name (['drums', 'kick']),
+      // otherwise a list of notes (['C4', 'E4', 'G4'] or [60, 64, 67])
+      if (Array.isArray(first)) {
+        const startsWithInstrument = typeof first[0] === 'string' && !/^[A-Ga-g](?:#|b)?-?\\d/.test(first[0]);
+        return startsWithInstrument ? first : ['piano', first, ...rest];
+      }
+      if (typeof first === 'number' && first > 127) return ['piano', Math.round(69 + 12 * Math.log2(first / 440)), ...rest];
+      if (typeof first === 'number' || (typeof first === 'string' && /^[A-Ga-g](?:#|b)?-?\\d?(?:\\s|$|m|maj|min|dim|aug|sus|7)/.test(first))) {
+        return ['piano', first, ...rest];
+      }
+      return args;
+    }
     const forgivingCache = new WeakMap();
     function forgiving(target, name, output) {
       if (!target || (typeof target !== 'object' && typeof target !== 'function')) return target;
@@ -1628,7 +1698,7 @@ export class JavascriptRuntime {
             const port = output?.() ?? (typeof obj.send === 'function' ? obj : null);
             if (PLAY_NAME.test(prop) && port) {
               if (Array.isArray(args[0])) port.send(args[0], args[1]);
-              else port.send(args);
+              else port.send(sendArgs(args));
               return proxy;
             }
             if (LOOKUP_NAME.test(prop) && port) return forgiving(port, 'out', output);
@@ -1640,6 +1710,21 @@ export class JavascriptRuntime {
       return proxy;
     }
     const forgivingOut = forgiving(defaultMidiOut, 'out');
+
+    // What a made-up audioContext.createX() returns: a node-like object that connects, starts and
+    // stops harmlessly, and whose play-like methods (made up too) play on the synth
+    function standInNode(kind) {
+      const node = {
+        // The stand-in itself, so chains (node.connect(dest).play(…)) stay on it
+        connect() { return proxy; },
+        disconnect() {},
+        start() {},
+        stop() {},
+        send(data, time) { forgivingOut.send(Array.isArray(data) ? data : sendArgs([data]), time); },
+      };
+      const proxy = forgiving(node, kind.charAt(0).toLowerCase() + kind.slice(1));
+      return proxy;
+    }
 
     // Element.clear() (document.body.clear() is a common guess): empties it like clear()
     if (!('clear' in HTMLElement.prototype)) {

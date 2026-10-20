@@ -41,7 +41,7 @@ describe('fix requests for failed programs', () => {
   });
 
   it('has its own short system prompt, only about fixing', () => {
-    expect(FIX_SYSTEM_PROMPT).toContain('only the corrected line');
+    expect(FIX_SYSTEM_PROMPT).toContain('only the corrected marked code');
     expect(FIX_SYSTEM_PROMPT).not.toMatch(/MIDI|canvas|Wikipedia|<examples>/);
   });
 });
@@ -50,11 +50,10 @@ describe('applying a fix reply', () => {
   const lines = ['function play() {', '  for (let i = 0; i < 4; i++) {', '    const t = start + i;', '  }', '  setTimeout(() => out.send(x, t), 1000);', '}', 'play();'];
   const failed = lines.join('\n');
 
-  it('puts the corrected line back in place of the marked one, indented like it', () => {
+  it('puts the corrected line back in place of the marked one, indented like it, without the cause', () => {
     const reply = '```js\n// Cause: t only exists in the loop\nsetTimeout(() => out.send(x, start), 1000);\n```';
     expect(applyFixReply(failed, reply, 5).split('\n')).toEqual([
       ...lines.slice(0, 4),
-      '  // Cause: t only exists in the loop',
       '  setTimeout(() => out.send(x, start), 1000);',
       ...lines.slice(5),
     ]);

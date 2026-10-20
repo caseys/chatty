@@ -230,6 +230,19 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
       velocity = undefined;
     }
     const { channel, drums, program } = this.channelFor(String(instrument));
+    const level0 = velocity === undefined || !Number.isFinite(Number(velocity)) ? 100 : Math.max(0, Math.min(127, Math.round(Number(velocity))));
+    // A named pattern ('boom-chuck', 'walking G major') plays a whole 4/4 bar over the duration
+    const pattern = typeof notes === 'string' ? barPattern(notes, drums) : null;
+    if (pattern) {
+      let barMs = Number(duration) > 0 ? Number(duration) : 2000;
+      if (barMs < 20) barMs *= 1000; // seconds
+      const beatMs = barMs / 4;
+      return pattern.flatMap(({ beat, note, beats }) => {
+        const offset = beat * beatMs;
+        const on = { offset, message: [0x90 | channel, note, level0] };
+        return drums ? [on] : [on, { offset: offset + beats * beatMs * 0.95, message: [0x80 | channel, note, 0] }];
+      });
+    }
     let { notes: numbers, sequence } = readNotes(notes, drums, program);
     // Arguments out of place (['bass', 'walking', 'G', beat]): the notes are the first readable
     // value after the instrument, and the numbers that follow are velocity, then duration
@@ -617,6 +630,44 @@ function noteValues(value: unknown, drums: boolean, program: number): { notes: n
 
   const note = clampNote(pitch(letter, accidental, octaveText === undefined ? (bass ? 2 : 4) : Number(octaveText)));
   return { notes: [bass ? toBassRange(note) : note], scale: false };
+}
+
+type PatternNote = { beat: number; note: number; beats: number };
+
+/**
+ * One 4/4 bar of a named pattern, in beats: drum grooves ('boom-chuck', 'rock', 'shuffle',
+ * 'four on the floor') and walking bass lines ('walking G major'). Musical knowledge lives here
+ * instead of in the prompt, so a program only has to name what it wants.
+ */
+function barPattern(text: string, drums: boolean): PatternNote[] | null {
+  const key = normalizeName(text).replace(/[-_]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (drums) {
+    const kick = drumNote('kick') ?? 36;
+    const snare = drumNote('snare') ?? 38;
+    const hat = drumNote('hihat') ?? 42;
+    const hit = (beat: number, note: number) => ({ beat, note, beats: 0.25 });
+    if (/^(boom ?chuck|oom ?pah)( beat| groove| pattern)?$/.test(key)) return [hit(0, kick), hit(1, snare), hit(2, kick), hit(3, snare)];
+    if (/^(rock|back ?beat|basic|pop)( beat| groove| pattern)?$/.test(key)) {
+      return [0, 1, 2, 3, 0.5, 1.5, 2.5, 3.5].map((b) => hit(b, hat)).concat([hit(0, kick), hit(2, kick), hit(1, snare), hit(3, snare)]);
+    }
+    if (/^(shuffle|swing)( beat| groove| pattern)?$/.test(key)) {
+      return [0, 1, 2, 3].flatMap((b) => [hit(b, hat), hit(b + 2 / 3, hat)]).concat([hit(0, kick), hit(2, kick), hit(1, snare), hit(3, snare)]);
+    }
+    if (/^(four on the floor|disco|house)( beat| groove| pattern)?$/.test(key)) {
+      return [0, 1, 2, 3].flatMap((b) => [hit(b, kick), hit(b + 0.5, hat)]).concat([hit(1, snare), hit(3, snare)]);
+    }
+    return null;
+  }
+  const walking = /^walking(?: bass)?(?: line)?(?: in| on)? ([a-g](?:#|b)?.*)$/i.exec(key);
+  if (!walking) return null;
+  const chord = /^([a-g])(#|b)?\s*(.*)$/i.exec(walking[1]);
+  if (!chord) return null;
+  const intervals = chordIntervals(chord[3].replace(/\b(chord|bass|line)\b/g, '').trim()) ?? [0, 4, 7];
+  const minor = intervals[1] === 3;
+  // One note per beat stepping through the chord: root, third, fifth, then the sixth (seventh in minor)
+  const steps = [0, intervals[1], intervals[2], minor ? 10 : 9];
+  const root = pitch(chord[1], chord[2], 2);
+  return steps.map((step, beat) => ({ beat, note: toBassRange(clampNote(root + step)), beats: 1 }));
 }
 
 /** Bass notes written an octave or two too high are brought down into bass range. */

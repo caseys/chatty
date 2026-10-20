@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { callUncalledFunctions, exposeFunctionsToInlineHandlers, inspectExecutableCode } from '../src/tools/javascript-runtime.ts';
+import { callUncalledFunctions, exposeFunctionsToInlineHandlers, inspectExecutableCode, stripComments } from '../src/tools/javascript-runtime.ts';
 
 describe('running code the model wrapped or forgot to call', () => {
   it('runs a fenced block, saying the talk before and after it with speak()', () => {
@@ -290,5 +290,17 @@ describe('const that a program changes', () => {
     const code = 'const x = 50, y = 50;\nconst dx = 3;\nfunction f() { x += dx; y++; }\nconst [a, b] = [1, 2];\na = 3;';
     expect(await letReassignedConsts(code)).toBe('let   x = 50, y = 50;\nconst dx = 3;\nfunction f() { x += dx; y++; }\nlet   [a, b] = [1, 2];\na = 3;');
     expect(await letReassignedConsts('const a = 1;\nspeak(a);')).toBe('const a = 1;\nspeak(a);');
+  });
+});
+
+describe('stripping comments', () => {
+  it('drops comment lines and trailing comments, keeping // inside strings and templates', () => {
+    const code = '// Setup\nconst url = "https://x.org"; // the site\n/* block\n   comment */\nconst t = `a // b`;\nspeak(t);';
+    expect(stripComments(code)).toBe('const url = "https://x.org";\nconst t = `a // b`;\nspeak(t);');
+  });
+
+  it('leaves code that does not parse alone', () => {
+    const code = 'function a() { // open\n  play();';
+    expect(stripComments(code)).toBe(code);
   });
 });

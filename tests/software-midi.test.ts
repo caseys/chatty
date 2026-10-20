@@ -46,6 +46,30 @@ describe('friendly MIDI messages', () => {
     vi.useRealTimers();
   });
 
+  it('plays a named drum groove as one 4/4 bar over the duration', () => {
+    vi.useFakeTimers();
+    const { sent, output, advance } = setup();
+    output.send(['drums', 'boom-chuck', 90, 2000]);
+    expect(sent).toEqual([[0x99, 36, 90]]);
+    advance(500);
+    expect(sent.at(-1)).toEqual([0x99, 38, 90]);
+    advance(500);
+    expect(sent.at(-1)).toEqual([0x99, 36, 90]);
+    advance(500);
+    expect(sent.at(-1)).toEqual([0x99, 38, 90]);
+    vi.useRealTimers();
+  });
+
+  it('walks a bass line through a chord, one note per beat', () => {
+    vi.useFakeTimers();
+    const { sent, output, advance } = setup();
+    output.send(['bass', 'walking G major', 80, 2000]);
+    advance(2000);
+    const starts = sent.filter((m) => (m[0] & 0xf0) === 0x90).map((m) => m[1]);
+    expect(starts).toEqual([43, 47, 50, 52]);
+    vi.useRealTimers();
+  });
+
   it('gives each instrument a channel, drums channel 9, and reads note names in raw bytes', () => {
     const { sent, output } = setup();
     output.send(['piano', 'C4']);
