@@ -244,7 +244,38 @@ const ACTION_REQUEST =
 const TALK_RETRY_NOTE = '\n(Write the JavaScript program that does this, then one speak() sentence about it.)';
 
 /** How many times the model may try to fix one request's program */
-const MAX_FIX_ATTEMPTS = 3;
+const MAX_FIX_ATTEMPTS = 5;
+
+/**
+ * How each fix attempt samples: the first takes the most likely fix; each later one samples
+ * warmer and wider, so a model that gives one prompt the same reply every time gives another
+ */
+export function fixSampling(attempt: number): { temperature: number; topP: number } | undefined {
+  if (attempt <= 1) return undefined; // exact: the runtime's near-greedy decoding
+  const step = Math.min(attempt, MAX_FIX_ATTEMPTS) - 1; // 1 to 4
+  return { temperature: Number((0.2 + 0.2 * step).toFixed(2)), topP: Number((0.85 + 0.035 * step).toFixed(3)) };
+}
+
+type FixError = { attempt: number; error: string; line?: number };
+
+/** A run's error history with its own error added */
+function withError(run: { errorHistory?: FixError[]; error: string | null; errorLine?: number; fixAttempt?: number }): FixError[] {
+  const history = run.errorHistory ?? [];
+  return run.error ? [...history, { attempt: run.fixAttempt ?? 0, error: run.error, line: run.errorLine }] : history;
+}
+
+/** Earlier attempts' errors that differ from the current one, labeled, for the next fix request */
+export function earlierErrors(history: FixError[] | undefined, current: string): string | undefined {
+  const seen = new Set([current]);
+  const lines: string[] = [];
+  for (const h of history ?? []) {
+    if (seen.has(h.error)) continue;
+    seen.add(h.error);
+    const label = h.attempt === 0 ? 'The first program' : `Fix ${h.attempt}`;
+    lines.push(`${label} failed${h.line ? ` at line ${h.line}` : ''}: ${h.error}`);
+  }
+  return lines.length ? `Earlier attempts failed differently. ${lines.join(' ')}` : undefined;
+}
 
 /** Markup in a streaming reply */
 const STREAM_MARKUP = /<(?:script|canvas|html|!doctype)\b/i;
@@ -283,6 +314,8 @@ export class ConversationOrchestrator {
     fixAttempt?: number;
     /** The request's own turn, which every fix of it stands for */
     originalTurnId?: string;
+    /** Errors of the programs before this one for the same request, oldest first */
+    errorHistory?: FixError[];
   } | null = null;
   /** The system prompt last written to the run log, so it is logged only when it changes */
   private loggedSystemPrompt: { chat: string; text: string } | null = null;
@@ -529,6 +562,8 @@ export class ConversationOrchestrator {
       fixBlock?: { start: number; end: number; name?: string };
       /** Which fix attempt this turn is (1 to MAX_FIX_ATTEMPTS) */
       fixAttempt?: number;
+      /** Errors of the earlier programs for this request (see earlierErrors) */
+      errorHistory?: FixError[];
     }
   ): Promise<ConversationMessage | null> {
     // Stage 1: Capture and normalize input
@@ -583,7 +618,7 @@ export class ConversationOrchestrator {
       role: 'user',
       canonicalContent: normalized,
       rawTranscript: options?.isVoiceTranscript ? rawTranscript : undefined,
-      ...(options?.autoFix ? { autoFix: true } : {}),
+      ...(options?.autoFix ? { autoFix: true, fixNotice: `Trying to fix: ${this.lastRun?.error ?? 'the error'}` } : {}),
       timestamp: Date.now(),
     };
 
@@ -825,8 +860,8 @@ export class ConversationOrchestrator {
           messages,
           temperature: 0.1,
           maxOutputTokens: generationProvider.maxOutputTokens,
-          // A fix wants the one most likely line, not a varied one
-          ...(options?.autoFix ? { exact: true } : {}),
+          // A first fix wants the one most likely line; each later attempt samples differently
+          ...(options?.autoFix ? (fixSampling(options.fixAttempt ?? 1) ? { sampling: fixSampling(options.fixAttempt ?? 1) } : { exact: true }) : {}),
           ...(retry > 0 ? { retry } : {}),
           signal: generationAbort.signal,
           onToken: (chunk) => {
@@ -1121,6 +1156,7 @@ export class ConversationOrchestrator {
               errorLine: execResult.errorLine,
               fixAttempt: options?.fixAttempt ?? 0,
               originalTurnId: fixedTurnId ?? turnId,
+              errorHistory: options?.errorHistory,
             };
             this.events.onRunStatus?.(
               turnId,
@@ -1414,7 +1450,8 @@ export class ConversationOrchestrator {
     // A program that doesn't parse: every statement that doesn't is marked, not just one line
     const broken = brokenLines(run.code);
     const block = broken ? { ...broken, why: 'syntax' as const } : undefined;
-    const request = fixRequest(run.task, run.code, run.errorLine, run.error, hint?.text, block);
+    const facts = [earlierErrors(run.errorHistory, run.error), hint?.text].filter(Boolean).join(' ') || undefined;
+    const request = fixRequest(run.task, run.code, run.errorLine, run.error, facts, block);
     this.startFixLog(run);
     appendRunLog(
       'retry',
@@ -1426,6 +1463,7 @@ export class ConversationOrchestrator {
       return this.submitUserInput(request, {
         autoFix: run.code,
         fixAttempt: attempt,
+        errorHistory: withError(run),
         ...(block ? { fixBlock: { start: block.start, end: block.end } } : {}),
       });
     });
@@ -1439,7 +1477,7 @@ export class ConversationOrchestrator {
     const block = enclosingFunction(run.code, run.errorLine);
     if (!block || !run.error) return;
     const hint = errorHint(run.code, run.error, run.errorLine, { ids: this.javascriptRuntime.pageIds?.() ?? [] });
-    const facts = [note, hint?.text].filter(Boolean).join(' ') || undefined;
+    const facts = [note, earlierErrors(run.errorHistory, run.error), hint?.text].filter(Boolean).join(' ') || undefined;
     const request = fixRequest(run.task, run.code, run.errorLine, run.error, facts, block);
     appendRunLog(
       'retry',
@@ -1451,6 +1489,7 @@ export class ConversationOrchestrator {
       return this.submitUserInput(request, {
         autoFix: run.code,
         fixAttempt: attempt,
+        errorHistory: withError(run),
         fixBlock: { start: block.start, end: block.end, name: block.name || undefined },
       });
     });

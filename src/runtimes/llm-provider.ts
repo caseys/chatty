@@ -574,7 +574,9 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
       // corrected line). A fix turn has its own system prompt, so it starts a new conversation
       // anyway: the different temperature costs nothing extra.
       // A retry samples cooler (retryTemperature)
-      const sampler = options.exact
+      const sampler = options.sampling
+        ? { ...GEMMA_SAMPLER, temperature: options.sampling.temperature, p: options.sampling.topP }
+        : options.exact
         ? { ...GEMMA_SAMPLER, temperature: RETRY_FLOOR_TEMPERATURE }
         : { ...GEMMA_SAMPLER, temperature: retryTemperature(GEMMA_SAMPLER.temperature, options.retry) };
       const targetTemperature = sampler.temperature;

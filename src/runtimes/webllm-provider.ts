@@ -33,9 +33,10 @@ const WEBLLM_EXACT_TEMPERATURE = 0.2;
  * near-greedy with no penalty at all.
  */
 export function webLlmSampling(
-  options: Pick<LlmGenerationOptions, 'temperature' | 'topP' | 'exact' | 'retry'>,
+  options: Pick<LlmGenerationOptions, 'temperature' | 'topP' | 'exact' | 'retry' | 'sampling'>,
   spec: Pick<WebLlmModelSpec, 'mlcId' | 'noThinking'>
 ): { temperature: number; top_p: number; repetition_penalty?: number; presence_penalty?: number } {
+  if (options.sampling) return { temperature: options.sampling.temperature, top_p: options.sampling.topP };
   const top_p = options.topP ?? 0.8;
   if (options.exact) return { temperature: WEBLLM_EXACT_TEMPERATURE, top_p };
   // Small models get stuck repeating themselves on near-greedy decoding (Chatty asks for 0.1,

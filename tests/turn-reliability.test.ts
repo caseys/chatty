@@ -665,29 +665,53 @@ describe('a fix that changes nothing', () => {
 });
 
 describe('more than one fix attempt', () => {
-  it("fixes a fix's own failing program, up to three attempts in all", async () => {
+  it("fixes a fix's own failing program, up to five attempts, each sampled differently and told earlier errors", async () => {
     const program = 'function draw() {\n  boom();\n}\ndraw();\nspeak("Drawn.");';
-    const llm = new QueueLlm([
-      program,
-      '// Cause: boom is not defined\n  bang();',
-      '// Cause: bang is not defined\n  zap();',
-      '// Cause: zap is not defined\n  ok();',
-      '// Cause: never asked\n  done();',
-    ]);
+    const fixes = ['bang', 'bang2', 'zap', 'ok', 'fin', 'never'].map((name) => `// Cause: try ${name}\n  ${name}();`);
+    const llm = new QueueLlm([program, ...fixes]);
     const { executed, runtime } = fakeRuntime([
       { error: 'boom is not defined', errorLine: 2 },
       { error: 'bang is not defined', errorLine: 2 },
+      { error: 'bang is not defined', errorLine: 2 },
       { error: 'zap is not defined', errorLine: 2 },
       { error: 'ok is not defined', errorLine: 2 },
+      { error: 'fin is not defined', errorLine: 2 },
     ]);
-    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    const notices: string[] = [];
+    const orchestrator = orchestratorFor(llm, {
+      autoFixErrors: true,
+      javascriptRuntime: runtime,
+      events: { onMessageCreated: (m) => m.fixNotice && notices.push(m.fixNotice) },
+    });
     await orchestrator.submitUserInput('Draw it');
-    await vi.waitFor(() => expect(executed.length).toBe(4), { timeout: 10000 });
+    await vi.waitFor(() => expect(executed.length).toBe(6), { timeout: 20000 });
     await new Promise((r) => setTimeout(r, 1500));
-    // The request, then three fixes; the fourth error gets no fourth fix
-    expect(llm.turns.length).toBe(4);
-    expect(executed[3]).toContain('ok();');
-  });
+    // The request, then five fixes; the sixth error gets no sixth fix
+    expect(llm.turns.length).toBe(6);
+    // The first fix is the most likely one; each later one samples warmer and wider
+    expect(llm.turns[1].exact).toBe(true);
+    const temps = llm.turns.slice(2).map((t) => t.sampling?.temperature);
+    const topPs = llm.turns.slice(2).map((t) => t.sampling?.topP);
+    expect(new Set(temps).size).toBe(4);
+    expect(new Set(topPs).size).toBe(4);
+    // The fifth fix is told each earlier error that differs from the current one, once
+    const last = llm.turns[5].messages.at(-1)!.content;
+    expect(last).toContain('The first program failed at line 2: boom is not defined');
+    expect(last).toContain('Fix 1 failed at line 2: bang is not defined');
+    expect(last).not.toContain('Fix 2 failed');
+    expect(last).toContain('Fix 3 failed at line 2: zap is not defined');
+    expect(last).not.toMatch(/Fix 4 failed/);
+    // Each attempt says in the chat what it is fixing
+    expect(notices).toEqual([
+      'Trying to fix: boom is not defined',
+      'Trying to fix: bang is not defined',
+      'Trying to fix: bang is not defined',
+      'Trying to fix: zap is not defined',
+      'Trying to fix: ok is not defined',
+    ]);
+    // The first fix has nothing earlier to be told
+    expect(llm.turns[1].messages.at(-1)!.content).not.toContain('Earlier attempts');
+  }, 30000);
 
   it('does not run a function fix that drops the function, and asks again', async () => {
     const program = 'function compile(gl) {\n  gl.make();\n  gl.bad();\n}\ncompile(x);\nspeak("Done.");';

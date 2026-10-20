@@ -195,6 +195,7 @@ export class MinimalVoiceApp {
       },
       onMessageCreated: (msg) => {
         // Chatty's own "fix this error" turns aren't the user's words
+        if (msg.autoFix && msg.fixNotice) this.addFixNotice(msg);
         if (msg.role === 'user' && msg.canonicalContent && !msg.autoFix) {
           this.addUserBubble(msg);
           try {
@@ -780,7 +781,8 @@ export class MinimalVoiceApp {
     this.clearChatLog();
     if (summary?.summaryText) this.showSummaryNote(summary.summaryText);
     for (const m of messages) {
-      if (m.role === 'user' && m.canonicalContent && !m.autoFix) this.addUserBubble(m);
+      if (m.autoFix && m.fixNotice) this.addFixNotice(m);
+      else if (m.role === 'user' && m.canonicalContent && !m.autoFix) this.addUserBubble(m);
       else if (m.role === 'assistant' && (m.canonicalContent || m.toolCall)) this.renderAssistantMessage(m);
     }
     const lastReply = [...messages].reverse().find((m) => m.role === 'assistant');
@@ -814,6 +816,15 @@ export class MinimalVoiceApp {
   /** Example phrases show in a chat until the user sends something in it. */
   private showChatExamples(show: boolean): void {
     if (this.chatExamplesEl) this.chatExamplesEl.hidden = !show;
+  }
+
+  /** A fix turn's note in the chat: the error the model is asked to fix */
+  private addFixNotice(msg: ConversationMessage): void {
+    if (this.bubbles.has(msg.id) || !msg.fixNotice) return;
+    const note = this.createSystemNote(msg.fixNotice);
+    this.chatLogEl?.appendChild(note);
+    this.bubbles.set(msg.id, note);
+    this.scrollChatToBottom();
   }
 
   private addUserBubble(msg: ConversationMessage): void {

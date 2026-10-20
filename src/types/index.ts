@@ -170,6 +170,8 @@ export interface ConversationMessage {
   rawTranscript?: string;
   /** User turn Chatty sent itself to report a failed program back to the model (not shown as a bubble) */
   autoFix?: boolean;
+  /** What a fix turn shows in the chat in place of its request ("Trying to fix: …") */
+  fixNotice?: string;
   rawCode?: string;
   /** A fix turn's reply whose program worked: it stands for this turn's broken program in later prompts */
   fixesTurnId?: string;
@@ -241,6 +243,12 @@ export interface LlmGenerationOptions {
    * use a low temperature and no repetition penalty
    */
   exact?: boolean;
+  /**
+   * Sampling to use as given, in place of the runtime's own choice (and of exact and retry): each
+   * fix attempt samples differently, so a model that answers the same prompt the same way can
+   * still give a different fix (see fixSampling)
+   */
+  sampling?: { temperature: number; topP: number };
   /** How many times this reply was tried before: each retry samples cooler (see retryTemperature) */
   retry?: number;
   signal?: AbortSignal;

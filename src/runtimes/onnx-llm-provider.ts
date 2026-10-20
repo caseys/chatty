@@ -188,8 +188,8 @@ export class OnnxLlmProvider implements LlmRuntimeProvider {
       maxNewTokens: options.maxOutputTokens ?? this.maxOutputTokens,
       // Exact turn: greedy decoding (temperature 0 means do_sample false in the worker)
       // A retry samples cooler (retryTemperature)
-      temperature: options.exact ? 0 : options.temperature === undefined ? undefined : retryTemperature(options.temperature, options.retry),
-      topP: options.topP,
+      temperature: options.sampling ? options.sampling.temperature : options.exact ? 0 : options.temperature === undefined ? undefined : retryTemperature(options.temperature, options.retry),
+      topP: options.sampling?.topP ?? options.topP,
       signal: options.signal,
       onToken: options.onToken,
     });
