@@ -36,7 +36,7 @@ import {
   inspectExecutableCode,
   syntaxErrorLine,
 } from '../tools/javascript-runtime.ts';
-import { fixRequest } from './line-fix.ts';
+import { applyFixReply, FIX_SYSTEM_PROMPT, fixRequest } from './line-fix.ts';
 import { AFTER_HEAVY_MS, settle } from './settle.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 
@@ -682,6 +682,14 @@ export class ConversationOrchestrator {
       responseMode,
       programBeingEdited
     );
+    // A fix turn is its own job: a short prompt about fixing and only the fix request (the
+    // rules, examples and history are for writing programs, and small models rewrote the
+    // program they saw there, bug and all). The turn whose program it fixes:
+    const fixedTurnId = options?.autoFix ? this.lastRun?.turnId : undefined;
+    if (options?.autoFix) {
+      systemPrompt = FIX_SYSTEM_PROMPT;
+      promptMessages = [{ role: 'user', content: normalized }];
+    }
     // Notes added to the request go out with it again in every later prompt (see buildModelPrompt)
     const sentRequest = promptMessages[promptMessages.length - 1]?.content;
     if (!this.phonePipeline && sentRequest && sentRequest !== normalized) {
@@ -1001,7 +1009,11 @@ export class ConversationOrchestrator {
         const rawContent = rawAccumulatedTokens || assistantMsg.canonicalContent || genResult.text;
 
         if (this.scheduler.isTurnValid(turnId)) {
-          const inspected = inspectExecutableCode(rawContent);
+          // A fix reply is search/replace edits to the failed program: they're applied, and the
+          // code panel shows the whole program that runs
+          const fixedProgram = options?.autoFix ? applyFixReply(options.autoFix, rawContent) : rawContent;
+          if (fixedProgram !== rawContent) this.events.onRawOutput?.(turnId, fixedProgram);
+          const inspected = inspectExecutableCode(fixedProgram);
           const executableCode = inspected.code;
           const isProse = inspected.isProse || forceProse;
           assistantMsg.rawCode = executableCode;
@@ -1013,12 +1025,16 @@ export class ConversationOrchestrator {
           const originalCode = options?.autoFix;
           const lostProgram =
             !!originalCode && (isTalkOnly(executableCode) || (programDraws(originalCode) && !programDraws(executableCode)));
+          // Edits that matched nothing leave the same failing program: running it again would
+          // only repeat the error (and its sounds and words)
+          const unchangedProgram = !!originalCode && fixedProgram.trim() === originalCode.trim();
 
-          if (lostProgram) {
+          if (lostProgram || unchangedProgram) {
             const failed = this.lastRun;
+            const why = lostProgram ? 'The fix lost the program' : "The fix didn't change the program";
             this.events.onRunStatus?.(turnId, {
               kind: 'error',
-              text: `The fix lost the program, so it was not run. ${failed?.error ? errorText(failed.error, failed.errorLine) : 'The program failed.'}`,
+              text: `${why}, so it was not run. ${failed?.error ? errorText(failed.error, failed.errorLine) : 'The program failed.'}`,
             });
           } else if (isProse) {
             this.events.onRunStatus?.(turnId, { kind: 'none', text: 'No code to run in this reply' });
@@ -1094,6 +1110,14 @@ export class ConversationOrchestrator {
             // too). Talk-only replies (desktop chat is speak() code) don't replace it.
             if (!isTalkOnly(executableCode)) {
               this.lastAction = { conversationId, kind: 'code', task: codeTask, code: executableCode };
+            }
+            // A fix that works takes the broken program's place in the conversation, as if the
+            // model had written it right the first time (the fix turn itself stays hidden)
+            if (fixedTurnId && !execResult.error) {
+              const originalId = `msg_assistant_${fixedTurnId}`;
+              this.memoryStore.updateMessage(originalId, { rawCode: executableCode });
+              const original = this.memoryStore.getMessages().find((m) => m.id === originalId);
+              if (original) this.events.onMessageUpdated?.({ ...original });
             }
 
             if (this.scheduler.isTurnValid(turnId)) {
@@ -1304,7 +1328,13 @@ export class ConversationOrchestrator {
       kind: 'error',
       text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
-    const request = fixRequest(run.task, run.code, run.errorLine, run.error);
+    // The requests before this one, so the fix knows what the program is for
+    const earlier = this.memoryStore
+      .getMessages()
+      .filter((m) => m.role === 'user' && !m.autoFix && m.turnId !== run.turnId)
+      .slice(-2)
+      .map((m) => m.canonicalContent);
+    const request = fixRequest(run.task, run.code, run.errorLine, run.error, earlier);
     // A short pause before the model runs again, unless the user moves on meanwhile
     void settle(AFTER_HEAVY_MS).then(() => {
       if (this.scheduler.getActiveTurnId()) return;
@@ -1544,12 +1574,14 @@ export class ConversationOrchestrator {
    * messages are sent again exactly as before, so anything that varies with a request
    * (memories, notes) goes into that request's message instead (see buildModelPrompt).
    */
+  /** The smallest models (a 4,096-token context), on any device: they get a trimmed prompt */
+  private get isSmallModel(): boolean {
+    return this.llmProvider.contextLimit <= 4096;
+  }
+
   private staticPromptParts(request?: string): { head: string[]; tail: string[] } {
-    // The smallest models (a 4,096-token context) get only the rules this request needs
-    const rules =
-      request !== undefined && this.llmProvider.contextLimit <= 4096
-        ? promptRules(request, true)
-        : CONCISE_VOICE_SYSTEM_PROMPT;
+    // The smallest models get only the rules this request needs
+    const rules = request !== undefined && this.isSmallModel ? promptRules(request, true) : CONCISE_VOICE_SYSTEM_PROMPT;
     const head = this.phonePipeline
       ? [`${this.phonePipeline.chatSystemPrompt} Current date and time: ${new Date().toLocaleString()}.`]
       : [rules, EXAMPLES_PROMPT];

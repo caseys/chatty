@@ -7,6 +7,7 @@ import {
   FORMAT_TURNS,
   type RunStatus,
 } from '../src/core/orchestrator.ts';
+import { FIX_SYSTEM_PROMPT } from '../src/core/line-fix.ts';
 import { StateMachineCoordinator } from '../src/core/state-machine.ts';
 import type { JavascriptExecutionResult, JavascriptRuntime } from '../src/tools/javascript-runtime.ts';
 import type {
@@ -138,6 +139,24 @@ describe('a new program replaces the one still running', () => {
   });
 });
 
+describe('a fix whose edits match nothing', () => {
+  it('does not run the same failing program again', async () => {
+    const miss = '<<<<<<< SEARCH\nnot in the program\n=======\nconst x = 1;\n>>>>>>> REPLACE';
+    const llm = new QueueLlm([DRAWING, miss]);
+    const { executed, runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 3 }]);
+    const statuses: RunStatus[] = [];
+    const orchestrator = orchestratorFor(llm, {
+      autoFixErrors: true,
+      javascriptRuntime: runtime,
+      events: { onRunStatus: (_id, status) => statuses.push(status) },
+    });
+    await orchestrator.submitUserInput('draw a red circle');
+    await vi.waitFor(() => expect(statuses.some((s) => s.text.includes("didn't change the program"))).toBe(true), { timeout: 3000 });
+    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+    expect(executed).toEqual([DRAWING]);
+  });
+});
+
 describe('a fix that loses the program', () => {
   const lostFixes = [
     ['chat plus a bare speak() in a block', 'Here\'s the corrected program:\n```javascript\nspeak("Sorry about that.");\n```'],
@@ -169,8 +188,10 @@ describe('a fix that loses the program', () => {
 
     // The fix asked for the program again, led by the original request
     const fixAsk = llm.turns[1].messages.at(-1)!.content;
-    expect(fixAsk.startsWith('draw a red circle. Your last program failed at line 3: boom is not defined.')).toBe(true);
-    expect(llm.turns[1].messages.some((m) => m.role === 'assistant' && m.content === DRAWING)).toBe(true);
+    expect(fixAsk.startsWith('Request: draw a red circle\nThe program failed at line 3: boom is not defined\n')).toBe(true);
+    // A fix turn has its own short prompt and only the fix request
+    expect(llm.turns[1].systemPrompt).toBe(FIX_SYSTEM_PROMPT);
+    expect(llm.turns[1].messages).toEqual([{ role: 'user', content: fixAsk }]);
 
     // Only the original program ran; the fix's text was neither spoken nor shown
     expect(executed).toEqual([DRAWING]);
@@ -415,5 +436,40 @@ describe('rules picked for small models', () => {
     // Unfiltered: every rule
     const all = promptRules();
     for (const part of ['Web MIDI', '<canvas>', '<svg>', 'WebGL', 'Wikipedia']) expect(all).toContain(part);
+  });
+});
+
+
+describe('context shared between the conversation and a fix turn', () => {
+  it('tells the fix what came before, and puts a working fix in place of the broken program', async () => {
+    const SONG = 'const out = 1;\nspeak("Here is a song.");';
+    const FASTER = [
+      'const out = 1;',
+      'const bpm = 180;',
+      'function play() {',
+      '  const t = 1;',
+      '}',
+      'setTimeout(() => send(t), 100);',
+      'play();',
+      'speak("Faster now.");',
+    ].join('\n');
+    const FIX = '<<<<<<< SEARCH\nsetTimeout(() => send(t), 100);\n=======\nsetTimeout(() => send(1), 100);\n>>>>>>> REPLACE';
+    const llm = new QueueLlm([SONG, FASTER, FIX]);
+    const { executed, runtime } = fakeRuntime([{}, { error: 't is not defined', errorLine: 6 }, {}]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+
+    await orchestrator.submitUserInput('Play a song');
+    await orchestrator.submitUserInput('make it faster');
+    await vi.waitFor(() => expect(executed).toHaveLength(3), { timeout: 3000 });
+    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+
+    const fixAsk = llm.turns[2].messages.at(-1)!.content;
+    expect(fixAsk.startsWith('Earlier requests: Play a song\nRequest: make it faster\n')).toBe(true);
+    const fixed = FASTER.replace('send(t)', 'send(1)');
+    expect(executed[2]).toBe(fixed);
+    // The conversation now holds the working program as the reply to "make it faster"
+    const messages = orchestrator.memoryStore.getMessages();
+    const fasterTurn = messages.find((m) => m.role === 'user' && m.canonicalContent === 'make it faster')!.turnId;
+    expect(messages.find((m) => m.id === `msg_assistant_${fasterTurn}`)?.rawCode).toBe(fixed);
   });
 });
