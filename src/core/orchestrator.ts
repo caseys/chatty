@@ -285,6 +285,11 @@ const EXAMPLES_PROMPT = [
   '</examples>',
 ].join('\n');
 
+/** A line of a streaming reply that starts code: the reply isn't prose (shown and spoken as it comes) */
+const STREAM_CODE_LINE = /^(?:const|let|var|function|class|import|MODE:|```|\/\/|\/\*|root\.|document\.|window\.)\b/m;
+/** Markup in a streaming reply: HTML, or the examples' tag format */
+const STREAM_MARKUP = /<(?:script|canvas|html|!doctype|examples?|request|reply)\b/i;
+
 export class ConversationOrchestrator {
   readonly stateCoordinator: StateMachineCoordinator;
   readonly memoryStore: ConversationMemoryStore;
@@ -875,14 +880,14 @@ export class ConversationOrchestrator {
             this.events.onRawOutput?.(turnId, currentFull);
 
             if (streamMode === 'unknown') {
+              // Markup counts as code too: an HTML reply, or one in the examples' tag format
               const hasCodeSignature =
-                currentFull.includes('speak(') ||
-                /^(?:const|let|var|function|class|import|MODE:|```|\/\/|\/\*|root\.|document\.|window\.)\b/m.test(currentFull);
+                currentFull.includes('speak(') || STREAM_CODE_LINE.test(currentFull) || /^\s*</.test(currentFull);
               if (hasCodeSignature) {
                 streamMode = 'code';
               } else if (
                 /\s/.test(currentFull) ||
-                (currentFull.length >= 10 && !/^\s*(?:speak|const|let|var|func|root|doc|win|import|\/\/|\/\*|`)/i.test(currentFull))
+                (currentFull.length >= 10 && !/^\s*(?:speak|const|let|var|func|root|doc|win|import|\/\/|\/\*|`|<)/i.test(currentFull))
               ) {
                 streamMode = 'prose';
                 // Flush buffered prefix to canonicalContent
@@ -896,9 +901,12 @@ export class ConversationOrchestrator {
               }
             }
 
-            if (streamMode === 'prose' && currentFull.includes('```')) {
-              // Explanation followed by a code block: the code runs once the reply is complete;
-              // stop voicing here so it isn't read aloud
+            if (
+              streamMode === 'prose' &&
+              (currentFull.includes('```') || STREAM_CODE_LINE.test(currentFull) || STREAM_MARKUP.test(currentFull))
+            ) {
+              // Explanation followed by code (fenced or not, or markup): the code runs once the
+              // reply is complete; stop showing and voicing here so it isn't read aloud
               streamMode = 'code';
             }
             if (streamMode === 'prose') {
