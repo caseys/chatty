@@ -241,6 +241,12 @@ function normalizeFences(text: string): string {
 export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
   let cleaned = normalizeFences((rawText || '').trim());
 
+  // A whole HTML page (small models write one for "an app"): its markup goes on screen and its
+  // scripts run, as with an ```html block
+  if (/^(<!doctype html|<html[\s>])/i.test(cleaned)) {
+    return { code: callUncalledFunctions(htmlToCode(cleaned)), isProse: false };
+  }
+
   // 1. Take the program out of markdown fences if present
   let hadFences = false;
   if (cleaned.includes('```')) {
