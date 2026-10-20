@@ -24,6 +24,15 @@ export interface ErrorHint {
 /** What the live page holds, read from the sandbox when the program failed */
 export interface PageFacts {
   ids: string[];
+  /** Ids the program looked up that never existed, and what stood in for each */
+  standIns?: StandIn[];
+}
+
+/** An id that never existed: an empty <div> made for it, or the element the program made last */
+export interface StandIn {
+  id: string;
+  tag: string;
+  made: 'empty' | 'last';
 }
 
 type AnyNode = Node & Record<string, unknown>;
@@ -131,7 +140,7 @@ function renameIdentifier(code: string, ast: AnyNode, from: string, to: string):
 const list = (all: string[], max = 10, names = [...new Set(all)]) => names.slice(0, max).join(', ') + (names.length > max ? ', …' : '');
 
 /** 1. "x is not defined" */
-function notDefined(code: string, error: string, errorLine?: number): ErrorHint | null {
+function notDefined(code: string, error: string, errorLine?: number, page?: PageFacts): ErrorHint | null {
   const name = error.match(/([A-Za-z_$][\w$]*) is not defined/)?.[1] ?? error.match(/Can't find variable: ([A-Za-z_$][\w$]*)/)?.[1];
   if (!name) return null;
   const ast = tryParse(code);
@@ -154,8 +163,14 @@ function notDefined(code: string, error: string, errorLine?: number): ErrorHint 
   if (slip) return { correction: { code: renameIdentifier(code, ast, name, slip), note: `${name} → ${slip}` } };
   const functions = topLevel.filter((d) => d.kind === 'function').map((d) => `${d.name}()`);
   const variables = topLevel.filter((d) => d.kind === 'variable').map((d) => d.name);
+  // An element on the page named like it (bill → #billInput): where its value is
+  const standIns = new Set((page?.standIns ?? []).map((s) => s.id));
+  const fields = (page?.ids ?? []).filter((id) => !standIns.has(id) && id.toLowerCase().replace(/[-_]/g, '').includes(name.toLowerCase()));
+  const onPage = fields.length
+    ? ` The page has ${fields.slice(0, 3).map((id) => `#${id} (document.getElementById('${id}').value)`).join(', ')}.`
+    : '';
   return {
-    text: `Nothing named ${name} is declared.${functions.length ? ` The program's functions: ${list(functions)}.` : ''}${variables.length ? ` Its variables: ${list(variables)}.` : ''}`,
+    text: `Nothing named ${name} is declared.${functions.length ? ` The program's functions: ${list(functions)}.` : ''}${variables.length ? ` Its variables: ${list(variables)}.` : ''}${onPage}`,
   };
 }
 
@@ -587,11 +602,40 @@ function argumentCountFacts(code: string, error: string, errorLine?: number): Er
 }
 
 /** Help for a failed program: a correction, or facts for the fix request */
+/** Media members: a program reaching for them wanted sound */
+const SOUND_MEMBER = /^(?:play|pause|load|volume|currentTime|src|muted|loop)$/;
+
+/**
+ * An error on an element the program never made: the sandbox gave it an empty <div> for the id
+ * (rather than null), so the error names a missing method and hides the real cause
+ */
+function standInElement(code: string, error: string, errorLine: number | undefined, page?: PageFacts): ErrorHint | null {
+  const lineText = errorLine ? (code.split('\n')[errorLine - 1] ?? '') : '';
+  for (const { id, tag, made } of page?.standIns ?? []) {
+    const name = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const lookup = `(?:getElementById\\(\\s*['"\`]${name}['"\`]\\s*\\)|querySelector\\(\\s*['"\`]#${name}['"\`]\\s*\\))`;
+    const holders = [...code.matchAll(new RegExp(`(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:document\\s*\\.\\s*)?${lookup}`, 'g'))].map((m) => m[1]);
+    const onLine =
+      new RegExp(lookup).test(lineText) || holders.some((h) => new RegExp(`(?<![\\w$.])${h}\\b`).test(lineText)) || error.includes(`'${id}'`);
+    if (!onLine) continue;
+    const member = error.match(/\.([A-Za-z_$][\w$]*)'? is (?:not a function|undefined)/)?.[1];
+    const call = !!member && /is not a function/.test(error);
+    const stoodIn = made === 'empty' ? `an empty <${tag}> stood in for it` : `the <${tag}> it made last stood in for it`;
+    let text = `#${id} was never created: the program has no element with that id, so ${stoodIn}${member ? ` (a <${tag}> has no ${member}${call ? '()' : ''})` : ''}. Create the element it needs with document.createElement and give it id "${id}".`;
+    if (member && SOUND_MEMBER.test(member)) text += ' Notes, chords and drums play through out.send({ notes, instrument, time, duration }).';
+    return { text };
+  }
+  return null;
+}
+
 export function errorHint(code: string, error: string, errorLine?: number, page?: PageFacts): ErrorHint | null {
   // Corrections by rule first: they need no model
   const rule = redeclaredHelper(code, error) ?? missingAwait(code, error, errorLine) ?? syntaxSlip(code, error, errorLine);
   if (rule) return rule;
   const method = methodHint(code, error);
+  // A sure slip of a real member (getcontext) is corrected; otherwise a stand-in explains the error
+  const standIn = method?.correction ? null : standInElement(code, error, errorLine, page);
+  if (standIn) return standIn;
   if (method) {
     return method.correction
       ? {
@@ -602,7 +646,7 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
         }
       : { text: method.text };
   }
-  const found = argumentCountFacts(code, error, errorLine) ?? notDefined(code, error, errorLine) ?? nothingThere(code, error, errorLine, page) ?? leftOpen(code, error) ?? tooEarly(code, error, errorLine);
+  const found = argumentCountFacts(code, error, errorLine) ?? notDefined(code, error, errorLine, page) ?? nothingThere(code, error, errorLine, page) ?? leftOpen(code, error) ?? tooEarly(code, error, errorLine);
   if (found?.correction) return found;
   // Calls of the failing function that pass too few values, added to whatever else was found
   const calls = shortCalls(code, errorLine);

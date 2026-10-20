@@ -340,9 +340,15 @@ export class WorkerLlmProvider implements LlmRuntimeProvider {
           systemPrompt: options.systemPrompt,
           messages: options.messages,
           maxOutputTokens: options.maxOutputTokens,
-          // A fix turn's near-greedy sampling and a retry's cooler one (they were lost here before)
+          // Every sampling choice: a fix turn's near-greedy one, a retry's cooler one, each fix
+          // attempt's own, and a fix reply's shape (anything not listed here never reaches the model)
+          temperature: options.temperature,
+          topP: options.topP,
           exact: options.exact,
           retry: options.retry,
+          sampling: options.sampling,
+          fixShape: options.fixShape,
+          choiceCount: options.choiceCount,
         },
         timestamp: performance.now(),
       };

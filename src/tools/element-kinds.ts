@@ -1,0 +1,81 @@
+/**
+ * What kind of element a program expects behind each id it looks up, from how it uses the result
+ * (`getElementById('c').getContext('2d')` is a canvas). The sandbox uses it when an id doesn't
+ * exist: it borrows an element of that kind the program made, or stands in one of that kind.
+ */
+import { parse } from 'acorn';
+
+export type ElementKind = 'canvas' | 'media' | 'field' | 'dialog';
+
+/** Members only one kind of element has */
+const KIND_OF_MEMBER: Record<string, ElementKind> = {
+  getContext: 'canvas',
+  toDataURL: 'canvas',
+  toBlob: 'canvas',
+  transferControlToOffscreen: 'canvas',
+  play: 'media',
+  pause: 'media',
+  currentTime: 'media',
+  volume: 'media',
+  muted: 'media',
+  paused: 'media',
+  value: 'field',
+  checked: 'field',
+  valueAsNumber: 'field',
+  selectedIndex: 'field',
+  options: 'field',
+  showModal: 'dialog',
+};
+
+type AnyNode = Record<string, unknown> & { type: string };
+
+/** The id a lookup names: getElementById('x') or querySelector('#x'), else null */
+function lookedUpId(node: AnyNode): string | null {
+  if (node.type !== 'CallExpression') return null;
+  const callee = node.callee as AnyNode;
+  if (callee.type !== 'MemberExpression' || callee.computed) return null;
+  const method = (callee.property as AnyNode).name;
+  const arg = (node.arguments as AnyNode[])[0];
+  if (!arg || arg.type !== 'Literal' || typeof arg.value !== 'string') return null;
+  if (method === 'getElementById') return arg.value;
+  if (method === 'querySelector' && /^#[\w-]+$/.test(arg.value)) return arg.value.slice(1);
+  return null;
+}
+
+/** Each looked-up id whose uses all point to one kind of element */
+export function elementKinds(code: string): Record<string, ElementKind> {
+  let ast: AnyNode;
+  try {
+    ast = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true }) as unknown as AnyNode;
+  } catch {
+    return {};
+  }
+  // Variables holding a lookup (const c = document.getElementById('c'))
+  const holders = new Map<string, string>();
+  const walk = (node: AnyNode, visit: (n: AnyNode, parent: AnyNode | null) => void, parent: AnyNode | null = null) => {
+    visit(node, parent);
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && walk(child, visit, node);
+      else if (value && typeof value === 'object' && typeof (value as AnyNode).type === 'string') walk(value as AnyNode, visit, node);
+    }
+  };
+  walk(ast, (node) => {
+    if (node.type === 'VariableDeclarator' && (node.id as AnyNode).type === 'Identifier' && node.init) {
+      const id = lookedUpId(node.init as AnyNode);
+      if (id) holders.set((node.id as AnyNode).name as string, id);
+    }
+  });
+  const seen = new Map<string, Set<ElementKind>>();
+  walk(ast, (node) => {
+    if (node.type !== 'MemberExpression' || node.computed) return;
+    const object = node.object as AnyNode;
+    const id = lookedUpId(object) ?? (object.type === 'Identifier' ? holders.get(object.name as string) : undefined);
+    const kind = id ? KIND_OF_MEMBER[(node.property as AnyNode).name as string] : undefined;
+    if (!id || !kind) return;
+    if (!seen.has(id)) seen.set(id, new Set());
+    seen.get(id)!.add(kind);
+  });
+  const kinds: Record<string, ElementKind> = {};
+  for (const [id, set] of seen) if (set.size === 1) kinds[id] = [...set][0];
+  return kinds;
+}

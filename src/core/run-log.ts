@@ -84,10 +84,11 @@ const codeLike = (w: string) => /[A-Z_$.()'"`\d]/.test(w) || (w.length === 1 && 
 function imaginedKind(text: string): string {
   let note = text.replace(/\n[\s\S]*$/, '');
   let when = '';
-  const suffix = /: corrected( before running| and run again)?\s*$/.exec(note);
+  const suffix = /: corrected( before running| and run again| by a test run)?(?: \((?:candidate \d+|it ran, the best of \d+|it got further, the best of \d+)\))?\s*$/.exec(note);
   if (suffix) {
     note = note.slice(0, suffix.index);
     if (suffix[1]?.includes('before')) when = ' (before running)';
+    else if (suffix[1]?.includes('test run')) when = ' (by a test run)';
   }
   const parts = note.split(' → ');
   // A lone plain word stays when the other side says more ("… was a promise → await"); names are left out

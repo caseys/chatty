@@ -9,7 +9,7 @@ import { VoiceAssistantEngine } from './core/voice-assistant-engine.ts';
 import { MODEL_REGISTRY } from './core/model-manager.ts';
 import { FluidAudioVisualizer } from './audio/visualizer.ts';
 import { clearModelCache, getModelCacheBytes } from './core/model-cache.ts';
-import { isAppleMobile } from './core/settings.ts';
+import { isAppleMobile, SUPPORTED_CHAT_MODELS } from './core/settings.ts';
 import { decodeProgramHash, encodeProgramHash } from './share-link.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
 import type { RunStatus } from './core/orchestrator.ts';
@@ -127,7 +127,9 @@ export class MinimalVoiceApp {
   /** Something is drawn in the card (the combined button offers Clear when nothing else applies) */
   private screenHasContent = false;
   /** What the combined bottom button does now: Stop has priority, Clear is the last resort */
-  private mainButtonClears = false;
+  /** The main button runs this chat's newest program again (voice off, nothing running) */
+  private mainButtonReplays = false;
+  private clearScreenBtn = document.getElementById('btn-clear-screen') as HTMLButtonElement | null;
 
   private jsIframeContainer = document.getElementById('js-runtime-iframe-container');
 
@@ -417,15 +419,20 @@ export class MinimalVoiceApp {
       if (this.chatLogEl) keepAtBottom.observe(this.chatLogEl);
       if (this.rawOutputEl) keepAtBottom.observe(this.rawOutputEl);
     }
+    this.clearScreenBtn?.addEventListener('click', () => {
+      this.resetVisualScreen();
+      this.updateUiState();
+    });
+
     this.micBtn?.addEventListener('click', async () => {
       try {
         navigator.vibrate?.(15);
       } catch {
         // ignore haptic errors
       }
-      // Clear: the last resort, when nothing runs and voice is off
-      if (this.mainButtonClears) {
-        this.resetVisualScreen();
+      // Replay: the newest program again, when nothing runs and voice is off
+      if (this.mainButtonReplays) {
+        await this.engine.replayLastProgram();
         this.updateUiState();
         return;
       }
@@ -1080,14 +1087,19 @@ export class MinimalVoiceApp {
     // on) > Clear (something on screen, nothing else to do) > hidden
     const speechOn = this.engine.isSpeechEnabled();
     const stopping = isActive || programActive;
-    this.mainButtonClears = !isModelLoading && !stopping && !speechOn && this.screenHasContent;
+    this.mainButtonReplays = !isModelLoading && !stopping && !speechOn && this.engine.canReplay();
     if (this.micBtn) {
       this.micBtn.disabled = isModelLoading;
       this.micBtn.classList.toggle('listening', stopping);
-      this.micBtn.classList.toggle('clearing', this.mainButtonClears);
-      this.micBtn.hidden = !speechOn && !stopping && !this.mainButtonClears;
-      this.micBtn.setAttribute('aria-label', this.mainButtonClears ? 'Clear the screen' : 'Start or stop voice');
+      this.micBtn.classList.toggle('replaying', this.mainButtonReplays);
+      // Start, Continue and Replay show the play triangle; Loading and Stop keep the dot
+      this.micBtn.classList.toggle('plays', !isModelLoading && !stopping);
+      this.micBtn.hidden = !speechOn && !stopping && !this.mainButtonReplays;
+      this.micBtn.setAttribute('aria-label', this.mainButtonReplays ? 'Run the program again' : 'Start or stop voice');
+      this.micBtn.title = this.mainButtonReplays ? 'Run the program again' : '';
     }
+    // Clear: whenever something is on screen and nothing is running (Stop clears a running one)
+    if (this.clearScreenBtn) this.clearScreenBtn.hidden = isModelLoading || stopping || !this.screenHasContent;
     const waves = document.querySelector<HTMLElement>('.chat-waveforms');
     if (waves) waves.hidden = !speechOn;
     const examplesTitle = this.chatExamplesEl?.querySelector('.chat-examples-title');
@@ -1098,8 +1110,8 @@ export class MinimalVoiceApp {
         ? 'Loading…'
         : stopping
           ? 'Stop'
-          : this.mainButtonClears
-            ? 'Clear'
+          : this.mainButtonReplays
+            ? 'Replay'
             : hasHistory
               ? 'Continue'
               : 'Start';
@@ -1321,19 +1333,17 @@ export class MinimalVoiceApp {
     const overallPct = sumTotal > 0 ? Math.min(100, Math.round((sumLoaded * 100) / sumTotal)) : 0;
     const mb = (n: number) => (n / (1024 * 1024)).toFixed(0);
     const own = current ?? this.loadBytes[kind];
-    const ownPct = own.total > 0 ? Math.min(100, Math.round((own.loaded * 100) / own.total)) : 0;
     const order = this.engine.getStartupModelOrder();
     const index = order.indexOf(label);
-    const step = index >= 0 && order.length > 1 ? `model ${index + 1} of ${order.length}: ` : '';
+    const step = index >= 0 && order.length > 1 ? ` (${index + 1} of ${order.length})` : '';
     const rate = this.measureDownloadRate(label, own.loaded);
     const rateText = rate && own.loaded < own.total ? ` · ${rate.toFixed(1)} MB/s` : '';
     // Nothing downloaded yet: say what the runtime is doing instead ("Loading GPU shader
     // modules [12/80]"), so a load that stalls before the download shows where
     const stage = kind === 'llm' && own.loaded === 0 ? loadStageText(this.engine.getLlmLoadStage()) : '';
+    // The left says what is loading (and how fast); the right and the bar, how far along it all is
     this.updateDownloadProgress(
-      stage
-        ? `Loading ${step}${label} — ${stage}`
-        : `Loading ${step}${label} — ${mb(own.loaded)} / ${mb(own.total)} MB (${ownPct}%)${rateText}`,
+      stage ? `Loading ${label}${step} — ${stage}` : `Loading ${label}${step}${rateText}`,
       overallPct,
       `${overallPct}% · ${mb(sumLoaded)} / ${mb(sumTotal)} MB`
     );
@@ -1363,12 +1373,8 @@ export class MinimalVoiceApp {
     }
     const meterFill = document.getElementById('context-meter-fill');
     const meterVal = document.getElementById('context-meter-text');
-    const meterTitle = document.getElementById('meter-title');
     const thresholdEl = document.getElementById('context-meter-threshold');
 
-    if (meterTitle) {
-      meterTitle.textContent = 'Loading models';
-    }
     if (meterFill) {
       meterFill.style.width = `${Math.max(1, pct)}%`;
       meterFill.classList.remove('warning', 'danger');
@@ -1386,12 +1392,8 @@ export class MinimalVoiceApp {
 
     const meterFill = document.getElementById('context-meter-fill');
     const meterText = document.getElementById('context-meter-text');
-    const meterTitle = document.getElementById('meter-title');
     const thresholdEl = document.getElementById('context-meter-threshold');
 
-    if (meterTitle) {
-      meterTitle.textContent = 'Context Window';
-    }
     if (thresholdEl) {
       thresholdEl.style.display = '';
     }
@@ -1405,13 +1407,20 @@ export class MinimalVoiceApp {
       meterFill.classList.toggle('danger', percentage >= 85);
     }
     if (meterText) {
-      meterText.textContent = `${percentage}% (${usedTokens.toLocaleString()} / ${contextLimit.toLocaleString()} tokens)`;
+      meterText.textContent = `${percentage}% · ${usedTokens.toLocaleString()} / ${contextLimit.toLocaleString()} tokens`;
     }
+  }
+
+  /** The chat model's name ("Qwen3 0.6B"), without the size and notes in brackets */
+  private chatModelName(): string {
+    const model = SUPPORTED_CHAT_MODELS.find((m) => m.id === this.engine.getChatModelId());
+    return model ? model.name.replace(/\s*\(.*$/, '') : 'Ready';
   }
 
   private updateStatusFromSnapshot(): void {
     if (!this.statusEl) return;
     const snap = this.engine.getSnapshot();
+    const busy = (what: string) => `${this.chatModelName()} · ${what}`;
 
     const isModelLoading = this.isStartupLoading();
 
@@ -1422,23 +1431,24 @@ export class MinimalVoiceApp {
           : 'WebGPU not supported in this browser';
     } else if (isModelLoading) {
       // Keep existing progress string if already showing percentages
-      if (!this.statusEl.textContent || this.statusEl.textContent === 'Ready') {
+      if (!this.statusEl.textContent?.startsWith('Loading')) {
         this.statusEl.textContent = 'Pulling models…';
       }
     } else if (snap.interaction === 'compacting') {
-      this.statusEl.textContent = 'Compacting…';
+      this.statusEl.textContent = busy('Compacting…');
     } else if (snap.interaction === 'finalizing_input') {
-      this.statusEl.textContent = 'Transcribing…';
+      this.statusEl.textContent = busy('Transcribing…');
     } else if (snap.interaction === 'building_context' || snap.interaction === 'generating') {
-      this.statusEl.textContent = 'Thinking…';
+      this.statusEl.textContent = busy('Thinking…');
     } else if (snap.interaction === 'speaking' || snap.playback === 'playing') {
-      this.statusEl.textContent = 'Speaking…';
+      this.statusEl.textContent = busy('Speaking…');
     } else if (this.engine.getIsListening() || snap.interaction === 'listening') {
-      this.statusEl.textContent = 'Listening…';
+      this.statusEl.textContent = busy('Listening…');
     } else if (snap.interaction === 'error') {
       this.statusEl.textContent = snap.lastError ?? 'Error';
     } else {
-      this.statusEl.textContent = 'Ready';
+      // Ready: the model's name says it is loaded and which one it is
+      this.statusEl.textContent = this.chatModelName();
     }
   }
 
@@ -1571,11 +1581,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
   const installField = document.getElementById('settings-install-field');
   if (isAppleMobile() && installField) {
-    installField.innerHTML =
-      '<p class="settings-safari-warning" role="note">⚠️ Quality degraded on iPhone Safari</p>' +
-      (isStandalone
-        ? ''
-        : '<p class="settings-safari-warning" role="note">Add Chatty to your Home Screen to keep downloaded models (Safari clears them after 7 days unused).</p>');
+    installField.innerHTML = '<p class="settings-safari-warning" role="note">⚠️ Quality degraded on iPhone Safari</p>';
     installField.hidden = false;
   }
 

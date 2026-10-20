@@ -4,6 +4,7 @@
 // which is what lets it load in mobile Safari. Downloads are kept in Cache Storage.
 // ============================================================================
 
+import { fixGrammar } from './fix-grammar.ts';
 import { retryTemperature } from './retry-temperature.ts';
 import type { WebWorkerMLCEngine } from '@mlc-ai/web-llm';
 import type { LlmGenerationOptions, LlmGenerationResult, LlmRuntimeProvider } from '../types/index.ts';
@@ -242,25 +243,53 @@ export class WebLlmProvider implements LlmRuntimeProvider {
     let raw = '';
     let emitted = 0;
     try {
-      const stream = await engine.chat.completions.create({
-        messages: toChatMessages(options.systemPrompt, options.messages),
-        stream: true,
+      const messages = toChatMessages(options.systemPrompt, options.messages);
+      const request = {
+        messages,
+        stream: true as const,
         ...webLlmSampling(options, this.spec),
         max_tokens: options.maxOutputTokens ?? this.maxOutputTokens,
         ...(this.spec.noThinking ? { extra_body: { enable_thinking: false } } : {}),
-      });
-      for await (const chunk of stream) {
-        const delta = chunk.choices[0]?.delta?.content ?? '';
-        if (!delta) continue;
-        raw += delta;
-        const visible = withoutThinking(raw);
-        if (visible === null || visible.length <= emitted) continue;
-        const fresh = visible.slice(emitted);
-        emitted = visible.length;
-        if (!firstTokenAt) firstTokenAt = performance.now();
-        text += fresh;
-        tokens++;
-        options.onToken?.(fresh, tokens);
+      };
+      // A fix turn is constrained to "// Cause: ..." plus code. If the grammar fails to compile or
+      // generation with it throws before any text, retry once without it.
+      const consume = async (stream: AsyncIterable<{ choices: Array<{ delta?: { content?: string | null } }> }>) => {
+        for await (const chunk of stream) {
+          const delta = chunk.choices[0]?.delta?.content ?? '';
+          if (!delta) continue;
+          raw += delta;
+          const visible = withoutThinking(raw);
+          if (visible === null || visible.length <= emitted) continue;
+          const fresh = visible.slice(emitted);
+          emitted = visible.length;
+          if (!firstTokenAt) firstTokenAt = performance.now();
+          text += fresh;
+          tokens++;
+          options.onToken?.(fresh, tokens);
+        }
+      };
+      if (options.fixShape) {
+        try {
+          await consume(
+            await engine.chat.completions.create({
+              ...request,
+              response_format: { type: 'grammar', grammar: fixGrammar(options.fixShape, options.choiceCount) },
+            })
+          );
+        } catch (err) {
+          // Text already went out (onToken): a second reply would be appended to it
+          if (options.signal?.aborted || tokens > 0) throw err;
+          console.warn('Grammar-constrained fix failed; retrying without it', err);
+          // Discard any partial output so the plain retry starts clean
+          raw = '';
+          text = '';
+          emitted = 0;
+          tokens = 0;
+          firstTokenAt = 0;
+          await consume(await engine.chat.completions.create(request));
+        }
+      } else {
+        await consume(await engine.chat.completions.create(request));
       }
     } finally {
       options.signal?.removeEventListener('abort', onAbort);

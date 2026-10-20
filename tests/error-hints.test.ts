@@ -196,3 +196,51 @@ describe('a promise used as its value', () => {
     expect(errorHint('function json() { return 1; }\nspeak(json().a.x);', undef, 2)?.correction).toBeUndefined();
   });
 });
+
+describe('an element the program never made', () => {
+  const code = [
+    'function playSound(type, duration) {',
+    '  const time = start + duration;',
+    "  document.getElementById('sound').play();",
+    '}',
+    "playSound('piano', 4);",
+  ].join('\n');
+
+  it('says the id never existed and an empty div stood in, and where sound comes from', () => {
+    const error = "document.getElementById('sound').play is not a function. (In 'document.getElementById('sound').play()', 'document.getElementById('sound').play' is undefined)";
+    const text = errorHint(code, error, 3, { ids: ['sound'], standIns: [{ id: 'sound', tag: 'div', made: 'empty' }] })?.text ?? '';
+    expect(text).toContain('#sound was never created');
+    expect(text).toContain('a <div> has no play()');
+    expect(text).toContain('out.send');
+  });
+
+  it('follows a variable that holds the stand-in (Chrome names no id)', () => {
+    const held = "const box = document.getElementById('panel');\nbox.showModal();";
+    const text = errorHint(held, 'box.showModal is not a function', 2, { ids: ['panel'], standIns: [{ id: 'panel', tag: 'span', made: 'last' }] })?.text ?? '';
+    expect(text).toContain('#panel was never created');
+    expect(text).toContain('the <span> it made last stood in for it (a <span> has no showModal())');
+    expect(text).not.toContain('out.send');
+  });
+
+  it('says nothing about real elements', () => {
+    const error = "document.getElementById('sound').play is not a function";
+    expect(errorHint(code, error, 3, { ids: ['sound'], standIns: [] })?.text ?? '').not.toContain('never created');
+  });
+});
+
+describe('a sure method slip on a stand-in element', () => {
+  it('is corrected, not explained by the stand-in hint', () => {
+    const code = "const c = document.getElementById('canvas1');\nconst ctx = c.getcontext('2d');";
+    const hint = errorHint(code, 'c.getcontext is not a function', 2, { ids: ['canvas1'], standIns: [{ id: 'canvas1', tag: 'canvas', made: 'empty' }] });
+    expect(hint?.correction?.code).toContain('c.getContext(');
+  });
+});
+
+describe('a missing name that an element on the page is named after', () => {
+  it('says where its value is', () => {
+    const code = "document.body.innerHTML = '<input id=\"billInput\">';\nconst total = bill * 2;";
+    const text = errorHint(code, "Can't find variable: bill", 2, { ids: ['billInput', 'result'] })?.text ?? '';
+    expect(text).toContain("The page has #billInput (document.getElementById('billInput').value).");
+    expect(text).not.toContain('#result');
+  });
+});

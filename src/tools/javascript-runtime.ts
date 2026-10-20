@@ -9,6 +9,8 @@ import type { LlmRuntimeProvider, ToolDefinition } from '../types/index.ts';
 import { loopProtect } from './loop-protect.ts';
 import { playNotesHelper } from './music-tool.ts';
 import { fetchWikipediaSummary } from './web-tools.ts';
+import type { StandIn } from '../core/error-hints.ts';
+import { elementKinds } from './element-kinds.ts';
 import { withActivity } from '../core/activity-breadcrumbs.ts';
 import { silenceSoftwareMidi, softwareMidiAccess } from '../audio/software-midi.ts';
 
@@ -114,6 +116,47 @@ export interface PreparedExecutableCode {
  * Inspects raw text from the model into executable JavaScript and classifies
  * whether it is an executable JavaScript code action or conversational prose.
  */
+/**
+ * What a trial run's sandbox page talks to instead of the app window: messages still go to the
+ * app (which only watches for errors), and sound has nowhere to go. Web Audio is an
+ * OfflineAudioContext that never renders, MIDI is a port that swallows everything, and speech and
+ * media elements do nothing. (Source text for the sandbox page, evaluated there.)
+ */
+const TRIAL_HOST = `(() => {
+  let audio = null;
+  const quiet = () => {
+    if (audio) return audio;
+    const Offline = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!Offline) return null;
+    const real = new Offline(2, 44100, 44100);
+    const context = new Proxy(real, {
+      get(target, prop) {
+        if (prop === 'state') return 'running';
+        if (prop === 'resume') return () => Promise.resolve();
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    audio = { context, output: real.destination };
+    return audio;
+  };
+  const port = {
+    id: 'quiet', name: 'Quiet', manufacturer: '', type: 'output', state: 'connected', connection: 'open',
+    send() {}, clear() {}, open() { return Promise.resolve(port); }, close() { return Promise.resolve(port); },
+    addEventListener() {}, removeEventListener() {},
+  };
+  try { HTMLMediaElement.prototype.play = () => Promise.resolve(); } catch {}
+  try { window.speechSynthesis.speak = () => {}; } catch {}
+  return {
+    postMessage: (message) => window.parent.postMessage(message, '*'),
+    __chattySharedAudio: quiet,
+    __chattyMidi: () => Promise.resolve({
+      inputs: new Map(), outputs: new Map([['quiet', port]]), sysexEnabled: false,
+      onstatechange: null, addEventListener() {}, removeEventListener() {},
+    }),
+  };
+})()`;
+
 const AsyncFunctionCtor = Object.getPrototypeOf(async function () {}).constructor;
 
 function parsesAsJs(code: string): boolean {
@@ -714,6 +757,8 @@ export class JavascriptRuntime {
   private quietWatch: { timer: ReturnType<typeof setInterval>; analyser: AnalyserNode } | null = null;
   private programOutput: GainNode | null = null;
   private cardShadow: HTMLElement | null = null;
+  // Trial runs go one at a time: the end of the last one queued
+  private trialQueue: Promise<unknown> = Promise.resolve();
 
   constructor(options?: JavascriptRuntimeOptions) {
     this.mode = options?.mode ?? 'iframe';
@@ -972,10 +1017,30 @@ export class JavascriptRuntime {
 
   /** True when a previous run left something on the visual screen (root or body-level elements). */
   /** The element ids on the program's page now (for error hints: an id lookup that found nothing) */
+  /** Ids the program looked up that never existed, and what stood in for each */
+  standInIds(): StandIn[] {
+    try {
+      const list = (this.activeIframe?.contentWindow as unknown as { __chattyStandIns?: () => StandIn[] } | null)?.__chattyStandIns;
+      return typeof list === 'function' ? list() : [];
+    } catch {
+      return [];
+    }
+  }
+
   pageIds(): string[] {
     try {
       const doc = this.activeIframe?.contentDocument;
       return doc ? [...doc.querySelectorAll('[id]')].map((el) => el.id).filter((id) => id && id !== 'root') : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Ids of the input, textarea and select elements in the visible card (what a program reads values from) */
+  pageFields(): string[] {
+    try {
+      const doc = this.activeIframe?.contentDocument;
+      return doc ? [...doc.querySelectorAll('input[id], textarea[id], select[id]')].map((el) => el.id).filter(Boolean) : [];
     } catch {
       return [];
     }
@@ -1390,24 +1455,9 @@ export class JavascriptRuntime {
   // 3. Sandboxed IFrame Runner (Visual DOM/Canvas rendering + Safe Execution)
   // --------------------------------------------------------------------------
 
-  private ensureIframe(): HTMLIFrameElement {
-    if (this.activeIframe && this.activeIframe.contentWindow) {
-      return this.activeIframe;
-    }
-
-    const iframe = document.createElement('iframe');
-    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
-    iframe.setAttribute('allow', 'autoplay; midi');
-    iframe.setAttribute('title', 'Chatty JavaScript Runtime Sandbox');
-    iframe.style.position = 'absolute';
-    iframe.style.inset = '0';
-    iframe.style.width = '100%';
-    iframe.style.height = '100%';
-    iframe.style.border = 'none';
-    iframe.style.background = 'transparent';
-    iframe.style.pointerEvents = 'none';
-
-    const runnerHtml = `<!DOCTYPE html>
+  /** The sandbox page. A trial one (hidden, muted) differs only in where the page's host calls go (TRIAL_HOST). */
+  private buildRunnerHtml(trial: boolean): string {
+    return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
@@ -1521,11 +1571,13 @@ export class JavascriptRuntime {
     input:focus, select:focus {
       outline: 2px solid #38bdf8;
     }
+    ${trial ? 'body { padding: 0; }' : ''}
   </style>
 </head>
 <body>
   <div id="root"></div>
   <script>
+    const __chattyHost = ${trial ? TRIAL_HOST : 'window.parent'};
     const hasTopLevelReturn = ${hasTopLevelReturn.toString()};
     let currentExecId = null;
     const pendingAsyncCalls = new Map();
@@ -1533,14 +1585,14 @@ export class JavascriptRuntime {
     window.speak = (text) => {
       const s = typeof text === 'object' ? JSON.stringify(text) : String(text ?? '');
       if (typeof noteRejected === 'function' && badValue(s)) noteRejected('speak(' + shown(s.slice(0, 60)) + ') says ' + (s.match(/NaN|undefined|Infinity/) || [''])[0] + ': almost surely a bug');
-      window.parent.postMessage({ type: 'speak', id: currentExecId, text: s }, '*');
+      __chattyHost.postMessage({ type: 'speak', id: currentExecId, text: s }, '*');
     };
 
     window.playNotes = (notes, tempo) => {
       return new Promise((resolve) => {
         const callId = Math.random().toString(36).slice(2);
         pendingAsyncCalls.set(callId, resolve);
-        window.parent.postMessage({ type: 'playNotes', id: currentExecId, callId, notes, tempo }, '*');
+        __chattyHost.postMessage({ type: 'playNotes', id: currentExecId, callId, notes, tempo }, '*');
       });
     };
 
@@ -1548,7 +1600,7 @@ export class JavascriptRuntime {
       return new Promise((resolve) => {
         const callId = Math.random().toString(36).slice(2);
         pendingAsyncCalls.set(callId, resolve);
-        window.parent.postMessage({ type: 'searchWikipedia', id: currentExecId, callId, query }, '*');
+        __chattyHost.postMessage({ type: 'searchWikipedia', id: currentExecId, callId, query }, '*');
       });
     };
 
@@ -1562,7 +1614,7 @@ export class JavascriptRuntime {
     function SharedAudioContext(options) {
       let shared = null;
       try {
-        shared = window.parent.__chattySharedAudio ? window.parent.__chattySharedAudio() : null;
+        shared = __chattyHost.__chattySharedAudio ? __chattyHost.__chattySharedAudio() : null;
       } catch {}
       if (!shared) return new NativeAudioContext(options);
       const local = {};
@@ -1637,7 +1689,7 @@ export class JavascriptRuntime {
         rejected = { message, line };
       } else {
         rejectedReported = true;
-        window.parent.postMessage({ type: 'program_error', message, line }, '*');
+        __chattyHost.postMessage({ type: 'program_error', message, line }, '*');
       }
     }
     const shown = (v) => (typeof v === 'string' ? "'" + v + "'" : String(v));
@@ -1674,10 +1726,14 @@ export class JavascriptRuntime {
     // at the end of its run, the detached container holding them goes into the card, logged.
     // An input, button, select or text area off the page can't be used, so it has one clear place.
     let createdThisRun = [];
+    // Every element the program makes, newest last (see getElementById below)
+    const madeByProgram = [];
     const createElementNative = Document.prototype.createElement;
     Document.prototype.createElement = function (...args) {
       const el = createElementNative.apply(this, args);
       if (runningProgram) createdThisRun.push(el);
+      madeByProgram.push(el);
+      if (madeByProgram.length > 500) madeByProgram.shift();
       return el;
     };
     function describeControl(el) {
@@ -1750,7 +1806,7 @@ export class JavascriptRuntime {
         const active = programWork.size > 0;
         if (active === workReported) return;
         workReported = active;
-        window.parent.postMessage({ type: 'program_activity', active }, '*');
+        __chattyHost.postMessage({ type: 'program_activity', active }, '*');
       }, 200);
     }
     window.setTimeout = (fn, ms, ...args) => {
@@ -1804,7 +1860,7 @@ export class JavascriptRuntime {
             defaultMidi = null;
             if (soundErrorSent) return;
             soundErrorSent = true;
-            window.parent.postMessage({ type: 'sound_error', text: String(err && err.message || err) }, '*');
+            __chattyHost.postMessage({ type: 'sound_error', text: String(err && err.message || err) }, '*');
           });
       },
       play(...args) { this.send(...args); },
@@ -1819,7 +1875,7 @@ export class JavascriptRuntime {
     // Names JavaScript itself asks for: a real answer (undefined), never a made-up method
     const PROTOCOL_NAMES = new Set(['then', 'catch', 'finally', 'toJSON', 'constructor', 'prototype', 'nodeType', 'valueOf', 'toString', 'asymmetricMatch', '$$typeof']);
     function imagined(text) {
-      window.parent.postMessage({ type: 'imagined', id: currentExecId, text: String(text).slice(0, 200) }, '*');
+      __chattyHost.postMessage({ type: 'imagined', id: currentExecId, text: String(text).slice(0, 200) }, '*');
     }
     function argText(args) {
       try { return args.map((a) => typeof a === 'function' ? 'fn' : JSON.stringify(a)).join(', '); } catch { return '…'; }
@@ -1923,6 +1979,13 @@ export class JavascriptRuntime {
     const findElementById = document.getElementById.bind(document);
     // Stand-ins made for ids the page doesn't have yet (see carryWiring)
     const placeholders = new Map();
+    // Ids given to the element the program made last (id → its tag)
+    const borrowed = new Map();
+    // The kind of element the program uses each id as ('canvas', 'media', 'field', 'dialog')
+    let idKinds = {};
+    const KIND_TAGS = { canvas: ['CANVAS'], media: ['AUDIO', 'VIDEO'], field: ['INPUT', 'TEXTAREA', 'SELECT'], dialog: ['DIALOG'] };
+    // What stands in for each kind; sound gets a <div> (a silent <audio> would fail without an error)
+    const KIND_STAND_IN = { canvas: 'canvas', field: 'input', dialog: 'dialog' };
     // An id one slip from an id on the page ('startbutton' for 'startButton', 'start_btn' for
     // 'start-btn') means that element, not a new empty one
     function sameIdLetters(id) { return id.replace(/[-_]/g, '').toLowerCase(); }
@@ -1949,9 +2012,25 @@ export class JavascriptRuntime {
         imagined("getElementById('" + id + "') → '" + slip + "'");
         return findElementById(slip);
       }
-      // An id that sounds like a canvas gets a real one, or getContext('2d') would fail on a div
-      const isCanvas = /canvas/i.test(id);
-      const made = document.createElement(isCanvas ? 'canvas' : 'div');
+      // The kind it is used as (getContext: a canvas), else one its name says (an id with
+      // "canvas" in it), or any
+      const kind = idKinds[id] || (/canvas/i.test(id) ? 'canvas' : null);
+      const isCanvas = kind === 'canvas';
+      // The element of that kind the program made last and put on the page without an id: it made
+      // the element and then looked it up by an id it never gave it
+      for (let i = madeByProgram.length - 1; i >= 0; i--) {
+        const el = madeByProgram[i];
+        if (el.id || !el.isConnected || (el.parentNode !== document.body && el.parentNode !== window.root)) continue;
+        if (kind && !KIND_TAGS[kind].includes(el.tagName)) continue;
+        // Without a kind, only an empty element that is no control (an output <div> it made):
+        // borrowing it can't overwrite a button's label or anything the program built
+        if (!kind && (el.childNodes.length > 0 || /^(?:BUTTON|INPUT|SELECT|TEXTAREA|A|LABEL|OPTION|CANVAS|AUDIO|VIDEO|IMG|SVG|IFRAME|DIALOG)$/.test(el.tagName))) continue;
+        el.id = id;
+        borrowed.set(id, el.tagName.toLowerCase());
+        imagined("getElementById('" + id + "') → the <" + el.tagName.toLowerCase() + "> it made last");
+        return el;
+      }
+      const made = document.createElement((kind && KIND_STAND_IN[kind]) || 'div');
       if (isCanvas) {
         made.setAttribute('width', '400');
         made.setAttribute('height', '300');
@@ -1961,6 +2040,11 @@ export class JavascriptRuntime {
       placeholders.set(id, made);
       return made;
     };
+    // Ids that never existed and what stood in for each, for the error hints (see standInIds)
+    window.__chattyStandIns = () => [
+      ...[...placeholders].map(([id, el]) => ({ id, tag: el.tagName.toLowerCase(), made: 'empty' })),
+      ...[...borrowed].map(([id, tag]) => ({ id, tag, made: 'last' })),
+    ];
 
     // querySelector('#id') has the same problem: null here would throw before anything draws. A plain
     // id selector (nothing else in it) gets the same stand-in; every other selector is left alone.
@@ -2032,7 +2116,7 @@ export class JavascriptRuntime {
     // desktop Web MIDI only reaches plugged-in devices). Timestamps are on this page's clock.
     Object.defineProperty(navigator, 'requestMIDIAccess', {
       configurable: true,
-      value: (options) => window.parent.__chattyMidi(options, () => performance.now()),
+      value: (options) => __chattyHost.__chattyMidi(options, () => performance.now()),
     });
 
     // Whether the program has put anything on screen (canvas, svg, div, table, etc.)
@@ -2046,7 +2130,7 @@ export class JavascriptRuntime {
     // clear(): empties the card, so a program can start the screen over
     window.clear = () => {
       window.root.innerHTML = '';
-      window.parent.postMessage({ type: 'clear' }, '*');
+      __chattyHost.postMessage({ type: 'clear' }, '*');
     };
 
     // After the page has loaded, document.write would replace all of it (the card, the program's
@@ -2068,11 +2152,11 @@ export class JavascriptRuntime {
     // Errors after the run started (timers, handlers, async code) would otherwise fail silently
     window.addEventListener('error', (event) => {
       const err = event.error;
-      window.parent.postMessage({ type: 'program_error', message: err ? (err.message || String(err)) : event.message, line: errorLine(err) }, '*');
+      __chattyHost.postMessage({ type: 'program_error', message: err ? (err.message || String(err)) : event.message, line: errorLine(err) }, '*');
     });
     window.addEventListener('unhandledrejection', (event) => {
       const err = event.reason;
-      window.parent.postMessage({ type: 'program_error', message: err ? (err.message || String(err)) : 'Promise rejected', line: errorLine(err) }, '*');
+      __chattyHost.postMessage({ type: 'program_error', message: err ? (err.message || String(err)) : 'Promise rejected', line: errorLine(err) }, '*');
     });
 
     window.addEventListener('message', async (event) => {
@@ -2091,6 +2175,8 @@ export class JavascriptRuntime {
       if (data.type !== 'execute') return;
       const { id, code } = data;
       currentExecId = id;
+      // What kind of element each looked-up id is used as (element-kinds.ts)
+      idKinds = data.idKinds || {};
       // The names the music rule tells programs to declare (bpm, beat, start, out): a program
       // that forgets one gets a default instead of an error. Its own declarations win.
       window.bpm = 100;
@@ -2160,7 +2246,7 @@ export class JavascriptRuntime {
           const first = rejected;
           rejected = null;
           rejectedReported = true;
-          window.parent.postMessage({
+          __chattyHost.postMessage({
             type: 'result',
             id,
             success: false,
@@ -2171,7 +2257,7 @@ export class JavascriptRuntime {
           }, '*');
           return;
         }
-        window.parent.postMessage({
+        __chattyHost.postMessage({
           type: 'result',
           id,
           success: true,
@@ -2180,7 +2266,7 @@ export class JavascriptRuntime {
           hasVisual: hasVisualElements,
         }, '*');
       } catch (err) {
-        window.parent.postMessage({
+        __chattyHost.postMessage({
           type: 'result',
           id,
           success: false,
@@ -2202,14 +2288,40 @@ export class JavascriptRuntime {
 
     // A tap or key press in the card starts Chatty's audio too (browsers only start it in one)
     for (const type of ['pointerdown', 'pointerup', 'touchend', 'click', 'keydown']) {
-      window.addEventListener(type, () => { try { window.parent.__chattyUnlockAudio?.(); } catch {} }, true);
+      window.addEventListener(type, () => { try { __chattyHost.__chattyUnlockAudio?.(); } catch {} }, true);
     }
 
     // Notify parent that iframe is ready
-    window.parent.postMessage({ type: 'iframe_ready' }, '*');
+    __chattyHost.postMessage({ type: 'iframe_ready' }, '*');
   </script>
 </body>
 </html>`;
+  }
+
+  /** Builds the sandbox iframe ahead of the first program (empty card, hidden) if none exists */
+  prepare(): void {
+    if (this.mode !== 'iframe' || typeof document === 'undefined' || this.activeIframe) return;
+    this.ensureIframe();
+  }
+
+  private ensureIframe(): HTMLIFrameElement {
+    if (this.activeIframe && this.activeIframe.contentWindow) {
+      return this.activeIframe;
+    }
+
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+    iframe.setAttribute('allow', 'autoplay; midi');
+    iframe.setAttribute('title', 'Chatty JavaScript Runtime Sandbox');
+    iframe.style.position = 'absolute';
+    iframe.style.inset = '0';
+    iframe.style.width = '100%';
+    iframe.style.height = '100%';
+    iframe.style.border = 'none';
+    iframe.style.background = 'transparent';
+    iframe.style.pointerEvents = 'none';
+
+    const runnerHtml = this.buildRunnerHtml(false);
 
     this.activeIframe = iframe;
     window.addEventListener('message', this.handleHostMessage);
@@ -2404,7 +2516,116 @@ export class JavascriptRuntime {
       }, this.timeoutMs);
 
       this.pendingRuns.set(reqId, { options, spokenTexts, timer, finish: settle });
-      iframe.contentWindow?.postMessage({ type: 'execute', id: reqId, code }, '*');
+      iframe.contentWindow?.postMessage({ type: 'execute', id: reqId, code, idKinds: elementKinds(code) }, '*');
+    });
+  }
+
+  /**
+   * Runs code in a separate hidden, muted iframe for up to ms, then removes it. Nothing is shown,
+   * spoken or played, and nothing reaches the run log or the visible card (see TRIAL_HOST).
+   * Resolves with the first error (as a real run reports it, including the sandbox's own checks),
+   * or null when it ran that long without one. Trials queue: one at a time. If the trial page
+   * can't be set up at all (no DOM), that is null too: nothing was shown to be wrong.
+   */
+  trialRun(code: string, ms = 1500): Promise<{ error: string | null; errorLine?: number; reached?: boolean }> {
+    const run = this.trialQueue.then(() => this.trialNow(code, ms));
+    this.trialQueue = run.catch(() => undefined);
+    return run.catch(() => ({ error: null }));
+  }
+
+  private trialNow(code: string, ms: number): Promise<{ error: string | null; errorLine?: number; reached?: boolean }> {
+    if (typeof document === 'undefined' || !document.body) return Promise.resolve({ error: null });
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.setAttribute('tabindex', '-1');
+    iframe.setAttribute('title', 'Chatty trial run');
+    // Off screen, but laid out at a fixed size (canvas and DOM code reads sizes)
+    iframe.style.cssText =
+      'position:fixed;left:-10000px;top:0;width:400px;height:300px;border:0;visibility:hidden;pointer-events:none;';
+    const id = `trial_${++this.reqCounter}_${Date.now()}`;
+
+    return new Promise((resolve) => {
+      let finished = false;
+      let ready = false;
+      let started = false;
+      let stopTimer: ReturnType<typeof setTimeout> | undefined;
+      let readyTimer: ReturnType<typeof setTimeout> | undefined;
+
+      const finish = (error: string | null, errorLine?: number): void => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(stopTimer);
+        clearTimeout(readyTimer);
+        window.removeEventListener('message', onMessage);
+        // Whether the code marked with globalThis.__chattyReached ran (see blankStage)
+        let reached = false;
+        try {
+          reached = !!(iframe.contentWindow as unknown as { __chattyReached?: boolean } | null)?.__chattyReached;
+        } catch {
+          // frame went away
+        }
+        // Removing the frame ends its timers, animation frames and audio with it
+        try {
+          iframe.src = 'about:blank';
+        } catch {
+          // already gone
+        }
+        iframe.remove();
+        resolve(error === null ? { error: null, reached } : { error, errorLine, reached });
+      };
+
+      const start = (): void => {
+        if (started || finished) return;
+        started = true;
+        clearTimeout(readyTimer);
+        stopTimer = setTimeout(() => finish(null), ms);
+        try {
+          iframe.contentWindow?.postMessage({ type: 'execute', id, code, idKinds: elementKinds(code) }, '*');
+        } catch (err) {
+          finish(err instanceof Error ? err.message : String(err));
+        }
+      };
+
+      const onMessage = (event: MessageEvent<any>): void => {
+        if (event.source !== iframe.contentWindow) return;
+        const data = event.data;
+        if (!data || typeof data !== 'object') return;
+        const line = typeof data.line === 'number' ? data.line : typeof data.errorLine === 'number' ? data.errorLine : undefined;
+        if (data.type === 'iframe_ready') {
+          ready = true;
+          start();
+        } else if (data.type === 'program_error') {
+          finish(String(data.message ?? 'Unknown error'), line);
+        } else if (data.type === 'result') {
+          if (!data.success) finish(String(data.error ?? 'Unknown error'), line);
+        } else if (data.type === 'playNotes' || data.type === 'searchWikipedia') {
+          // Nothing plays and nothing is fetched; the program just gets an answer
+          try {
+            iframe.contentWindow?.postMessage(
+              { type: 'async_response', callId: data.callId, result: { success: data.type === 'playNotes' } },
+              '*'
+            );
+          } catch {
+            // frame went away
+          }
+        }
+      };
+
+      try {
+        window.addEventListener('message', onMessage);
+        iframe.addEventListener('load', () => {
+          setTimeout(() => {
+            if (!ready) start();
+          }, 50);
+        });
+        // Fallback if the ready signal never comes
+        readyTimer = setTimeout(start, 600);
+        document.body.appendChild(iframe);
+        iframe.srcdoc = this.buildRunnerHtml(true);
+      } catch (err) {
+        finish(err instanceof Error ? err.message : String(err));
+      }
     });
   }
 

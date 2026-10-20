@@ -27,7 +27,7 @@ import { NEEDLE_LABEL } from '../runtimes/needle-router.ts';
 import { MODEL_REGISTRY } from './model-manager.ts';
 import { WebLlmProvider } from '../runtimes/webllm-provider.ts';
 import { OnnxLlmProvider } from '../runtimes/onnx-llm-provider.ts';
-import { clearActivity, readInterruptedActivity } from './activity-breadcrumbs.ts';
+import { clearActivity, readInterruptedActivity, withActivity } from './activity-breadcrumbs.ts';
 import { appendRunLog, runLogText, setRunLogChat } from './run-log.ts';
 import {
   PHONE_CHAT_SYSTEM_PROMPT,
@@ -626,11 +626,15 @@ export class VoiceAssistantEngine {
             clearLlmLoadMarker();
             if (ticket !== this.llmLoadTicket) return;
             clearLoadFailure();
-            this.stateCoordinator.setModelState('llm', 'ready');
-            this.greetWithoutSpeech();
-            const readinessMs = Math.max(1, Math.round(performance.now() - startInit));
-            this.orchestrator.recordInitializationTiming(readinessMs, readinessMs);
-            this.events.onStatusChange?.(null);
+            return this.warmUpChat(provider).then(() => {
+              if (ticket !== this.llmLoadTicket) return;
+              this.stateCoordinator.setModelState('llm', 'ready');
+              this.greetWithoutSpeech();
+              const readinessMs = Math.max(1, Math.round(performance.now() - startInit));
+              this.orchestrator.recordInitializationTiming(readinessMs, readinessMs);
+              this.events.onStatusChange?.(null);
+              this.prepareSandboxWhenIdle();
+            });
           })
           .catch((err): Promise<void> | void => {
             clearLlmLoadMarker();
@@ -1401,6 +1405,16 @@ export class VoiceAssistantEngine {
     return this.jsRuntime.execute(code, callback);
   }
 
+  /** Whether this chat has a program Replay can run again */
+  canReplay(): boolean {
+    return this.orchestrator.replayableProgram() !== null;
+  }
+
+  /** Runs this chat's newest program again, without the model */
+  replayLastProgram(): Promise<boolean> {
+    return this.orchestrator.replayLastProgram();
+  }
+
   getChatModelId(): string {
     return this.chatModelId;
   }
@@ -1433,6 +1447,42 @@ export class VoiceAssistantEngine {
   }
 
   /** The model answering turns on desktop: Gemma 4 (LiteRT), or Qwen2.5-Coder when picked. */
+  /**
+   * One tiny generation right after a WebLLM model loads, so the first-generation GPU cost
+   * (pipeline compiles, KV cache) is paid while nothing else is happening. Not a chat turn:
+   * not streamed, logged or remembered. Failures are ignored. WebLLM only (LiteRT skipped).
+   */
+  private async warmUpChat(provider: LlmRuntimeProvider): Promise<void> {
+    if (!(provider instanceof WebLlmProvider) || provider !== this.localChat) return;
+    try {
+      await withActivity('warming up the model', () =>
+        provider.generate({
+          turnId: `warmup-${Date.now()}`,
+          systemPrompt: '',
+          messages: [{ role: 'user', content: 'Hi' }],
+          maxOutputTokens: 1,
+        })
+      );
+    } catch (err) {
+      console.warn('Model warm-up failed (ignored):', err);
+    }
+    await settle(AFTER_HEAVY_MS);
+  }
+
+  /** Builds the sandbox iframe while idle, so the first program doesn't build it right after a reply */
+  private prepareSandboxWhenIdle(): void {
+    const run = () => {
+      try {
+        this.jsRuntime.prepare();
+      } catch (err) {
+        console.warn('Sandbox pre-build failed (ignored):', err);
+      }
+    };
+    const ric = (globalThis as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
+    if (typeof ric === 'function') ric(run, { timeout: 2000 });
+    else setTimeout(run, AFTER_HEAVY_MS);
+  }
+
   private get chatLlm(): LlmRuntimeProvider {
     return this.localChat ?? this.llmProvider;
   }
@@ -1539,8 +1589,12 @@ export class VoiceAssistantEngine {
         .then(() => {
           if (ticket !== this.llmLoadTicket) return;
           clearLoadFailure();
-          this.stateCoordinator.setModelState('llm', 'ready');
-          this.events.onStatusChange?.(null);
+          return this.warmUpChat(this.chatLlm).then(() => {
+            if (ticket !== this.llmLoadTicket) return;
+            this.stateCoordinator.setModelState('llm', 'ready');
+            this.events.onStatusChange?.(null);
+            this.prepareSandboxWhenIdle();
+          });
         })
         .catch((err): Promise<void> | void => {
           if (ticket !== this.llmLoadTicket) return;

@@ -1,5 +1,6 @@
 import { parse } from 'acorn';
 import { parse as parseLoose } from 'acorn-loose';
+import { focusedContext } from './blank-fix.ts';
 /**
  * Fixing a failed program. A fix turn has its own short system prompt (FIX_SYSTEM_PROMPT) and one
  * message, the user's: what the program is for, the error, what to reply, then the whole program
@@ -103,9 +104,24 @@ export function fixRequest(
 ): string {
   const task = request.replace(/\s+/g, ' ').trim().replace(/[.!?:,;\s]+$/, '').slice(0, 200);
   const problem = error.trim().replace(/\.+$/, '');
-  const lines = code.split('\n');
+  let lines = code.split('\n');
   const at = line && line >= 1 && line <= lines.length ? line : undefined;
   const failing = at ? lines[at - 1].trim() : '';
+  // A long program shows only the function around the line and the declarations it uses
+  // (the reply is still applied to the whole program, by its own line numbers)
+  const SHORT = 25;
+  let markAt = at;
+  if (lines.length > SHORT && at) {
+    const first = focusedContext(code, block ? block.start : at);
+    const last = block ? focusedContext(code, block.end) : first;
+    // A block must come out the same length, or the whole program is shown
+    if (!block || last.lineInContext - first.lineInContext === block.end - block.start) {
+      lines = first.text.split('\n');
+      const shift = first.lineInContext - (block ? block.start : at);
+      if (markAt) markAt += shift;
+      if (block) block = { ...block, start: block.start + shift, end: block.end + shift };
+    }
+  }
   if (block && block.start >= 1 && block.end <= lines.length && block.start <= block.end) {
     const indent = lines[block.start - 1].match(/^\s*/)?.[0] ?? '';
     lines.splice(block.end, 0, `${indent}${MARK_END}`);
@@ -122,9 +138,9 @@ export function fixRequest(
       '```',
     ].join('\n');
   }
-  if (at) {
-    const indent = lines[at - 1].match(/^\s*/)?.[0] ?? '';
-    lines.splice(at - 1, 1, `${indent}${MARK_START}: ${problem}`, lines[at - 1], `${indent}${MARK_END}`);
+  if (at && markAt) {
+    const indent = lines[markAt! - 1].match(/^\s*/)?.[0] ?? '';
+    lines.splice(markAt - 1, 1, `${indent}${MARK_START}: ${problem}`, lines[markAt! - 1], `${indent}${MARK_END}`);
   }
   // The instruction comes before the code, so copying the code never runs on into it
   return [
@@ -189,15 +205,65 @@ function parses(code: string): boolean {
   }
 }
 
-/** The code of a reply: inside its code fence if it has one, without markers or copied instructions */
+/** A reply's lines without our ERROR markers, copied instructions, fence lines and the "// Cause:" line */
+function keepCodeLines(text: string): string[] {
+  return (
+    text
+      .split('\n')
+      // "Corrected line: foo();" copied the label the request ended with
+      .map((l) => l.replace(/^\s*Corrected line:[ \t]*/i, ''))
+      // Code written as inline markdown (`foo();`) would run as a string that does nothing
+      .map((l) => l.replace(/^(\s*)`([^`]+)`\s*$/, '$1$2'))
+      // …nor the "// Cause:" line, which explains the fix and isn't part of it
+      .filter((l) => !MARKER_LINE.test(l) && !INSTRUCTION_LINE.test(l) && !/^\s*```/.test(l) && !/^\s*\/\/\s*Cause\b/i.test(l))
+  );
+}
+
+/**
+ * The code of a reply: inside its code fence if it has one (prose and comments around the fence
+ * are not code), else all of it. A fence that holds nothing (a trailing "```js" after a whole
+ * program) or code before the fence that makes the whole reply a program: the whole reply,
+ * fence lines dropped.
+ */
 function replyCode(reply: string): string[] {
   const fenced = reply.match(/```[\w-]*[ \t]*\n([\s\S]*?)(?:```|$)/);
-  return (fenced ? fenced[1] : reply)
-    .split('\n')
-    // "Corrected line: foo();" copied the label the request ended with
-    .map((l, i) => (i === 0 ? l.replace(/^\s*Corrected line:[ \t]*/i, '') : l))
-    // …nor the "// Cause:" line, which explains the fix and isn't part of it
-    .filter((l) => !MARKER_LINE.test(l) && !INSTRUCTION_LINE.test(l) && !/^\s*```/.test(l) && !/^\s*\/\/\s*Cause\b/i.test(l));
+  if (!fenced || !fenced[1].trim()) return keepCodeLines(reply);
+  const before = keepCodeLines(reply.slice(0, fenced.index)).filter((l) => l.trim() && !/^\s*\/\//.test(l));
+  if (before.length > 0 && !bareStatements(before.join('\n'))) {
+    const whole = keepCodeLines(reply);
+    if (parses(whole.join('\n'))) return whole;
+  }
+  return keepCodeLines(fenced[1]);
+}
+
+/** Only lone names or literals ("Fixed", "Done", "42"): prose that happens to parse, not code */
+function bareStatements(text: string): boolean {
+  try {
+    const body = (parse(text, STRICT) as unknown as { body: Array<{ type: string; expression?: { type: string } }> }).body;
+    return body.every((n) => n.type === 'EmptyStatement' || (n.type === 'ExpressionStatement' && ['Identifier', 'Literal'].includes(n.expression?.type ?? '')));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The code a reply gave only inside a comment ("// <<< corrected line: foo();"): the text after a
+ * "corrected …:" label that parses as JavaScript, when exactly one comment line has such text.
+ * Prose ("Fix the time declaration") doesn't parse; a lone name or literal isn't taken as code.
+ */
+function commentedCode(lines: string[]): string | null {
+  const found: string[] = [];
+  for (const l of lines) {
+    const m = l.match(/^\s*\/\/\s*(?:(?:<<<|>>>|\+\+\+)\s*)?(?:the\s+)?corrected\b[^:\n]{0,30}:\s*(\S.*)$/i);
+    if (!m) continue;
+    try {
+      const body = (parse(m[1], STRICT) as unknown as { body: unknown[] }).body;
+      if (body.length > 0 && !bareStatements(m[1])) found.push(m[1].trim());
+    } catch {
+      // prose
+    }
+  }
+  return found.length === 1 ? found[0] : null;
 }
 
 /**
@@ -215,8 +281,17 @@ function replaceDeclaredFunction(program: string, reply: string): string | null 
   } catch {
     return null;
   }
-  if (replyBody.length !== 1 || replyBody[0].type !== 'FunctionDeclaration' || !replyBody[0].id?.name) return null;
-  const name = replyBody[0].id.name;
+  if (replyBody.length !== 1) return null;
+  // A function declaration, or one const/let/var holding an arrow or function expression
+  let name: string | undefined;
+  const statement = replyBody[0] as Node & { declarations?: Array<{ id: { type: string; name?: string }; init?: { type: string } | null }> };
+  if (statement.type === 'FunctionDeclaration') name = statement.id?.name;
+  else if (statement.type === 'VariableDeclaration' && statement.declarations?.length === 1) {
+    const d = statement.declarations[0];
+    if (d.id.type === 'Identifier' && d.init && ['ArrowFunctionExpression', 'FunctionExpression'].includes(d.init.type)) name = d.id.name;
+  }
+  if (!name) return null;
+  const viaVariable = statement.type === 'VariableDeclaration';
   const found: Node[] = [];
   const visit = (node: Record<string, unknown>) => {
     if (node.type === 'FunctionDeclaration' && (node.id as { name?: string } | null)?.name === name) found.push(node as unknown as Node);
@@ -227,8 +302,31 @@ function replaceDeclaredFunction(program: string, reply: string): string | null 
   };
   visit(programAst as Record<string, unknown>);
   if (found.length !== 1) return null;
-  const fn = reply.slice(replyBody[0].start, replyBody[0].end);
-  return program.slice(0, found[0].start) + fn + program.slice(found[0].end);
+  let fn = reply.slice(replyBody[0].start, replyBody[0].end);
+  // An arrow or function expression goes back in as a declaration: a declaration can be called
+  // before its line, a const can't (it would throw "Cannot access … before initialization")
+  if (viaVariable) {
+    const init = statement.declarations![0].init as unknown as {
+      async?: boolean;
+      params: Node[];
+      body: Node;
+      expression?: boolean;
+    };
+    const params = init.params.length ? reply.slice(init.params[0].start, init.params[init.params.length - 1].end) : '';
+    const body = reply.slice(init.body.start, init.body.end);
+    fn = `${init.async ? 'async ' : ''}function ${name}(${params}) ${init.body.type === 'BlockStatement' ? body : `{\n  return ${body};\n}`}`;
+  }
+  const result = program.slice(0, found[0].start) + fn + program.slice(found[0].end);
+  // An arrow in place of a declaration: only when no other binding of the name exists and it parses
+  if (viaVariable) {
+    if (new RegExp(`\\b(?:const|let|var)\\s+${name}\\b`).test(program)) return null;
+    try {
+      parse(result, STRICT);
+    } catch {
+      return null;
+    }
+  }
+  return result;
 }
 
 export function applyFixReply(program: string, reply: string, line?: number, endLine?: number): string {
@@ -248,6 +346,11 @@ export function applyFixReply(program: string, reply: string, line?: number, end
   const code = replyCode(reply);
   while (code.length > 0 && !code[code.length - 1].trim()) code.pop();
   while (code.length > 0 && !code[0].trim()) code.shift();
+  // No code lines, but a comment that holds the corrected code ("// corrected line: foo();")
+  if (code.every((l) => !l.trim() || /^\s*\/\//.test(l))) {
+    const commented = commentedCode(code);
+    if (commented) code.splice(0, code.length, commented);
+  }
   // One function, and the program declares exactly one function of that name: that one is
   // replaced, wherever the marked lines were (a reply often brings the named function around them)
   const sameFunction = replaceDeclaredFunction(program, code.join('\n'));

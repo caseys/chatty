@@ -249,6 +249,14 @@ export interface LlmGenerationOptions {
    * still give a different fix (see fixSampling)
    */
   sampling?: { temperature: number; topP: number };
+  /**
+   * A fix turn's reply shape: one cause comment, then a JavaScript line ('line'), one function
+   * ('function') or a whole program ('program'). Runtimes that can constrain output (WebLLM's
+   * grammars) hold the reply to it; the others ignore it.
+   */
+  fixShape?: 'line' | 'function' | 'program' | 'expression' | 'choice';
+  /** With fixShape 'choice': how many lettered options there are (A, B, …) */
+  choiceCount?: number;
   /** How many times this reply was tried before: each retry samples cooler (see retryTemperature) */
   retry?: number;
   signal?: AbortSignal;

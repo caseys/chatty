@@ -1014,9 +1014,19 @@ body {
   column-gap: 8px;
 }
 
-.bottom-bar .context-meter-label,
+/* The left (status or the model's name) may wrap on a phone; the numbers stay on one line */
+.bottom-bar .context-meter-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .bottom-bar .context-meter-value {
   white-space: nowrap;
+}
+
+.meter-status {
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
 }
 
 /* Bottom row: the status/context box under the chat panel (same columns as the workspace, so
@@ -1033,13 +1043,6 @@ body {
 .bottom-bar .context-meter-container {
   max-width: none;
   min-width: 0;
-}
-
-/* Long loading lines wrap inside the narrow status box instead of spilling out */
-.bottom-bar .minimal-status {
-  display: block;
-  white-space: normal;
-  overflow-wrap: anywhere;
 }
 
 .bottom-right {
@@ -1154,38 +1157,89 @@ body {
   box-shadow: 0 0 30px rgba(239, 68, 68, 0.45);
 }
 
-/* Clear, the last resort: quieter than Start and Stop */
-.minimal-start-btn.clearing {
-  border-color: var(--line);
-  background: var(--surface-2, rgba(148, 163, 184, 0.18));
-  color: var(--text-primary);
-  box-shadow: none;
+/* Start, Continue and Replay: a play triangle in place of the dot */
+.minimal-btn-icon {
+  display: none;
+  flex-shrink: 0;
 }
 
-.minimal-start-btn.clearing .minimal-btn-dot {
+.minimal-start-btn.plays .minimal-btn-icon {
+  display: block;
+}
+
+.minimal-start-btn.plays .minimal-btn-dot {
   display: none;
+}
+
+/* Clear: beside the main button, quieter than it */
+.bottom-right .minimal-control {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.screen-clear-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 52px;
+  padding: 0 20px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--fill-subtle, rgba(148, 163, 184, 0.12));
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.screen-clear-btn:hover {
+  border-color: var(--line-strong, var(--line));
+  transform: translateY(-1px);
+}
+
+.screen-clear-btn:active {
+  transform: scale(0.97);
+}
+
+.screen-clear-btn[hidden] {
+  display: none;
+}
+
+/* Phones: Clear and Replay show only their icons */
+@media (max-width: 760px) {
+  .screen-clear-btn {
+    width: 52px;
+    padding: 0;
+  }
+
+  .screen-clear-btn .btn-text {
+    display: none;
+  }
+
+  .minimal-start-btn.replaying {
+    min-width: 52px;
+    width: 52px;
+    padding: 0;
+  }
+
+  .minimal-start-btn.replaying #mic-btn-label {
+    display: none;
+  }
+
+  .bottom-right:has(.screen-clear-btn:not([hidden])) {
+    margin-left: 8px;
+  }
 }
 
 .minimal-start-btn.listening .minimal-btn-dot {
   background: #fff;
   box-shadow: 0 0 10px rgba(255, 255, 255, 0.9);
-}
-
-.minimal-status {
-  font-size: 12px;
-  color: var(--text-primary);
-  letter-spacing: 0.01em;
-  min-height: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 500;
-  text-align: center;
-  width: 100%;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  padding: 0 4px;
 }
 
 /* Settings Native Dialog */

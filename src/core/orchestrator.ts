@@ -4,6 +4,7 @@
 
 import type {
   ConversationMessage,
+  LlmGenerationOptions,
   ConversationSummary,
   InteractionState,
   LlmRuntimeProvider,
@@ -37,10 +38,12 @@ import {
   syntaxErrorLine,
 } from '../tools/javascript-runtime.ts';
 import { appendRunLog } from './run-log.ts';
+import { blankChoices, blankRequest, choiceRequest, fillBlank, findBlank, type Blank } from './blank-fix.ts';
 import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest } from './line-fix.ts';
 import { dropHelperCopies, dropUnusedPackages, errorHint, fixCaseSlips } from './error-hints.ts';
 import { applyAssignmentFixes, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle } from './settle.ts';
+import { LOCAL_CHAT_MODELS } from './settings.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 
 /** "Error at line 7: x is not defined" (the line when the browser reported it) */
@@ -185,6 +188,11 @@ const DRAWING_REQUEST =
   /\b(?:draw|paint|sketch|picture|image|art\b|animat|game|simulat|bounc|canvas|scene|shape|circle|square|triangle|stars?\b|sky|rainbow|landscape|pattern|fractal|particle|mov(?:e|ing)|getContext)/i;
 const THREE_D_REQUEST = /(?:\b3d\b|\bthree[- ]?d\b|\bcube|\bsphere|\bwebgl|\brotat|\bspin|\borbit|\bplanet|THREE\.)/i;
 const DIAGRAM_REQUEST = /\b(?:svg|diagram|icon|chart|graph|logo|vector|flowchart|map)/i;
+/** Something to see or use on screen: an app, a form, a list, a timer */
+const INTERFACE_REQUEST =
+  /\b(?:app|calculator|converter|form|button|input|slider|list|todo|to-do|table|timer|stopwatch|count ?down|clock|dashboard|widget|tracker|quiz|counter|picker|toggle|checklist|planner|calendar|scoreboard|editor|menu|interface|ui|page|show|display|game)s?\b/i;
+/** Anything shown on screen, which goes in the card */
+const VISUAL_REQUEST = new RegExp([INTERFACE_REQUEST, DRAWING_REQUEST, THREE_D_REQUEST, DIAGRAM_REQUEST].map((r) => r.source).join('|'), 'i');
 const FACTS_REQUEST =
   /\b(?:who (?:was|is)|what (?:is|was|are) (?:a|an|the)|when|where|why|which|how (?:many|much|old|tall|far|big|long)|tell me about|look up|search|find out|history|define|meaning|capital|population|weather|news|facts?|wiki|fetch)\b/i;
 
@@ -195,9 +203,10 @@ const FACTS_REQUEST =
  * same prompt each turn.
  */
 const PROMPT_RULES: ReadonlyArray<{ text: string; when?: RegExp }> = [
-  { text: '- ONLY return executable JavaScript: the shortest program that fully does what was asked (draw, build, play, compute, look up) as a live, working browser app.' },
+  { text: '- ONLY return executable JavaScript: the shortest program that fully does what was asked (draw, build, play, compute, look up).' },
   { text: '- All messages to the user go through speak(text). Calculate all results using JavaScript logic and put them in its template string.' },
-  { text: '- What you add to document.body appears in a card on screen. Use HTML and CSS for interfaces: buttons, forms, tables, dashboards and widgets.' },
+  { text: '- What you add to document.body appears in a card on screen.', when: VISUAL_REQUEST },
+  { text: '- Use HTML and CSS for interfaces: buttons, forms, tables, dashboards and widgets.', when: INTERFACE_REQUEST },
   { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations.', when: DRAWING_REQUEST },
   { text: '- For 3D, use WebGL on a <canvas>.', when: THREE_D_REQUEST },
   { text: '- <svg> works for diagrams and icons.', when: DIAGRAM_REQUEST },
@@ -256,7 +265,94 @@ export function fixSampling(attempt: number): { temperature: number; topP: numbe
   return { temperature: Number((0.2 + 0.2 * step).toFixed(2)), topP: Number((0.85 + 0.035 * step).toFixed(3)) };
 }
 
+/** The sampling of re-ask number `extra` (1 to 3) within one fix attempt: warmer than the attempt's own */
+/**
+ * Sampling far from the one just used: wide (hot, full nucleus) after a cool one, cool and narrow
+ * after a warm one, so the last re-ask doesn't land near the replies that already failed
+ */
+export function contrastSampling(previous: { temperature: number; topP: number }): { temperature: number; topP: number } {
+  return previous.temperature < 0.7 ? { temperature: 1, topP: 0.99 } : { temperature: 0.3, topP: 0.7 };
+}
+
+export function reaskSampling(attempt: number, extra: number): { temperature: number; topP: number } {
+  const step = Math.max(attempt, 1) - 1 + extra;
+  return { temperature: Number(Math.min(0.2 + 0.2 * step, 1).toFixed(2)), topP: Number(Math.min(0.85 + 0.035 * step, 0.99).toFixed(3)) };
+}
+
+/** The blank stage's system prompt: one small answer, in the shape the request names */
+const BLANK_SYSTEM_PROMPT = [
+  "You complete one blank in a JavaScript program that runs in the user's browser.",
+  'Reply with only what the request asks for: one JavaScript expression on one line, or the single letter of the expression chosen.',
+].join('\n');
+
+/** The most candidate expressions the blank stage tries in test runs for one attempt */
+const MAX_BLANK_CANDIDATES = 6;
+
+/** The index a multiple-choice reply picks: its first letter A, B, … within the choices, or -1 */
+export function chosenIndex(reply: string, count: number): number {
+  // A lone letter, or one that ends the reply or is followed by "." / ")" ("B", "B.", "(B)", "The answer is B")
+  const m = /^\(?([A-Z])(?:[.):]|$)/.exec(reply.trim()) ?? /(?:^|[^A-Za-z])([A-Z])[.)]?\s*$/.exec(reply.trim());
+  const i = m ? m[1].charCodeAt(0) - 65 : -1;
+  return i >= 0 && i < count ? i : -1;
+}
+
+/** The expression in a reply: its first line that is not blank, a comment or a code fence, without the closing semicolon */
+export function firstExpression(reply: string): string | null {
+  for (const raw of reply.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('```') || line.startsWith('//')) continue;
+    const expr = line.replace(/^`+|`+$/g, '').replace(/;+$/, '').trim();
+    return expr || null;
+  }
+  return null;
+}
+
+/** How many times a fix attempt asks again, at warmer sampling, when its reply is unusable */
+const MAX_FIX_REASKS = 3;
+
 type FixError = { attempt: number; error: string; line?: number };
+
+/**
+ * Why a fix can't be used, or null: it lost the program (became chat or a bare speak(), stopped
+ * drawing what the program drew, or dropped the function it was asked for), changed nothing (edits
+ * that matched nothing would only repeat the error), or came back cut off (doesn't parse)
+ */
+async function unusableFix(
+  original: string,
+  fixedProgram: string,
+  code: string,
+  functionName?: string
+): Promise<'lost' | 'unchanged' | 'incomplete' | null> {
+  const dropped = !!functionName && !new RegExp(`\\bfunction\\s+${functionName.replace(/\$/g, '\\$')}(?![\\w$])`).test(code);
+  if (isTalkOnly(code) || (programDraws(original) && !programDraws(code)) || dropped) return 'lost';
+  if (stripComments(fixedProgram).replace(/\s+/g, '') === stripComments(original).replace(/\s+/g, '')) return 'unchanged';
+  if ((await syntaxErrorLine(code)) !== undefined) return 'incomplete';
+  return null;
+}
+
+const UNUSABLE_WHY = {
+  lost: 'The fix lost the program',
+  unchanged: "The fix didn't change the program",
+  incomplete: 'The fix came back incomplete',
+  repeated: 'The fix failed the same way in a test run',
+};
+
+/** The pause between test runs, so hidden iframes are not created back to back */
+const TRIAL_GAP_MS = 150;
+
+/** WebLLM models from this download size up (about 1.5B parameters) follow a line fix well */
+const LINE_FIX_MIN_BYTES = 850_000_000;
+
+/**
+ * Whether the model is large enough to be asked for the line or function fix first (the blank
+ * stage follows only if that fails): the Gemma 4 models, and WebLLM models of about 1.5B
+ * parameters or more. Smaller models keep the blank stage first, a smaller question.
+ */
+export function prefersLineFix(modelId: string): boolean {
+  if (/^gemma-4/i.test(modelId)) return true;
+  const model = LOCAL_CHAT_MODELS.find((m) => m.id === modelId);
+  return !!model && !model.phone && model.sizeBytes >= LINE_FIX_MIN_BYTES;
+}
 
 /** What Chatty says when the last fix attempt failed too */
 function gaveUpText(error: string): string {
@@ -305,6 +401,14 @@ export class ConversationOrchestrator {
   // Paris?") continue the previous action, and gives the coder the program it is editing
   private lastAction: LastAction | null = null;
   // The newest program run, so an error it hits (during or soon after the run) goes back to the model once
+  /** Aborts the blank stage's model calls when the user starts a new turn (see blankStage) */
+  private blankAbort: AbortController | null = null;
+  /** Requests (by original turn) whose blank stage has run: a large model gets it once, after its line fix fails */
+  private blankTried = new Set<string>();
+  /** Requests (by original turn) that Chatty has given up on: nothing is corrected or fixed after that */
+  private gaveUp = new Set<string>();
+  /** When the last test run ended, to pause between them */
+  private lastTrialEnd = 0;
   private lastRun: {
     turnId: string;
     code: string;
@@ -591,6 +695,7 @@ export class ConversationOrchestrator {
     }
 
     const { turnId, signal } = this.scheduler.startTurn();
+    this.blankAbort?.abort(); // a blank stage still asking the model gives way to the new turn
     const conversationId = this.getConversationId?.();
     this.activeTurnStartTime = performance.now();
 
@@ -863,14 +968,15 @@ export class ConversationOrchestrator {
         let stoppedRepeating = false;
         let repeatCheckedAt = 0;
 
-        const generateReply = (messages: typeof promptMessages, retry = 0) => withActivity('generating a reply', () => generationProvider.generate({
+        const generateReply = (messages: typeof promptMessages, retry = 0, reask?: { temperature: number; topP: number }) => withActivity('generating a reply', () => generationProvider.generate({
           turnId,
           systemPrompt,
           messages,
           temperature: 0.1,
           maxOutputTokens: generationProvider.maxOutputTokens,
           // A first fix wants the one most likely line; each later attempt samples differently
-          ...(options?.autoFix ? (fixSampling(options.fixAttempt ?? 1) ? { sampling: fixSampling(options.fixAttempt ?? 1) } : { exact: true }) : {}),
+          ...(options?.autoFix ? (reask ? { sampling: reask } : fixSampling(options.fixAttempt ?? 1) ? { sampling: fixSampling(options.fixAttempt ?? 1) } : { exact: true }) : {}),
+          ...(options?.autoFix ? { fixShape: options.fixBlock ? ('function' as const) : fixLine ? ('line' as const) : ('program' as const) } : {}),
           ...(retry > 0 ? { retry } : {}),
           signal: generationAbort.signal,
           onToken: (chunk) => {
@@ -994,6 +1100,55 @@ export class ConversationOrchestrator {
           genResult = await generateReply([...promptMessages.slice(0, -1), { ...last, content: `${last.content}${TALK_RETRY_NOTE}` }], 1);
         }
 
+        // A fix reply that is unchanged, lost or incomplete is asked for again at once, warmer: a
+        // one-line reply takes about 2 seconds, so a whole attempt is not spent on it
+        // A reply that passes is test-run once (hidden): one that fails the way the program did
+        // has made no progress, and is not run for real either
+        let repeatedTrial = false;
+        if (options?.autoFix) {
+          const original = options.autoFix;
+          const failedError = this.lastRun?.error ?? null;
+          const unusableWhy = async (raw: string): Promise<string | undefined> => {
+            repeatedTrial = false;
+            const program = applyFixReply(original, raw, fixLine, options.fixBlock?.end);
+            const code = inspectExecutableCode(program).code.trim();
+            const problem = await unusableFix(original, program, code, options.fixBlock?.name);
+            if (problem) return UNUSABLE_WHY[problem];
+            if (failedError && typeof this.javascriptRuntime.trialRun === 'function') {
+              const trial = await this.trial(code);
+              appendRunLog('retry', `a test run of the fix gave ${trial.error ? errorText(trial.error, trial.errorLine) : 'no error'}`);
+              if (trial.error === failedError) {
+                repeatedTrial = true;
+                return UNUSABLE_WHY.repeated;
+              }
+            }
+            return undefined;
+          };
+          // At least two re-asks, the last one sampled far from the one before; a small model's
+          // one-line reply is quick, so it gets one more
+          const reasks = fixLine && !options.fixBlock && !prefersLineFix(generationProvider.modelId) ? MAX_FIX_REASKS : 2;
+          let lastSampling = fixSampling(options.fixAttempt ?? 1) ?? { temperature: 0.2, topP: 0.9 };
+          // The last reply is judged too (it is not asked for again)
+          for (let extra = 0; extra <= reasks; extra++) {
+            if (!this.scheduler.isTurnValid(turnId) || signal.aborted || (genResult.aborted && !stoppedRepeating)) break;
+            const why = await unusableWhy(rawAccumulatedTokens || assistantMsg.canonicalContent || genResult.text);
+            if (!why || extra === reasks) break;
+            const sampling = extra + 1 === reasks ? contrastSampling(lastSampling) : reaskSampling(options.fixAttempt ?? 1, extra + 1);
+            lastSampling = sampling;
+            appendRunLog('discarded', `// ${why}, so it was asked for again. The model replied:\n${rawAccumulatedTokens || genResult.text}`);
+            appendRunLog('retry', `${why.toLowerCase()}: asked again at temperature ${sampling.temperature}, top-p ${sampling.topP} (${extra + 1} of ${reasks})`);
+            rawAccumulatedTokens = '';
+            assistantMsg.canonicalContent = '';
+            lastSpokenTextEmitted = '';
+            processedSpeakMatches = 0;
+            streamMode = forceProse ? 'prose' : 'unknown';
+            stoppedRepeating = false;
+            repeatCheckedAt = 0;
+            generationAbort = new AbortController();
+            genResult = await generateReply(promptMessages, 0, sampling);
+          }
+        }
+
         if (generationProvider !== this.llmProvider) this.events.onStatusChange?.(null);
 
         signal.removeEventListener('abort', abortGeneration);
@@ -1069,28 +1224,18 @@ export class ConversationOrchestrator {
           // drew, has lost the program. Nothing runs and nothing is said or shown; the original
           // stays the current program (lastRun, lastAction) and the status says why.
           const originalCode = options?.autoFix;
-          // …or, asked for a whole function, sent back something that no longer declares it
-          const functionDropped =
-            !!options?.fixBlock?.name && !new RegExp(`\\bfunction\\s+${options.fixBlock.name}\\b`).test(executableCode);
-          const lostProgram =
-            !!originalCode &&
-            (isTalkOnly(executableCode) || (programDraws(originalCode) && !programDraws(executableCode)) || functionDropped);
-          // Edits that matched nothing leave the same failing program: running it again would
-          // only repeat the error (and its sounds and words)
-          const unchangedProgram =
-            !!originalCode && stripComments(fixedProgram).replace(/\s+/g, '') === stripComments(originalCode).replace(/\s+/g, '');
-          // A fix that came back cut off: it doesn't parse, so running it would only fail
-          const incompleteProgram =
-            !!originalCode && !lostProgram && !unchangedProgram && (await syntaxErrorLine(executableCode)) !== undefined;
+          const problem = originalCode
+            ? ((await unusableFix(originalCode, fixedProgram, executableCode, options?.fixBlock?.name)) ?? (repeatedTrial ? ('repeated' as const) : null))
+            : null;
+          const lostProgram = problem === 'lost';
+          const unchangedProgram = problem === 'unchanged';
+          const incompleteProgram = problem === 'incomplete';
+          const repeatedProgram = problem === 'repeated';
 
-          if (lostProgram || unchangedProgram || incompleteProgram) {
-            if (options?.autoFix) this.finishFixLog(lostProgram ? 'lost' : unchangedProgram ? 'unchanged' : 'incomplete');
+          if (lostProgram || unchangedProgram || incompleteProgram || repeatedProgram) {
+            if (options?.autoFix) this.finishFixLog(lostProgram ? 'lost' : unchangedProgram || repeatedProgram ? 'unchanged' : 'incomplete');
             const failed = this.lastRun;
-            const why = lostProgram
-              ? 'The fix lost the program'
-              : unchangedProgram
-                ? "The fix didn't change the program"
-                : 'The fix came back incomplete';
+            const why = UNUSABLE_WHY[problem!];
             appendRunLog('discarded', `// ${why}, so it was not run. The model replied:\n${rawContent}`);
             // The code panel keeps the program that is still current; the reply is in the run log
             this.events.onRawOutput?.(turnId, `// ${why} (its reply is in the log)\n${originalCode}`);
@@ -1105,6 +1250,7 @@ export class ConversationOrchestrator {
               this.escalateFix(failed, attempt + 1, `Your last reply was not a working corrected ${options?.fixBlock ? 'function' : 'line'} (${why.toLowerCase()}).`);
             } else if (failed?.error && options?.autoFix) {
               // That was the last attempt: say so, and what the user can do
+              this.markGaveUp(failed);
               const text = gaveUpText(failed.error);
               assistantMsg.canonicalContent = text;
               this.events.onTokenStream?.(turnId, text, text);
@@ -1253,6 +1399,7 @@ export class ConversationOrchestrator {
                     : String(execResult.output);
               } else if (execResult.error && options?.autoFix && (options.fixAttempt ?? 0) >= MAX_FIX_ATTEMPTS) {
                 // The last fix failed too: say so, and what the user can do
+                this.gaveUp.add(fixedTurnId ?? turnId);
                 spokenText = gaveUpText(execResult.error);
               } else if (execResult.error && !this.autoFixErrors) {
                 // (When a fix follows, its reply is the answer)
@@ -1427,17 +1574,23 @@ export class ConversationOrchestrator {
    * without asking the model. What the program already said isn't said again. A new error goes
    * through maybeAutoFix like any other.
    */
-  private async runCorrected(run: NonNullable<typeof this.lastRun>, correction: { code: string; note: string }): Promise<void> {
+  private async runCorrected(
+    run: NonNullable<typeof this.lastRun>,
+    correction: { code: string; note: string },
+    /** A blank-stage fix: already logged, and it is the model-fix attempt `fixAttempt` */
+    blankFix?: { fixAttempt: number; errorHistory: FixError[] }
+  ): Promise<void> {
     const code = correction.code;
     const named = correction.note;
-    appendRunLog('imagined', `${named}: corrected and run again`);
+    if (this.gaveUp.has(this.requestKey(run))) return;
+    if (!blankFix) appendRunLog('imagined', `${named}: corrected and run again`);
     this.events.onRunStatus?.(run.turnId, { kind: 'running', text: `Corrected ${named}; running it again` });
     this.events.onRawOutput?.(run.turnId, code);
     if (this.javascriptRuntime.hasRunningProgram?.()) {
       await this.javascriptRuntime.resetVisual();
       await settle(AFTER_HEAVY_MS);
     }
-    if (this.scheduler.getActiveTurnId()) return; // the user has moved on
+    if (this.scheduler.getActiveTurnId() || this.gaveUp.has(this.requestKey(run))) return; // the user has moved on
     const said = this.memoryStore.getMessages().find((m) => m.id === `msg_assistant_${run.turnId}`)?.canonicalContent ?? '';
     const result = await this.javascriptRuntime.execute(code, undefined, {
       onSpeak: (phrase) => {
@@ -1454,7 +1607,7 @@ export class ConversationOrchestrator {
       error: result.error ?? null,
       errorLine: result.errorLine,
       fixRequested: false,
-      corrections: (run.corrections ?? 0) + 1,
+      ...(blankFix ? { fixAttempt: blankFix.fixAttempt, errorHistory: blankFix.errorHistory } : { corrections: (run.corrections ?? 0) + 1 }),
     };
     this.events.onRunStatus?.(
       run.turnId,
@@ -1462,6 +1615,7 @@ export class ConversationOrchestrator {
         ? { kind: 'error', text: errorText(result.error, result.errorLine) }
         : { kind: 'ok', text: `Ran in ${Math.max(1, Math.round(result.executionTimeMs))} ms (corrected ${named})` }
     );
+    if (result.error && blankFix && blankFix.fixAttempt >= MAX_FIX_ATTEMPTS) this.sayGaveUp(run.turnId, result.error);
     if (result.error) this.maybeAutoFix(run.turnId);
   }
 
@@ -1474,12 +1628,13 @@ export class ConversationOrchestrator {
     if (!this.autoFixErrors) return;
     if (!run || run.turnId !== turnId || !run.error || run.fixRequested) return;
     if (this.scheduler.getActiveTurnId()) return; // the user has already moved on
+    if (this.gaveUp.has(this.requestKey(run))) return; // Chatty has said it gave up: nothing follows
     // A line past the program's end came from somewhere else (the sandbox's own code): no line
     if (run.errorLine && run.errorLine > run.code.split('\n').length) run.errorLine = undefined;
     // A sure slip (a method's wrong case, a typo of a declared name, an element id one slip
     // from an id on the page) is corrected and run again without the model, even in a fix's
     // program; anything else goes to the model with the facts it was missing (error-hints.ts)
-    const hint = errorHint(run.code, run.error, run.errorLine, { ids: this.javascriptRuntime.pageIds?.() ?? [] });
+    const hint = errorHint(run.code, run.error, run.errorLine, { ids: this.javascriptRuntime.pageIds?.() ?? [], standIns: this.javascriptRuntime.standInIds?.() ?? [] });
     if (hint?.correction && hint.correction.code !== run.code && (run.corrections ?? 0) < 3) {
       run.fixRequested = true;
       void this.runCorrected(run, hint.correction);
@@ -1489,14 +1644,66 @@ export class ConversationOrchestrator {
     const attempt = (run.fixAttempt ?? 0) + 1;
     if (attempt > MAX_FIX_ATTEMPTS) return;
     run.fixRequested = true;
-    this.events.onRunStatus?.(turnId, {
+    // The blank stage: the expression the error names (found with the parser) is replaced by
+    // candidates, each tried in a hidden run. A program that doesn't parse has no such blank.
+    // A large model is asked for the line fix first; the blank stage follows if that fails.
+    const blank = this.blankFor(run);
+    const lineFirst = this.largeModel() && attempt === 1;
+    if (blank && !lineFirst && !(this.largeModel() && this.blankTried.has(this.requestKey(run)))) {
+      this.blankTried.add(this.requestKey(run));
+      this.events.onRunStatus?.(turnId, { kind: 'error', text: `${errorText(run.error, run.errorLine)} (trying fixes for ${blank.text})` });
+      void this.blankStage(run, blank, attempt, hint?.text);
+      return;
+    }
+    this.askLineFix(run, attempt, hint?.text);
+  }
+
+  /** The request a run belongs to (every fix of it shares the key) */
+  private requestKey(run: { turnId: string; originalTurnId?: string }): string {
+    return run.originalTurnId ?? run.turnId;
+  }
+
+  /** Chatty has said it gave up on this run's request: nothing more is corrected or fixed */
+  private markGaveUp(run: { turnId: string; originalTurnId?: string }): void {
+    this.gaveUp.add(this.requestKey(run));
+  }
+
+  /** Whether the active model gets the line fix before the blank stage (see prefersLineFix) */
+  private largeModel(): boolean {
+    return prefersLineFix(this.llmProvider.modelId);
+  }
+
+  /** The blank for a failed run, when its program can be test-run and parses */
+  private blankFor(run: NonNullable<typeof this.lastRun>): Blank | null {
+    return run.error && typeof this.javascriptRuntime.trialRun === 'function' && !brokenLines(run.code) ? findBlank(run.code, run.error, run.errorLine) : null;
+  }
+
+  /** A hidden test run, a short pause after the one before */
+  private async trial(code: string): ReturnType<NonNullable<JavascriptRuntime['trialRun']>> {
+    const wait = TRIAL_GAP_MS - (Date.now() - this.lastTrialEnd);
+    if (wait > 0) await settle(wait);
+    try {
+      return await this.javascriptRuntime.trialRun!(code);
+    } finally {
+      this.lastTrialEnd = Date.now();
+    }
+  }
+
+  /** The line (or syntax block) fix: a fix turn for the marked line, as attempt `attempt` */
+  private askLineFix(run: NonNullable<typeof this.lastRun>, attempt: number, hintText?: string): void {
+    if (!run.error) return;
+    if (attempt > MAX_FIX_ATTEMPTS) {
+      this.sayGaveUp(run.turnId, run.error);
+      return;
+    }
+    this.events.onRunStatus?.(run.turnId, {
       kind: 'error',
       text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
     // A program that doesn't parse: every statement that doesn't is marked, not just one line
     const broken = brokenLines(run.code);
     const block = broken ? { ...broken, why: 'syntax' as const } : undefined;
-    const facts = [earlierErrors(run.errorHistory, run.error), hint?.text].filter(Boolean).join(' ') || undefined;
+    const facts = [earlierErrors(run.errorHistory, run.error), hintText].filter(Boolean).join(' ') || undefined;
     const request = fixRequest(run.task, run.code, run.errorLine, run.error, facts, block);
     this.startFixLog(run);
     appendRunLog(
@@ -1515,6 +1722,171 @@ export class ConversationOrchestrator {
     });
   }
 
+  /** Chatty's closing message when the last fix attempt failed, outside any chat turn */
+  private sayGaveUp(turnId: string, error: string): void {
+    const text = gaveUpText(error);
+    if (this.lastRun?.turnId === turnId) this.markGaveUp(this.lastRun);
+    else this.gaveUp.add(turnId);
+    const msg: ConversationMessage = {
+      id: `msg_assistant_gaveup_${turnId}_${Date.now()}`,
+      turnId: `gaveup_${turnId}_${Date.now()}`,
+      role: 'assistant',
+      canonicalContent: text,
+      speechReadyContent: text,
+      phrases: [],
+      timestamp: Date.now(),
+    };
+    this.memoryStore.addMessage(msg);
+    this.events.onMessageCreated?.({ ...msg });
+    void this.speakOutOfTurn(text);
+  }
+
+  /**
+   * The blank stage (blank-fix.ts), one fix attempt: the expression the error names is replaced by
+   * candidates, each tried in a hidden run (trialRun), until one runs without that error. The
+   * candidates, in order: the model's pick among the page's own names (multiple choice), its
+   * expressions for the blank (three samples), then the remaining choices. At most MAX_CANDIDATES
+   * are tried; the first that passes is run for real. When none does, the line fix follows as the
+   * next attempt. Stops at once when the user starts a new turn.
+   */
+  private async blankStage(run: NonNullable<typeof this.lastRun>, blank: Blank, attempt: number, hintText?: string): Promise<void> {
+    const error = run.error;
+    if (!error) return;
+    const moved = () => !!this.scheduler.getActiveTurnId() || this.lastRun !== run;
+    // A pause before the stage's hidden runs and model calls, for phones' memory
+    await settle(AFTER_HEAVY_MS);
+    if (moved()) return;
+    const notice: ConversationMessage = {
+      id: `msg_user_blank_${run.turnId}_${attempt}_${Date.now()}`,
+      turnId: `blank_${run.turnId}_${attempt}_${Date.now()}`,
+      role: 'user',
+      canonicalContent: `Trying to fix (${attempt} of ${MAX_FIX_ATTEMPTS}): ${error}`,
+      autoFix: true,
+      fixNotice: `Trying to fix (${attempt} of ${MAX_FIX_ATTEMPTS}): ${error}`,
+      timestamp: Date.now(),
+    };
+    this.memoryStore.addMessage(notice);
+    this.events.onMessageCreated?.(notice);
+    this.startFixLog(run);
+    appendRunLog('retry', `the program failed (${errorText(error, run.errorLine)}): trying expressions for the blank \`${blank.text}\` (${blank.why}), each in a test run (attempt ${attempt} of ${MAX_FIX_ATTEMPTS})`);
+
+    const abort = new AbortController();
+    this.blankAbort = abort;
+    const provider = this.phonePipeline?.coder ?? this.llmProvider;
+    const facts = [earlierErrors(run.errorHistory, error), hintText].filter(Boolean).join(' ') || undefined;
+    const page = { ids: this.javascriptRuntime.pageIds?.() ?? [], fields: this.javascriptRuntime.pageFields?.() ?? [] };
+    const choices = blankChoices(run.code, blank, page);
+
+    const ask = (request: string, shape: Partial<LlmGenerationOptions>): Promise<string | null> =>
+      withActivity('asking for a fix', async () => {
+        if (moved() || abort.signal.aborted) return null;
+        try {
+          const result = await provider.generate({
+            turnId: `blank_${run.turnId}_${attempt}`,
+            systemPrompt: BLANK_SYSTEM_PROMPT,
+            messages: [{ role: 'user', content: request }],
+            temperature: 0.1,
+            signal: abort.signal,
+            ...shape,
+          });
+          return moved() || abort.signal.aborted || result.aborted ? null : result.text;
+        } catch {
+          return null;
+        }
+      });
+
+    // Every candidate: the page's and program's choices (ranked by how well they fit the name) and
+    // what the model picked or wrote (a vote each)
+    const votes = new Map<string, number>();
+    // A bare literal ([], 0, '', null, undefined) runs but only silences the error: not a fix
+    const LITERAL = /^(?:-?[\d.]+(?:e[-+]?\d+)?|'[^']*'|"[^"]*"|`[^`$]*`|\[\s*\]|\{\s*\}|null|undefined|NaN|true|false)$/;
+    const vote = (expr: string | null) => {
+      const key = expr?.trim();
+      if (key && key !== blank.text.trim() && !LITERAL.test(key)) votes.set(key, (votes.get(key) ?? 0) + 1);
+    };
+    let count = 0;
+    type Candidate = { code: string; expr: string; level: number; rank: number; votes: number };
+    let best = null as Candidate | null;
+    const rankOf = (expr: string) => {
+      const i = choices.indexOf(expr);
+      return i < 0 ? choices.length : i;
+    };
+    const mentions = new RegExp(`(?<![\\w$])${blank.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w$])`);
+    const tested = new Set<string>();
+    // A test run can't tell which candidate is meant (two fields both run), only how far each got:
+    // the furthest wins, then the one whose name fits, then the model's votes
+    const test = async (expr: string): Promise<void> => {
+      if (tested.has(expr) || count >= MAX_BLANK_CANDIDATES || moved() || abort.signal.aborted) return;
+      tested.add(expr);
+      const filled = fillBlank(run.code, blank, expr);
+      if (!filled || filled === run.code) return;
+      count++;
+      // The test copy marks the blank, to tell a clean run from one that never got there (a click
+      // handler, an animation frame)
+      const probe = fillBlank(run.code, blank, `((globalThis.__chattyReached = true), ${expr})`) ?? filled;
+      const trial = await this.trial(probe);
+      if (moved()) return;
+      // 3: ran through the blank without an error; 2: an error further on; 1: another error, no
+      // longer about the blank, or no error but the blank never ran
+      const level = !trial.error
+        ? trial.reached === false && probe !== filled
+          ? 1
+          : 3
+        : trial.error !== error && trial.errorLine !== undefined && trial.errorLine > (run.errorLine ?? blank.line)
+          ? 2
+          : trial.error !== error && !mentions.test(trial.error)
+            ? 1
+            : 0;
+      appendRunLog('retry', `a test run: \`${expr}\` for \`${blank.text}\` gave ${trial.error ? `${errorText(trial.error, trial.errorLine)}${level ? ' (progress)' : ''}` : trial.reached === false ? 'no error, but the blank never ran' : 'no error'}`);
+      if (!level) return;
+      const entry = { code: filled, expr, level, rank: rankOf(expr), votes: votes.get(expr) ?? 0 };
+      if (!best || entry.level > best.level || (entry.level === best.level && (entry.rank < best.rank || (entry.rank === best.rank && entry.votes > best.votes)))) best = entry;
+    };
+    // Nothing beats a clean run of the best-fitting choice
+    const settled = () => { const b = best as Candidate | null; return b !== null && b.level === 3 && b.rank === 0; };
+    try {
+      if (choices.length >= 2) {
+        const reply = await ask(choiceRequest(run.task, run.code, blank, error, choices, facts), { exact: true, fixShape: 'choice', choiceCount: choices.length, maxOutputTokens: 8 });
+        const picked = reply === null ? -1 : chosenIndex(reply, choices.length);
+        if (picked >= 0) vote(choices[picked]);
+      }
+      // The best-fitting choice first: when it runs cleanly, the model needn't write anything
+      if (choices.length > 0) await test(choices[0]);
+      if (!settled()) {
+        for (const sampling of [{ exact: true }, { sampling: fixSampling(2) }, { sampling: fixSampling(4) }]) {
+          if (moved() || abort.signal.aborted) break;
+          const reply = await ask(blankRequest(run.task, run.code, blank, error, facts), { ...sampling, fixShape: 'expression', maxOutputTokens: 96 });
+          vote(reply === null ? null : firstExpression(reply));
+        }
+        const candidates = [...new Set([...choices, ...votes.keys()])].sort(
+          (a, b) => (votes.get(b) ?? 0) - (votes.get(a) ?? 0) || rankOf(a) - rankOf(b)
+        );
+        for (const expr of candidates) {
+          if (settled() || moved() || abort.signal.aborted || count >= MAX_BLANK_CANDIDATES) break;
+          await test(expr);
+        }
+      }
+    } finally {
+      if (this.blankAbort === abort) this.blankAbort = null;
+    }
+
+    if (moved() || abort.signal.aborted) {
+      this.finishFixLog('lost');
+      return;
+    }
+    // (set inside test(), which TypeScript can't follow)
+    const found = best as Candidate | null;
+    if (found) {
+      this.finishFixLog('ran');
+      appendRunLog('imagined', `${blank.text} → ${found.expr}: corrected by a test run (${found.level === 3 ? 'it ran' : 'it got further'}, the best of ${count})`);
+      await this.runCorrected(run, { code: found.code, note: `${blank.text} → ${found.expr}` }, { fixAttempt: attempt, errorHistory: withError(run) });
+      return;
+    }
+    this.finishFixLog('unchanged');
+    appendRunLog('retry', `no expression passed a test run (${count} tried for \`${blank.text}\`): asking for the marked line instead`);
+    this.askLineFix(run, attempt + 1, hintText);
+  }
+
   /**
    * Another fix, after one that was not used (lost, unchanged or not parsing): the whole function
    * around the failing line is marked and asked for (line-fix.ts), and the reply replaces that
@@ -1522,9 +1894,17 @@ export class ConversationOrchestrator {
    */
   private escalateFix(run: NonNullable<typeof this.lastRun>, attempt: number, note?: string): void {
     if (!run.error) return;
+    // A large model's line fix failed: the blank stage now, once
+    const blank = this.largeModel() && !this.blankTried.has(this.requestKey(run)) ? this.blankFor(run) : null;
+    if (blank) {
+      this.blankTried.add(this.requestKey(run));
+      this.events.onRunStatus?.(run.turnId, { kind: 'error', text: `${errorText(run.error, run.errorLine)} (trying fixes for ${blank.text})` });
+      void this.blankStage(run, blank, attempt);
+      return;
+    }
     // Outside any function, the marked line is asked for again (sampled differently, see fixSampling)
     const block = enclosingFunction(run.code, run.errorLine);
-    const hint = errorHint(run.code, run.error, run.errorLine, { ids: this.javascriptRuntime.pageIds?.() ?? [] });
+    const hint = errorHint(run.code, run.error, run.errorLine, { ids: this.javascriptRuntime.pageIds?.() ?? [], standIns: this.javascriptRuntime.standInIds?.() ?? [] });
     const facts = [note, earlierErrors(run.errorHistory, run.error), hint?.text].filter(Boolean).join(' ') || undefined;
     const request = fixRequest(run.task, run.code, run.errorLine, run.error, facts, block ?? undefined);
     appendRunLog(
@@ -1610,6 +1990,32 @@ export class ConversationOrchestrator {
   }
 
   /** The last tool/program used in this conversation, if any. */
+  /** The newest program in this chat that does more than talk, for Replay */
+  replayableProgram(): string | null {
+    const action = this.getLastAction(this.getConversationId?.());
+    return action?.kind === 'code' && action.code && !isTalkOnly(action.code) ? action.code : null;
+  }
+
+  /**
+   * Runs this chat's newest program again (the main button's Replay): no model, and nothing added
+   * to the chat. A program still running is stopped first; what it says is voiced as it runs.
+   */
+  async replayLastProgram(): Promise<boolean> {
+    const code = this.replayableProgram();
+    if (!code || this.scheduler.getActiveTurnId()) return false;
+    if (this.javascriptRuntime.hasRunningProgram?.()) {
+      await this.javascriptRuntime.resetVisual();
+      await settle(AFTER_HEAVY_MS);
+    }
+    appendRunLog('request', '(Replay: the program ran again)');
+    const result = await this.javascriptRuntime.execute(code, undefined, { onSpeak: (phrase) => void this.speakOutOfTurn(phrase) });
+    this.events.onRunStatus?.(
+      null,
+      result.error ? { kind: 'error', text: errorText(result.error, result.errorLine) } : { kind: 'ok', text: 'Ran again' }
+    );
+    return true;
+  }
+
   private getLastAction(conversationId: string | undefined): LastAction | null {
     return this.lastAction && this.lastAction.conversationId === conversationId ? this.lastAction : null;
   }

@@ -124,9 +124,9 @@
       <!-- Bottom row: status and context on the left, start/stop on the right -->
       <div class="bottom-bar">
         <footer class="context-meter-container" aria-label="Status and Resource Usage">
-          <div id="minimal-status" class="minimal-status" aria-live="polite">Pulling local models…</div>
+          <!-- One line: what is happening (or the model's name) on the left, the numbers on the right -->
           <div class="context-meter-header">
-            <span class="context-meter-label"><span class="context-meter-dot" aria-hidden="true"></span><span id="meter-title">Context Window</span></span>
+            <span class="context-meter-label"><span class="context-meter-dot" aria-hidden="true"></span><span id="minimal-status" class="meter-status" aria-live="polite">Pulling local models…</span></span>
             <span id="context-meter-text" class="context-meter-value">0% (0 / 8,192 tokens)</span>
           </div>
           <div class="context-meter-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Progress">
@@ -137,9 +137,14 @@
         <!-- Waveforms go here on desktop (main.ts places them), then start/stop -->
         <div class="bottom-right">
           <div class="minimal-control">
+            <!-- Clears the card; beside the main button so it can show with Replay -->
+            <button id="btn-clear-screen" class="screen-clear-btn" type="button" title="Clear the screen" aria-label="Clear the screen" hidden>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg><span class="btn-text">Clear</span>
+            </button>
             <div class="minimal-btn-group">
               <button id="btn-mic-toggle" class="minimal-start-btn" type="button" aria-label="Start or stop voice" disabled>
                 <span class="minimal-btn-dot" aria-hidden="true"></span>
+                <svg class="minimal-btn-icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M7 4.5v15l12.5-7.5z"/></svg>
                 <span id="mic-btn-label">Start</span>
               </button>
             </div>

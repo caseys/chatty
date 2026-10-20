@@ -122,3 +122,107 @@ describe('a reply that brings the named function around the marked lines', () =>
     expect(fixed.trim().endsWith('loop();')).toBe(true);
   });
 });
+
+describe('reading the reply shapes small models produce', () => {
+  const prog = ['const a = 1;', 'function playSound(a, b) {', '  return a + b;', '}', 'document.getElementById("sound").play();', 'playSound(1, 2);', 'const z = 3;'].join('\n');
+
+  it('strips echoed ERROR marker lines, also inside a returned program', () => {
+    const reply = '// Cause: ...\n// <<< ERROR\nconst a = 1;\n// >>> ERROR: x is not defined (at line 12)\nconst b = 2;\nconst c = 3;\nconst d = 4;\nconst e = 5;\nconst f = 6;\nconst g = 7;\nconst h = 8;';
+    const out = applyFixReply(prog, reply, 5);
+    expect(out).not.toMatch(/ERROR|Cause/);
+    expect(out.split('\n')[0]).toBe('const a = 1;');
+  });
+
+  it('takes code from a "corrected line:" comment when it parses', () => {
+    const reply = "// Cause: ...\n// <<< corrected line: document.getElementById('sound').play()";
+    expect(applyFixReply(prog, reply, 5).split('\n')[4]).toBe("document.getElementById('sound').play()");
+  });
+
+  it('ignores a "corrected:" comment that is prose', () => {
+    const reply = '// Cause: ...\n// corrected: Fix the time declaration';
+    expect(applyFixReply(prog, reply, 5)).toBe(prog);
+  });
+
+  it('ignores code-looking comments when the reply has real code lines', () => {
+    const reply = '// corrected: foo();\nbar();';
+    const out = applyFixReply(prog, reply, 5).split('\n');
+    expect(out).toContain('bar();');
+    expect(out).not.toContain('foo();');
+  });
+
+  it('takes the fenced code when prose and comments surround the fence', () => {
+    const reply = '// Cause: ...\n// corrected: ...\n```js\nbar();\n```\n// +++ The marked function corrected: it fixes the call';
+    expect(applyFixReply(prog, reply, 5).split('\n')[4]).toBe('bar();');
+  });
+
+  it('replaces a declared function with a same-named arrow, as a declaration (callable before its line)', () => {
+    const reply = '// Cause: ...\nconst playSound = (a, b) => {\n  return a * b;\n};';
+    const out = applyFixReply(prog, reply, 3);
+    expect(out).toBe(prog.replace(/function playSound[\s\S]*?\n}/, 'function playSound(a, b) {\n  return a * b;\n}'));
+    const short = applyFixReply(prog, 'const playSound = async (a) => a * 2;', 3);
+    expect(short).toContain('async function playSound(a) {\n  return a * 2;\n}');
+  });
+
+  it('does not swap an arrow in when another binding of the name exists', () => {
+    const two = 'var playSound = 1;\n' + prog;
+    const out = applyFixReply(two, 'const playSound = (a, b) => a * b;', 4);
+    expect(out).not.toBe(two.replace(/function playSound[\s\S]*?\n}/, 'const playSound = (a, b) => a * b;'));
+  });
+
+  it('drops a stray unterminated or trailing fence after a whole program', () => {
+    const body = ['const a = 1;', 'const b = 2;', 'const c = 3;', 'const d = 4;', 'const e = 5;', 'const f = 6;', 'const g = 7;'].join('\n');
+    expect(applyFixReply(prog, body + '\n```js', 5)).toBe(body);
+    expect(applyFixReply(prog, '```js\n' + body, 5)).toBe(body);
+    expect(applyFixReply(prog, body + '\n```', 5)).toBe(body);
+  });
+});
+
+describe('code written as inline markdown', () => {
+  it('unwraps it, so it does not run as a string that does nothing', () => {
+    const prog = 'const a = 1;\nboom();\nconst b = 2;';
+    const fixed = applyFixReply(prog, "// Cause: x\nCorrected line: `bang();`", 2);
+    expect(fixed.split('\n')[1]).toBe('bang();');
+  });
+});
+
+describe('one-word prose before a code fence', () => {
+  it('is not taken as code', () => {
+    const prog = 'const a = 1;\nboom();\nconst b = 2;';
+    const fixed = applyFixReply(prog, '// Cause: x\nFixed\n```js\nbar();\n```', 2);
+    expect(fixed).not.toContain('Fixed');
+    expect(fixed.split('\n')[1]).toBe('bar();');
+  });
+});
+
+describe('fix requests for long programs show a short context', () => {
+  const filler = Array.from({ length: 20 }, (_, i) => `const filler${i} = ${i};`);
+  const long = ['const rate = 0.2;', ...filler, 'function tip(bill) {', '  const extra = bill * rate;', '  return extra + tip2;', '}', ...filler.map((l) => l.replace('filler', 'later')), 'tip(10);'];
+  const line = long.indexOf('  return extra + tip2;') + 1;
+
+  it('keeps the function and what it uses, with the markers around the failing line', () => {
+    const req = fixRequest('Tips.', long.join('\n'), line, 'tip2 is not defined.');
+    expect(req).toContain('// >>> ERROR: tip2 is not defined\n  return extra + tip2;\n// <<< ERROR'.replace('\n// <<<', '\n  // <<<').replace('// >>>', '  // >>>'));
+    expect(req).toContain('const rate = 0.2;');
+    expect(req).toContain('function tip(bill) {');
+    expect(req).not.toContain('filler7');
+    expect(req).not.toContain('later7');
+    expect(req).toContain('// …');
+    expect(req.split('\n').length).toBeLessThan(25);
+    expect(req).toContain('Marked line:\nreturn extra + tip2;');
+  });
+
+  it('marks a whole function for a second try, and shows the whole program when it does not parse', () => {
+    const block = fixRequest('', long.join('\n'), line, 'boom', undefined, { start: line - 2, end: line + 1 });
+    expect(block).toContain('// >>> ERROR: boom (at line ' + line + ')');
+    expect(block).not.toContain('filler7');
+    const broken = [...long, 'const x = ;'].join('\n');
+    expect(fixRequest('', broken, line, 'boom')).toContain('filler7');
+  });
+
+  it('still applies a reply to the full program by its own line numbers', () => {
+    const fixed = applyFixReply(long.join('\n'), '// Cause: typo\nreturn extra + rate;', line).split('\n');
+    expect(fixed[line - 1]).toBe('  return extra + rate;');
+    expect(fixed).toHaveLength(long.length);
+    expect(fixed[0]).toBe('const rate = 0.2;');
+  });
+});

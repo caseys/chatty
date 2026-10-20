@@ -7,7 +7,7 @@ import {
   FORMAT_TURNS,
   type RunStatus,
 } from '../src/core/orchestrator.ts';
-import { promptRules } from '../src/core/orchestrator.ts';
+import { prefersLineFix, promptRules } from '../src/core/orchestrator.ts';
 import { FIX_SYSTEM_PROMPT } from '../src/core/line-fix.ts';
 import { StateMachineCoordinator } from '../src/core/state-machine.ts';
 import type { JavascriptExecutionResult, JavascriptRuntime } from '../src/tools/javascript-runtime.ts';
@@ -28,10 +28,13 @@ const DRAWING = [
   'ctx.beginPath(); ctx.arc(50, 50, 40, 0, Math.PI * 2); ctx.fill();',
 ].join('\n');
 
+/** An unusable fix reply as the model gives it: the first try and its 3 quick re-asks */
+const asked = (reply: string) => Array<string>(4).fill(reply);
+
 /** Replies from a list, one per request; summaries for compaction. Records every call. */
 class QueueLlm implements LlmRuntimeProvider {
   readonly id = 'queue';
-  readonly modelId = 'queue';
+  modelId = 'queue';
   readonly supportsStreaming = true;
   readonly supportsCancellation = true;
   readonly supportsTools = false;
@@ -84,8 +87,18 @@ function orchestratorFor(llm: LlmRuntimeProvider, extra: Partial<ConstructorPara
 }
 
 /** A program runtime that fails the first run the way a countdown with a typo does */
-function fakeRuntime(results: Array<Partial<JavascriptExecutionResult>>) {
+function fakeRuntime(
+  results: Array<Partial<JavascriptExecutionResult>>,
+  /** With `trials`, the runtime can trial-run programs (the blank stage); each trial takes the next result */
+  page?: {
+    trials?: Array<{ error: string | null; errorLine?: number; reached?: boolean }> | ((code: string) => { error: string | null; errorLine?: number; reached?: boolean });
+    onTrial?: () => void;
+    ids?: string[];
+    fields?: string[];
+  }
+) {
   const executed: string[] = [];
+  const trialled: string[] = [];
   /** Whether the previous program still has something going; a reset ends it */
   const state = { running: false, resets: 0 };
   const runtime = {
@@ -99,8 +112,20 @@ function fakeRuntime(results: Array<Partial<JavascriptExecutionResult>>) {
       state.running = false;
     },
     hasRunningProgram: () => state.running,
+    ...(page?.trials
+      ? {
+          async trialRun(code: string) {
+            trialled.push(code);
+            page.onTrial?.();
+            const trials = page.trials!;
+            return typeof trials === 'function' ? trials(code) : (trials.shift() ?? { error: null });
+          },
+          pageIds: () => page.ids ?? [],
+          pageFields: () => page.fields ?? [],
+        }
+      : {}),
   } as unknown as JavascriptRuntime;
-  return { executed, runtime, state };
+  return { executed, trialled, runtime, state };
 }
 
 describe('a new program replaces the one still running', () => {
@@ -143,7 +168,7 @@ describe('a new program replaces the one still running', () => {
 describe('a fix whose edits match nothing', () => {
   it('does not run the same failing program again', async () => {
     const miss = '<<<<<<< SEARCH\nnot in the program\n=======\nconst x = 1;\n>>>>>>> REPLACE';
-    const llm = new QueueLlm([DRAWING, miss]);
+    const llm = new QueueLlm([DRAWING, ...asked(miss)]);
     const { executed, runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 3 }]);
     const statuses: RunStatus[] = [];
     const orchestrator = orchestratorFor(llm, {
@@ -341,7 +366,7 @@ describe('the prompt budget counts what the prompt really holds', () => {
   it('compacts before a 4,096-token window with 1,536 tokens set aside for the reply overflows', async () => {
     const llm = new QueueLlm([], 4096, 1536);
     const orchestrator = orchestratorFor(llm);
-    const filler = ' word'.repeat(300); // about 375 tokens a message
+    const filler = ' word'.repeat(600); // about 750 tokens a message
     for (let i = 1; i <= 8; i++) {
       llm.replies.push(`speak("Answer ${i}.${filler}");`);
       await orchestrator.submitUserInput(`Question number ${i}${filler}`);
@@ -357,8 +382,8 @@ describe('the prompt budget counts what the prompt really holds', () => {
     const store = new ConversationMemoryStore();
     const orchestrator = orchestratorFor(new QueueLlm([], 4096, 1536), { memoryStore: store });
     store.addMessage({ id: 'u1', turnId: 't1', role: 'user', canonicalContent: 'Hi', timestamp: 0 });
-    // The system prompt's rules and the format turns come to a few hundred tokens
-    expect(store.getCurrentContextTokens()).toBeGreaterThan(150);
+    // The system prompt's rules come to well over a 120-token stand-in
+    expect(store.getCurrentContextTokens()).toBeGreaterThan(130);
     expect(orchestrator).toBeDefined();
   });
 
@@ -503,7 +528,7 @@ describe('a fix that says the same thing again', () => {
 describe('a fix that comes back cut off', () => {
   it('is not run, and the status says so', async () => {
     const CUT = DRAWING.slice(0, DRAWING.indexOf(', 0, Math.PI'));
-    const llm = new QueueLlm([DRAWING, CUT]);
+    const llm = new QueueLlm([DRAWING, ...asked(CUT)]);
     const { executed, runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 3 }]);
     const statuses: RunStatus[] = [];
     const orchestrator = orchestratorFor(llm, {
@@ -586,11 +611,11 @@ describe('the fix log', () => {
       setItem: (k: string, v: string) => void (store[k] = v),
     });
     try {
-      const llm = new QueueLlm([DRAWING, 'Sure, let me fix that for you right away.']);
+      const llm = new QueueLlm([DRAWING, ...asked('Sure, let me fix that for you right away.')]);
       const { runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 3 }]);
       const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
       await orchestrator.submitUserInput('draw a red circle');
-      await vi.waitFor(() => expect(llm.turns.length).toBe(2), { timeout: 3000 });
+      await vi.waitFor(() => expect(llm.turns.length).toBe(5), { timeout: 3000 });
       await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
       const log = JSON.parse(store.chatty_fix_log);
       expect(log.length).toBe(50);
@@ -654,12 +679,12 @@ describe('a fix that changes nothing', () => {
   it('is followed once by a fix of the whole function around the failing line', async () => {
     const program = 'function playAll() {\n  const plays = [1, 2].map((n) => play(n));\n  plays.forEach((p) => p.stop());\n}\nplayAll();\nspeak("Playing.");';
     const fixedFunction = 'function playAll() {\n  [1, 2].forEach((n) => play(n));\n}';
-    const llm = new QueueLlm([program, '// Cause: p is undefined\nplays.forEach((p) => p.stop());', `// Cause: play() returns nothing\n${fixedFunction}`]);
+    const llm = new QueueLlm([program, ...asked('// Cause: p is undefined\nplays.forEach((p) => p.stop());'), `// Cause: play() returns nothing\n${fixedFunction}`]);
     const { executed, runtime } = fakeRuntime([{ error: "undefined is not an object (evaluating 'p.stop')", errorLine: 3 }]);
     const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
     await orchestrator.submitUserInput('Play two notes');
     await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 8000 });
-    const blockAsk = llm.turns[2].messages.at(-1)!.content;
+    const blockAsk = llm.turns[5].messages.at(-1)!.content;
     expect(blockAsk).toContain('the whole marked function, corrected');
     expect(blockAsk).toContain('// >>> ERROR');
     expect(executed[1]).toBe(`${fixedFunction}\nplayAll();\nspeak("Playing.");`);
@@ -671,15 +696,15 @@ describe('more than one fix attempt', () => {
     const program = 'const a = 1;\nboom();\nconst canvas = 2;\nspeak("Done.");';
     const llm = new QueueLlm([
       program,
-      '// Cause: remove it\nconst canvas = 2;',
+      ...asked('// Cause: remove it\nconst canvas = 2;'),
       '// Cause: remove it\nconsole.log(a);',
     ]);
     const { executed, runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 2 }, {}]);
     const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
     await orchestrator.submitUserInput('Do it');
     await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
-    expect(llm.turns.length).toBe(3);
-    expect(llm.turns[2].messages.at(-1)!.content).toContain('not a working corrected line');
+    expect(llm.turns.length).toBe(6);
+    expect(llm.turns[5].messages.at(-1)!.content).toContain('not a working corrected line');
     expect(executed[1]).toContain('console.log(a);');
   });
 
@@ -742,16 +767,298 @@ describe('more than one fix attempt', () => {
     const program = 'function compile(gl) {\n  gl.make();\n  gl.bad();\n}\ncompile(x);\nspeak("Done.");';
     const llm = new QueueLlm([
       program,
-      '// Cause: same line\n  gl.make();',
-      '// Cause: dropped the function\nconst shader = 1;',
+      ...asked('// Cause: same line\n  gl.make();'),
+      ...asked('// Cause: dropped the function\nconst shader = 1;'),
       '// Cause: bad is wrong\nfunction compile(gl) {\n  gl.make();\n  gl.good();\n}',
     ]);
     const { executed, runtime } = fakeRuntime([{ error: 'gl.bad is not a function', errorLine: 2 }, {}]);
     const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
     await orchestrator.submitUserInput('Compile it');
     await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
-    expect(llm.turns.length).toBe(4);
+    expect(llm.turns.length).toBe(10);
     expect(executed[1]).toContain('gl.good();');
     expect(executed[1]).toContain('function compile(gl)');
+  });
+});
+
+describe('a fix reply that is unusable is asked for again at once', () => {
+  const program = 'function draw() {\n  boom();\n}\ndraw();\nspeak("Drawn.");';
+  const unchanged = '// Cause: nothing\n  boom();';
+  const good = '// Cause: typo\n  fixed();';
+  const goodFunction = '// Cause: typo\nfunction draw() {\n  fixed();\n}';
+  const failing = () => [{ error: 'boom is not defined', errorLine: 2 }, {}];
+
+  it('fixes the program within the same attempt, without a second notice', async () => {
+    const llm = new QueueLlm([program, unchanged, good]);
+    const { executed, runtime } = fakeRuntime(failing());
+    const notices: string[] = [];
+    const orchestrator = orchestratorFor(llm, {
+      autoFixErrors: true,
+      javascriptRuntime: runtime,
+      events: { onMessageUpdated: (m) => void (m.fixNotice && notices.push(m.fixNotice)) },
+    });
+    await orchestrator.submitUserInput('Draw it');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 25000 });
+    expect(llm.turns.length).toBe(3);
+    expect(executed[1]).toContain('fixed();');
+    // The re-ask is the same prompt at warmer sampling
+    expect(llm.turns[2].messages).toEqual(llm.turns[1].messages);
+    expect(llm.turns[2].sampling!.temperature).toBe(0.4);
+    expect(llm.turns[1].exact).toBe(true);
+    expect(new Set(notices.filter((n) => n.startsWith('Trying to fix'))).size).toBeLessThanOrEqual(1);
+    expect(notices.some((n) => n.includes('(2 of 5)'))).toBe(false);
+    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+  }, 30000);
+
+  it('falls through to the next attempt after three unchanged re-asks', async () => {
+    const llm = new QueueLlm([program, ...asked(unchanged), goodFunction]);
+    const { executed, runtime } = fakeRuntime(failing());
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Draw it');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 25000 });
+    expect(llm.turns.length).toBe(6);
+    // Warmer each time, the last far from the one before (wide after a cool one)
+    expect(llm.turns.slice(2, 5).map((t) => t.sampling!.temperature)).toEqual([0.4, 0.6, 1]);
+    expect(llm.turns[4].sampling!.topP).toBe(0.99);
+    expect(llm.turns[5].messages.at(-1)!.content).toContain('not a working corrected line');
+  }, 30000);
+
+  it('tells the runtime the shape of the fix', async () => {
+    const llm = new QueueLlm([program, ...asked(unchanged), goodFunction]);
+    const { executed, runtime } = fakeRuntime(failing());
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Draw it');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 25000 });
+    expect(llm.turns[0].fixShape).toBeUndefined();
+    expect(llm.turns[1].fixShape).toBe('line');
+    expect(llm.turns[4].fixShape).toBe('line');
+    expect(llm.turns[5].fixShape).toBe('function');
+  }, 30000);
+});
+
+
+describe('the blank stage', () => {
+  const TOTAL = [
+    'const cart = [3, 4, 5];',
+    'const sum = cart.reduce((a, b) => a + b, 0);',
+    "const label = document.getElementById('total');",
+    "label.textContent = 'Total: ' + sumTotal;",
+    "speak('Done.');",
+  ].join('\n');
+  const TOTAL_ERROR = { error: 'sumTotal is not defined', errorLine: 4 };
+  const BOARD = ['const scores = [1, 2];', "const view = document.getElementById('board');", 'view.textContent = scores.length;'].join('\n');
+  const BOARD_ERROR = { error: "Cannot set properties of null (setting 'textContent')", errorLine: 3 };
+
+  it('runs the best-fitting choice at once when it runs cleanly, without asking for expressions', async () => {
+    const llm = new QueueLlm([TOTAL, 'A']);
+    const { executed, trialled, runtime } = fakeRuntime([TOTAL_ERROR, {}], {
+      trials: (code) => (/'Total: ' \+ \(*\(globalThis\.__chattyReached = true\), sum\)*;|'Total: ' \+ sum;/.test(code) ? { error: null, reached: true } : { error: 'nope is not defined', errorLine: 4 }),
+      ids: ['total'],
+    });
+    const notices: string[] = [];
+    const orchestrator = orchestratorFor(llm, {
+      autoFixErrors: true,
+      javascriptRuntime: runtime,
+      events: { onMessageCreated: (m) => m.fixNotice && notices.push(m.fixNotice) },
+    });
+    await orchestrator.submitUserInput('Add up my cart');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'choice']);
+    expect(trialled.length).toBe(1);
+    expect(executed[1]).toContain("'Total: ' + sum;");
+    expect(notices).toEqual(['Trying to fix (1 of 5): sumTotal is not defined']);
+  });
+
+  it('asks for expressions when the best-fitting choice fails, and prefers a clean run to the votes', async () => {
+    // sum fails here; the model writes cart.length three times, which runs
+    const llm = new QueueLlm([TOTAL, 'A', 'cart.length', 'cart.length', 'cart.length']);
+    const { executed, trialled, runtime } = fakeRuntime([TOTAL_ERROR, {}], {
+      trials: (code) => (/cart\.length\)*;/.test(code) ? { error: null, reached: true } : { error: 'nope is not defined', errorLine: 4 }),
+      ids: ['total'],
+    });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Add up my cart');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'choice', 'expression', 'expression', 'expression']);
+    expect(llm.turns[3].sampling).toBeDefined();
+    expect(trialled.length).toBeLessThanOrEqual(6);
+    expect(executed[1]).toContain("'Total: ' + cart.length;");
+  });
+
+  it('does not take a literal that only silences the error, nor a clean run that never reached the blank', async () => {
+    const llm = new QueueLlm([TOTAL, 'A', '0', "''", '[]']);
+    const { executed, trialled, runtime } = fakeRuntime([TOTAL_ERROR, {}], {
+      // Every candidate "runs", but the blank's line never runs in the test
+      trials: () => ({ error: null, reached: false }),
+      ids: ['total'],
+    });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Add up my cart');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    expect(trialled.some((c) => /\+ \(*(?:0|''|\[\])\)*;/.test(c))).toBe(false);
+    // Unproven runs tie, so the name decides
+    expect(executed[1]).toContain("'Total: ' + sum;");
+  });
+
+  it('counts an error that is no longer about the blank as progress, and picks by name each time', async () => {
+    // Both fields run (a test can't tell them apart); their names decide
+    const TIP = [
+      "document.body.innerHTML = '<input id=\"billInput\"><input id=\"tipInput\"><p id=\"out\"></p>';",
+      'const total = bill + bill * tip / 100;',
+      "document.getElementById('out').textContent = total;",
+    ].join('\n');
+    const llm = new QueueLlm([TIP, 'B', 'x', 'x', 'x', 'A', 'x', 'x', 'x']);
+    const { executed, runtime } = fakeRuntime(
+      [{ error: 'bill is not defined', errorLine: 2 }, { error: 'tip is not defined', errorLine: 2 }, {}],
+      {
+        trials: (code) =>
+          /\bbill\b(?!Input)/.test(code.split('\n')[1])
+            ? { error: 'bill is not defined', errorLine: 2 }
+            : /\btip\b(?!Input)/.test(code.split('\n')[1])
+              ? { error: 'tip is not defined', errorLine: 2 }
+              : { error: null },
+        ids: ['billInput', 'tipInput', 'out'],
+        fields: ['billInput', 'tipInput'],
+      }
+    );
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Code a tip calculator');
+    await vi.waitFor(() => expect(executed.length).toBe(3), { timeout: 20000 });
+    const line = executed[2].split('\n')[1];
+    expect(line).toBe(
+      "const total = Number(document.getElementById('billInput').value) + Number(document.getElementById('billInput').value) * Number(document.getElementById('tipInput').value) / 100;"
+    );
+  }, 30000);
+
+  it('falls back to the line fix as the next attempt when no candidate passes', async () => {
+    const llm = new QueueLlm([BOARD, 'A', 'document.body', 'scores', 'view.parentNode', '// Cause: guard\nif (view) view.textContent = scores.length;']);
+    const { executed, trialled, runtime } = fakeRuntime([BOARD_ERROR, {}], {
+      // (the guarded line fix passes its own test run)
+      trials: (code) => (code.includes('if (view)') ? { error: null } : { ...BOARD_ERROR }),
+      ids: ['board', 'total'],
+      fields: ['amount'],
+    });
+    const notices: string[] = [];
+    const orchestrator = orchestratorFor(llm, {
+      autoFixErrors: true,
+      javascriptRuntime: runtime,
+      events: { onMessageCreated: (m) => m.fixNotice && notices.push(m.fixNotice) },
+    });
+    await orchestrator.submitUserInput('Show the score count');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 15000 });
+    // The stage tried at most six candidates, each with a test run
+    const candidates = trialled.filter((code) => !code.includes('if (view)'));
+    expect(candidates.length).toBeGreaterThan(3);
+    expect(candidates.length).toBeLessThanOrEqual(6);
+    // Then the line fix, which is attempt 2 and is told the error
+    expect(llm.turns.at(-1)!.fixShape).toBe('line');
+    expect(notices).toEqual([`Trying to fix (1 of 5): ${BOARD_ERROR.error}`, `Trying to fix (2 of 5): ${BOARD_ERROR.error}`]);
+    expect(executed[1]).toContain('if (view) view.textContent');
+  }, 20000);
+
+  it('stops when the user starts a new turn', async () => {
+    const llm = new QueueLlm([BOARD, 'A', 'document.body', 'scores', 'view']);
+    const holder: { o?: ConversationOrchestrator } = {};
+    const { executed, trialled, runtime } = fakeRuntime([BOARD_ERROR, {}], {
+      trials: Array.from({ length: 8 }, () => ({ ...BOARD_ERROR })),
+      ids: ['board', 'total'],
+      onTrial: () => void holder.o!.submitUserInput('Make it blue instead'),
+    });
+    holder.o = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await holder.o.submitUserInput('Show the score count');
+    await vi.waitFor(() => expect(trialled.length).toBe(1), { timeout: 10000 });
+    await vi.waitFor(() => expect(holder.o!.scheduler.getActiveTurnId()).toBeNull(), { timeout: 10000 });
+    await new Promise((r) => setTimeout(r, 300));
+    // The stage stopped at the first test run, and no fix turn followed
+    expect(trialled.length).toBe(1);
+    expect(llm.turns.some((t) => t.fixShape === 'line' || t.fixShape === 'function')).toBe(false);
+    expect(executed.length).toBeLessThanOrEqual(2);
+  });
+
+  // A request whose line fix repeats the error in its test run, then one that passes
+  const LINE_TRIALS = (code: string) =>
+    /\+ sum;|\+ \(*\(globalThis\.__chattyReached = true\), sum\)*;/.test(code) ? { error: null, reached: true } : { ...TOTAL_ERROR };
+
+  it('re-asks a line fix whose test run repeats the error, and never runs it', async () => {
+    const program = 'function draw() {\n  boom();\n}\ndraw();\nspeak("Drawn.");';
+    const llm = new QueueLlm([program, '// Cause: x\n  bang();', '// Cause: typo\n  ok();']);
+    llm.modelId = 'gemma-4-e2b-it-web';
+    const { executed, trialled, runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 2 }, {}], {
+      trials: (code) => (code.includes('ok();') ? { error: null } : { error: 'boom is not defined', errorLine: 2 }),
+    });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Draw it');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    expect(executed[1]).toContain('ok();');
+    expect(executed.some((code) => code.includes('bang();'))).toBe(false);
+    expect(trialled.length).toBe(2); // one test run per reply
+    expect(llm.turns.length).toBe(3);
+  });
+
+  it('asks a large model for the line fix first, and the blank stage second', async () => {
+    const typo = "// Cause: typo\nlabel.textContent = 'Total: ' + sumTotl;";
+    const llm = new QueueLlm([TOTAL, typo, typo, typo, 'A']);
+    llm.modelId = 'gemma-4-e2b-it-web';
+    const { executed, runtime } = fakeRuntime([TOTAL_ERROR, {}], { trials: LINE_TRIALS, ids: ['total'] });
+    const notices: string[] = [];
+    const orchestrator = orchestratorFor(llm, {
+      autoFixErrors: true,
+      javascriptRuntime: runtime,
+      events: { onMessageCreated: (m) => m.fixNotice && notices.push(m.fixNotice) },
+    });
+    await orchestrator.submitUserInput('Add up my cart');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    // The line fix and its two quick re-asks (the second far from the first), then the blank stage
+    expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'line', 'line', 'line', 'choice']);
+    expect(llm.turns[3].sampling).toEqual({ temperature: 1, topP: 0.99 });
+    expect(executed[1]).toContain("'Total: ' + sum;");
+    expect(notices).toEqual(['Trying to fix (1 of 5): sumTotal is not defined', 'Trying to fix (2 of 5): sumTotal is not defined']);
+  });
+
+  it('keeps the blank stage first for a small model', async () => {
+    const llm = new QueueLlm([TOTAL, 'A']);
+    llm.modelId = 'qwen3-0.6b';
+    const { executed, runtime } = fakeRuntime([TOTAL_ERROR, {}], { trials: LINE_TRIALS, ids: ['total'] });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Add up my cart');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'choice']);
+  });
+
+  it('knows which models are large', () => {
+    for (const id of ['gemma-4-e2b-it-web', 'gemma-4-e4b-it-web', 'qwen2.5-coder-1.5b', 'qwen3-4b', 'qwen3.5-9b']) expect(prefersLineFix(id)).toBe(true);
+    for (const id of ['qwen3-0.6b', 'llama-3.2-1b', 'smollm2-360m', 'qwen3.5-0.8b', 'queue']) expect(prefersLineFix(id)).toBe(false);
+  });
+
+  it('does nothing after it has given up, not even a sure correction', async () => {
+    const program = "const total = () => 1;\nfunction draw() {\n  boom();\n}\ndraw();\nspeak('Drawn.');";
+    const fixes = ['bang();', 'zap();', 'ok();', 'fin();', 'totl();'].map((c) => `// Cause: try\n  ${c}`);
+    const llm = new QueueLlm([program, ...fixes]);
+    const { executed, runtime } = fakeRuntime([
+      { error: 'boom is not defined', errorLine: 3 },
+      { error: 'bang is not defined', errorLine: 3 },
+      { error: 'zap is not defined', errorLine: 3 },
+      { error: 'ok is not defined', errorLine: 3 },
+      { error: 'fin is not defined', errorLine: 3 },
+      { error: 'totl is not defined', errorLine: 3 },
+    ]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Draw it');
+    await vi.waitFor(() => expect(executed.length).toBe(6), { timeout: 20000 });
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(executed.length).toBe(6);
+    const said = orchestrator.memoryStore.getMessages().filter((m) => m.role === 'assistant').map((m) => m.canonicalContent).join('\n');
+    expect(said).toContain("I couldn't get this working after 5 tries");
+  }, 30000);
+
+  it('is skipped for a program that does not parse', async () => {
+    const broken = 'const total = ;\nspeak("Done.");';
+    const llm = new QueueLlm([broken, '// Cause: missing value\nconst total = 1;']);
+    const { executed, trialled, runtime } = fakeRuntime([{ error: 'Unexpected token ;' }, {}], { trials: [] });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Make a total');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    expect(trialled.length).toBe(1); // only the fix's own test run: no blank candidates
+    expect(llm.turns[1].fixShape).toBe('function'); // the lines that don't parse, as before
   });
 });

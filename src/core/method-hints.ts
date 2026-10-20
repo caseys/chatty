@@ -6,6 +6,7 @@
  * without the model; otherwise the candidates go into the fix request, so the model picks from
  * a list instead of guessing again.
  */
+import { parseExpressionAt } from 'acorn';
 
 /** The object and the method a "not a function" error names, or null */
 export function missingMethod(error: string): { object: string; method: string } | null {
@@ -62,6 +63,18 @@ function declaredOnce(code: string, name: string): boolean {
 
 /** The type of what an expression makes: `canvas.getContext('2d')`, `createElement('canvas')` */
 function typeMadeBy(expression: string): string | null {
+  // Only when the whole value is the call (or `new`) that makes it: in
+  // `parseFloat(document.getElementById('a').value) + 1` or `getElementById('a').value` the
+  // lookup is part of the value, not what it is
+  type Top = { type: string; argument?: Top };
+  let top: Top | undefined;
+  try {
+    top = parseExpressionAt(expression, 0, { ecmaVersion: 'latest', allowAwaitOutsideFunction: true }) as unknown as Top;
+  } catch {
+    return null;
+  }
+  if (top.type === 'AwaitExpression') top = top.argument;
+  if (!top || !/^(?:CallExpression|NewExpression)$/.test(top.type)) return null;
   const tag = expression.match(/createElement\(\s*['"]([\w-]+)['"]/)?.[1];
   if (tag) return `element:${tag.toLowerCase()}`;
   for (const [made, type] of MADE_BY) if (made.test(expression)) return type;

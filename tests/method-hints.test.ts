@@ -102,3 +102,17 @@ describe('argument count facts', () => {
     expect(argumentCountFact('mystery.arc(1, 2);', msg, 1, sc)).toBeNull();
   });
 });
+
+describe('a value computed from an element is not the element', () => {
+  it('types a name only from a whole making call', () => {
+    const code = [
+      "const total = parseFloat(document.getElementById('billInput').value) + 1;",
+      "const text = document.getElementById('name').value;",
+      "const box = document.getElementById('box');",
+      "const ctx = await canvas.getContext('2d');",
+    ].join('\n');
+    expect(objectType(code, 'total')).toBeNull();
+    expect(objectType(code, 'text')).toBeNull();
+    expect(objectType(code, 'box')).not.toBeNull();
+  });
+});
