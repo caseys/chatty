@@ -556,7 +556,7 @@ describe('fix turns and compaction', () => {
 
 describe('the optional rules follow the request', () => {
   const canvas = 'Use <canvas>';
-  const sound = 'Sound: Web Audio';
+  const sound = 'Sound: music and instruments use Web MIDI';
   const facts = 'public API';
   const cases: Array<[string, { canvas?: boolean; sound?: boolean; facts?: boolean }]> = [
     ['Draw a rainbow over green hills on a canvas', { canvas: true }],

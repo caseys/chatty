@@ -50,9 +50,9 @@ const local = (
   sizeBytes: downloadMb * 1_000_000,
   // Phones: a 4,096-token context keeps the model's working memory small
   contextLimit: phone ? 4096 : 8192,
-  // Room kept for the reply (a whole program; the longest seen are ~700 tokens). Less on phones
-  // leaves more of the small context for the conversation.
-  maxOutputTokens: phone ? 1280 : 1536,
+  // Room kept for the reply: a whole program (long ones, music and games, run past 1,000 tokens).
+  // On phones' 4,096-token context this leaves about half for the prompt and the conversation.
+  maxOutputTokens: 2048,
   phone,
 });
 
@@ -64,7 +64,7 @@ export const LOCAL_CHAT_MODELS: ReadonlyArray<LocalChatModel> = [
     // Too small to follow the full prompt: a phone-sized context makes the orchestrator treat it as
     // a small model, though it stays off phones
     contextLimit: 4096,
-    maxOutputTokens: 1280,
+    maxOutputTokens: 2048,
     onnx: { repo: 'LiquidAI/LFM2.5-230M-ONNX', dtype: 'q4' },
   },
   local('smollm2-360m', 'SmolLM2 360M', 'SmolLM2-360M-Instruct-q4f16_1-MLC', 204, 376, 'Tiniest download, basic answers', true),

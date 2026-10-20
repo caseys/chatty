@@ -169,41 +169,70 @@ const looksLikeTalk = (line: string) => {
  * HTML template string), it was code after all.
  */
 function paragraphParts(text: string): ReplyPart[] {
-  const parts: ReplyPart[] = [];
-  const add = (kind: ReplyPart['kind'], lines: string[]) => {
-    const body = lines.join('\n').trim();
-    if (!body) return;
-    const prev = parts[parts.length - 1];
-    if (prev && prev.kind === kind) prev.text += (kind === 'code' ? '\n\n' : ' ') + body;
-    else parts.push({ kind, text: body });
-  };
+  // Each piece: a paragraph's lines, split into talk before, code (or talk), talk after
+  const pieces: Array<{ before: string[]; middle: string[]; after: string[]; isCode: boolean }> = [];
   for (const paragraph of text.split(/\n[ \t]*\n/)) {
     const lines = paragraph.split('\n');
     let start = 0;
     let end = lines.length;
     while (start < end && (looksLikeTalk(lines[start]) || !lines[start].trim())) start++;
     while (end > start && (looksLikeTalk(lines[end - 1]) || !lines[end - 1].trim())) end--;
-    add('talk', lines.slice(0, start));
-    // Not one line of code in it ("Hi!", a list of words): talk
     const middle = lines.slice(start, end);
-    const isCode =
-      middle.some((line) => CODE_LINE.test(line)) || (parsesAsJs(middle.join('\n')) && /[;{}=]/.test(middle.join('\n')));
-    add(isCode ? 'code' : 'talk', middle);
-    add('talk', lines.slice(end));
+    const body = middle.join('\n');
+    // Not one line of code in it ("Hi!", "Sure (thanks)"): talk
+    // A code line starts like code: a keyword, a call or assignment ("drawBall();", "o.type = 2;"), or a closing bracket
+    const isCode = middle.some((line) => CODE_LINE.test(line) || /^\s*[\w$.]+(?:\(|\s*[+\-*/]?=[^=]|\[)/.test(line) || /^\s*[}\])]/.test(line)) ||
+      (parsesAsJs(body) && /[;{}=]/.test(body));
+    pieces.push({ before: lines.slice(0, start), middle, after: lines.slice(end), isCode });
   }
-  const codeParts = parts.filter((part) => part.kind === 'code');
-  if (codeParts.length === 0) return parts;
-  // Talk between code parts that the code needs to parse: all of it from the first code to the last is code
-  const code = codeParts.map((part) => part.text).join('\n\n');
-  if (!parsesAsJs(code)) {
-    const first = parts.indexOf(codeParts[0]);
-    const last = parts.lastIndexOf(codeParts[codeParts.length - 1]);
-    const span = text.slice(text.indexOf(parts[first].text), text.lastIndexOf(parts[last].text) + parts[last].text.length);
+  const codeAt = pieces.map((piece, at) => (piece.isCode && piece.middle.join('').trim() ? at : -1)).filter((at) => at >= 0);
+  const parts: ReplyPart[] = [];
+  const add = (kind: ReplyPart['kind'], lines: string[], gap = '\n\n') => {
+    const body = lines.join('\n').trim();
+    if (!body) return;
+    const prev = parts[parts.length - 1];
+    if (prev && prev.kind === kind) prev.text += (kind === 'code' ? gap : ' ') + body;
+    else parts.push({ kind, text: body });
+  };
+  const split = () => {
+    for (const piece of pieces) {
+      add('talk', piece.before);
+      add(piece.isCode ? 'code' : 'talk', piece.middle);
+      add('talk', piece.after);
+    }
+    return parts;
+  };
+  if (codeAt.length === 0) return split();
+  const first = codeAt[0];
+  const last = codeAt[codeAt.length - 1];
+  const codeOnly = codeAt.map((at) => pieces[at].middle.join('\n')).join('\n\n');
+  // Talk between code parts that the code needs in order to parse (plain text in an HTML
+  // template string): everything from the first code to the last is code
+  if (!parsesAsJs(codeOnly)) {
+    const span = [
+      pieces[first].middle.join('\n'),
+      ...pieces.slice(first + 1, last + 1).map((piece, k) =>
+        first + 1 + k === last ? [...piece.before, ...piece.middle].join('\n') : [...piece.before, ...piece.middle, ...piece.after].join('\n')
+      ),
+    ].join('\n\n');
     if (parsesAsJs(span)) {
-      return [...parts.slice(0, first), { kind: 'code', text: span }, ...parts.slice(last + 1)];
+      for (const piece of pieces.slice(0, first)) {
+        add('talk', piece.before);
+        add(piece.isCode ? 'code' : 'talk', piece.middle);
+        add('talk', piece.after);
+      }
+      add('talk', pieces[first].before);
+      parts.push({ kind: 'code', text: span.trim() });
+      add('talk', pieces[last].after);
+      for (const piece of pieces.slice(last + 1)) {
+        add('talk', piece.before);
+        add(piece.isCode ? 'code' : 'talk', piece.middle);
+        add('talk', piece.after);
+      }
+      return parts;
     }
   }
-  return parts;
+  return split();
 }
 
 /**
@@ -230,7 +259,13 @@ function extractProgram(text: string): ReplyPart[] | null {
     return parts.some((part) => part.kind === 'code' && part.text) ? parts : null;
   }
   const parts = paragraphParts(text);
-  return parts.some((part) => part.kind === 'code') ? parts : null;
+  const firstCode = parts.findIndex((part) => part.kind === 'code');
+  if (firstCode < 0) return null;
+  // Code that doesn't parse with talk after it is a chat reply quoting code, not a program; with
+  // no talk after it, it's a program cut off or broken, run so the error reaches the fix
+  const code = parts.filter((part) => part.kind === 'code').map((part) => part.text).join('\n');
+  if (!parsesAsJs(code) && parts.slice(firstCode).some((part) => part.kind === 'talk')) return null;
+  return parts;
 }
 
 /** A sentence about the code itself ("Here's the JavaScript code:"): nothing the user needs to hear */
@@ -530,8 +565,9 @@ export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
     return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(cleaned)), isProse: false };
   }
 
-  // 4b. Explanation wrapped around unfenced code: run the code part
-  const program = extractProgram(cleaned);
+  // 4b. Explanation wrapped around unfenced code: run the code part. After fences were taken
+  // out, what is left is already the program: it runs whole, and a syntax error goes to the fix
+  const program = hadFences ? [{ kind: 'code' as const, text: cleaned }] : extractProgram(cleaned);
   if (program) {
     return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(withTalk(program))), isProse: false };
   }

@@ -46,7 +46,7 @@ export const MODEL_REGISTRY: ReadonlyArray<ModelManifest> = [
     quantization: 'INT4-WebGPU',
     estimatedMemoryMB: 1950,
     contextWindowTokens: 8192,
-    maxOutputTokens: 1024,
+    maxOutputTokens: 2048, // a whole program, with room for long ones (music, games)
     supportedLanguages: ['en', 'de', 'fr', 'es', 'it', 'nl', 'pl'],
     license: 'Gemma Terms of Use',
     attribution: 'Google LiteRT-LM Gemma 4 E2B',

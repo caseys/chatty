@@ -30,7 +30,7 @@ describe('LFM2.5 230M', () => {
   it('is treated as a small model but stays off phones', () => {
     const m = LOCAL_CHAT_MODELS.find((x) => x.id === 'lfm2.5-230m')!;
     expect(m.contextLimit).toBe(4096);
-    expect(m.maxOutputTokens).toBe(1280);
+    expect(m.maxOutputTokens).toBe(2048);
     expect(m.phone).toBe(false);
   });
 });
