@@ -27,6 +27,20 @@ describe('running code the model wrapped or forgot to call', () => {
     expect(out.code).toContain('ctx.fillRect(0, 0, 10, 10);');
   });
 
+  it('runs a speak() written after the closing </script> instead of showing it', () => {
+    const out = inspectExecutableCode('<canvas id="c"></canvas>\n<script>\nconst a = 1;\n</script>\n\nspeak("Here it is.");');
+    expect(out.code).toBe('document.body.insertAdjacentHTML("beforeend", "<canvas id=\\"c\\"></canvas>");\n\nconst a = 1;\n\nspeak("Here it is.");');
+  });
+
+  it('runs the program from a reply written in the examples\' tag format', () => {
+    const reply = '<examples>\n<example>\n<request>Play a loop</request>\n<reply>\nconst out = 1;\nspeak("Here it is.");\n</reply>\n</example>\n</examples>';
+    const out = inspectExecutableCode(reply);
+    expect(out.isProse).toBe(false);
+    expect(out.code).toBe('const out = 1;\nspeak("Here it is.");');
+    // Without a <reply>, the tags and the request are dropped
+    expect(inspectExecutableCode('<example><request>x</request>\nspeak("Hi");</example>').code).toBe('speak("Hi");');
+  });
+
   it('runs unfenced code between explanations', () => {
     const out = inspectExecutableCode('I will draw it now.\nconst c = document.createElement("canvas");\nroot.appendChild(c);\nThis creates a canvas.');
     expect(out.isProse).toBe(false);

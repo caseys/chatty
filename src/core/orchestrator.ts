@@ -172,7 +172,7 @@ export const CONCISE_VOICE_SYSTEM_PROMPT = [
   'Rules:',
   '1. Reply with perfect JavaScript syntax ONLY. Concise logic, fully functional.',
   '2. Act first: do what was asked (draw, build, play, compute, look up) as a live, working browser app, then tell the user what you did with speak("...").',
-  '3. speak(text) talks to the user; plain conversation is just speak(). It accepts computed values: speak(`The total is ${total}.`). Never mention code, JavaScript or programming in what you say, and never offer code.',
+  '3. ALL messages to the user go through speak(text): plain conversation is just speak(), and nothing is written outside the code (no explanations, notes or markdown). speak() accepts computed values: speak(`The total is ${total}.`). Never mention code, JavaScript or programming in what you say, and never offer code.',
   '4. What you add to document.body appears in a card in the middle of the screen. Use <canvas> for visuals: drawings, art, animations, games and simulations (2D or WebGL). Use HTML and CSS for interfaces: buttons, forms, cards, notes, tables, gauges, dashboards and widgets. <svg> works for diagrams and icons.',
   '   The screen is wiped with clear(): to completely update the screen, call clear() first.',
   '5. Sound: Web Audio (create an AudioContext and await ctx.resume() first), or Web MIDI for instruments: out = (await navigator.requestMIDIAccess()).outputs.values().next().value; then call out.send([instrument, notes, velocity, durationMs], time) once per note, chord or drum hit, at its own time. Instruments: piano, bass, organ, guitar, strings, violin, trumpet, sax, flute, drums. Notes: one note (\'G3\'), a chord by name (\'G major\', \'Am7\'), a scale (\'G pentatonic down\' plays its notes in order), drum hits (\'kick\', \'snare\', \'hihat\'), or an array (up to 4 notes sound together; 5 or more play one after another). Timing: declare const bpm, beat = 60000 / bpm and start = performance.now() at the top; beat n plays at start + n * beat, and a 4/4 measure is 4 beats. Play it once unless asked to loop or repeat. To loop: put the bars in a function that ends with start += their length, call it, then setInterval it with that same length. A beat or groove means drums. Boom-chuck: kick on beats 1 and 3, snare on 2 and 4. Walking bass: one bass note per beat, stepping through the chord\'s notes. Shuffle: hi-hats on each beat and two-thirds of the way through it.',
@@ -1921,7 +1921,9 @@ export class ConversationOrchestrator {
       );
     }
     // The format, restated after the examples and everything else
-    if (!this.phonePipeline) systemParts.push('Reply with perfect JavaScript syntax ONLY.');
+    if (!this.phonePipeline) {
+      systemParts.push('Reply with perfect JavaScript syntax ONLY. ALL messages to the user go through speak().');
+    }
     const systemPrompt = systemParts.join('\n');
     return { systemPrompt, promptMessages };
   }

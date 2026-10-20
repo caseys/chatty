@@ -121,11 +121,25 @@ function parsesAsJs(code: string): boolean {
 /** An ```html block as code: its markup goes on screen, then its inline scripts run. */
 function htmlToCode(html: string): string {
   const scripts = Array.from(html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi), (m) => m[1]);
+  // JavaScript lines written outside the <script> (small models put a speak() after it) run too,
+  // instead of showing on screen as text
+  const strayCode: string[] = [];
   const markup = html
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<!doctype[^>]*>|<\/?(?:html|head|body)[^>]*>/gi, '')
+    .split('\n')
+    .filter((line) => {
+      if (line.includes('<') || !CODE_LINE.test(line)) return true;
+      strayCode.push(line);
+      return false;
+    })
+    .join('\n')
     .trim();
-  return [markup ? `document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(markup)});` : '', ...scripts].join('\n');
+  return [
+    markup ? `document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(markup)});` : '',
+    ...scripts,
+    ...strayCode,
+  ].join('\n');
 }
 
 const CODE_LINE =
@@ -238,12 +252,30 @@ function normalizeFences(text: string): string {
   );
 }
 
+/**
+ * Small models sometimes answer in the format the prompt shows its examples in
+ * (<example><request>…</request><reply>…</reply></example>): the program is in the last <reply>.
+ */
+function unwrapExampleFormat(text: string): string {
+  if (!/<\/?(?:examples|example|request|reply)>/i.test(text)) return text;
+  const replies = [...text.matchAll(/<reply>([\s\S]*?)(?:<\/reply>|$)/gi)];
+  if (replies.length > 0) return replies[replies.length - 1][1].trim();
+  return text
+    .replace(/<request>[\s\S]*?<\/request>/gi, '')
+    .replace(/<\/?(?:examples|example|request|reply)>/gi, '')
+    .trim();
+}
+
+/** A reply that starts with a real HTML tag (not just any <word>) */
+const HTML_START =
+  /^<(?:!doctype\b|!--|(?:html|head|body|div|span|p|h[1-6]|canvas|svg|style|script|button|input|form|label|section|main|header|footer|nav|article|ul|ol|li|table|img|a|pre|br|hr|center|select|textarea|video|audio|b|i|strong|em|small)[\s>/])/i;
+
 export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
-  let cleaned = normalizeFences((rawText || '').trim());
+  let cleaned = normalizeFences(unwrapExampleFormat((rawText || '').trim()));
 
   // HTML instead of JavaScript (a whole page for "an app", or bare <canvas> + <script>): its
   // markup goes on screen and its scripts run, as with an ```html block. Never spoken as prose.
-  if (/^<(?:!doctype\b|!--|[a-z][\w-]*[\s>/])/i.test(cleaned)) {
+  if (HTML_START.test(cleaned)) {
     return { code: callUncalledFunctions(htmlToCode(cleaned)), isProse: false };
   }
 
