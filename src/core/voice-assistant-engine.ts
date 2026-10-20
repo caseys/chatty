@@ -64,6 +64,8 @@ const WELCOME_MESSAGE =
   'look up things in Wikipedia or DuckDuckGo and more!';
 /** Returning users get the short greeting (set after the first full welcome) */
 const WELCOMED_KEY = 'chatty_welcomed';
+/** Chats kept: a new chat beyond this deletes the one used least recently */
+const MAX_CHATS = 10;
 const WELCOME_BACK_MESSAGE = 'Welcome back, what would you like to do with this browser?';
 
 /** The full introduction the first time, a short greeting after that. */
@@ -1231,6 +1233,12 @@ export class VoiceAssistantEngine {
     this.conversations.set(newChat.id, newChat);
     this.activeConversationId = newChat.id;
     this.memoryStore.clearConversation();
+    for (const old of this.getConversations().slice(MAX_CHATS)) {
+      this.conversations.delete(old.id);
+      try {
+        await this.modelManager.db.deleteConversation(old.id);
+      } catch {}
+    }
 
     if (typeof localStorage !== 'undefined') {
       try {

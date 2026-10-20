@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { describe, expect, it, onTestFinished } from 'vitest';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import {
   computeRmsLevel,
   resampleTo16kHzMono,
@@ -1051,6 +1051,27 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
       // Clean up
       saveSettingsToStorage(DEFAULT_SETTINGS);
       await engine.dispose();
+    });
+
+    it('keeps only the 10 most recently used chats, deleting the oldest as new ones are made', async () => {
+      saveSettingsToStorage({ speechEnabled: false });
+      const engine = new VoiceAssistantEngine();
+      let now = Date.now();
+      const clock = vi.spyOn(Date, 'now').mockImplementation(() => (now += 1000));
+      onTestFinished(async () => {
+        clock.mockRestore();
+        // Leave no chats behind for the next test's engine
+        for (const c of engine.getConversations()) await engine.modelManager.db.deleteConversation(c.id);
+        await engine.dispose();
+        saveSettingsToStorage(DEFAULT_SETTINGS);
+      });
+      await engine.initialize();
+      const made = [];
+      for (let i = 0; i < 12; i++) made.push(await engine.createConversation(`Chat ${i}`));
+      const ids = engine.getConversations().map((c) => c.id);
+      expect(ids.length).toBe(10);
+      expect(ids).toEqual(made.slice(2).map((c) => c.id).reverse());
+      expect(ids).toContain(engine.getActiveConversationId());
     });
 
     it('supports expandable sidebar open/close state and multi-channel chat management (create, switch, rename, compact, delete)', async () => {
