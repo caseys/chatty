@@ -237,6 +237,13 @@ export class VoiceAssistantEngine {
 
     // The run log is kept per chat
     setRunLogChat(() => this.activeConversationId);
+    // The audio session follows the mic and what plays (see updateAudioSession)
+    this.stateCoordinator.subscribe((snap) => {
+      if (snap.microphone === this.lastSessionMic && snap.playback === this.lastSessionPlayback) return;
+      this.lastSessionMic = snap.microphone;
+      this.lastSessionPlayback = snap.playback;
+      this.updateAudioSession();
+    });
     // Browsers start audio only in a tap or key press: every one, anywhere in Chatty (the
     // program's card included, see the sandbox), creates or resumes the one shared AudioContext
     if (typeof document !== 'undefined') {
@@ -252,9 +259,9 @@ export class VoiceAssistantEngine {
       mode: 'iframe',
       getSharedAudioContext: () => this.audioSubsystem.getAudioContext(),
       onProgramError: (message, line) => this.orchestrator.reportProgramError(message, line),
-      // Speech off: 'playback' only while a program makes sound (see setAudioSessionType)
       onProgramAudio: (sounding) => {
-        if (!this.speechEnabled) this.audioSubsystem.setAudioSessionType(sounding ? 'playback' : 'auto');
+        this.programSounding = sounding;
+        this.updateAudioSession();
         this.events.onProgramSound?.(sounding);
       },
       onProgramActivity: (active) => this.events.onProgramActivity?.(active),
@@ -550,7 +557,7 @@ export class VoiceAssistantEngine {
 
     this.ttsProvider.voiceId = this.voiceId;
     this.orchestrator.setSpeechOutputEnabled(this.speechEnabled);
-    this.audioSubsystem.setAudioSessionType(this.speechEnabled ? 'play-and-record' : 'auto');
+    this.updateAudioSession();
     if (!this.speechEnabled) this.evictSpeechModels();
 
     this.stateCoordinator.setModelState('stt', 'ready');
@@ -749,7 +756,7 @@ export class VoiceAssistantEngine {
       // ignore
     }
     this.orchestrator.setSpeechOutputEnabled(on);
-    this.audioSubsystem.setAudioSessionType(on ? 'play-and-record' : 'auto');
+    this.updateAudioSession();
     if (on) {
       await this.loadSpeechModels().finally(clearLoadStage);
       return;
@@ -931,6 +938,23 @@ export class VoiceAssistantEngine {
       this.stateCoordinator.setMicrophoneState('unavailable');
       this.events.onStatusChange?.('Microphone unavailable.');
     }
+  }
+
+  private programSounding = false;
+  private lastSessionMic: string | null = null;
+  private lastSessionPlayback: string | null = null;
+
+  /**
+   * The browser's audio session follows what is happening: 'play-and-record' only while the mic
+   * is on (Safari keeps the output quiet in it when nothing records, so text-mode sound was
+   * silent), 'playback' while Chatty's voice or a program sounds, 'auto' otherwise (iOS would show
+   * a lock-screen player for 'playback' with nothing playing)
+   */
+  private updateAudioSession(): void {
+    const snap = this.stateCoordinator.getSnapshot();
+    const micOn = snap.microphone === 'listening' || snap.microphone === 'requesting_permission';
+    const sounding = this.programSounding || snap.playback === 'playing' || snap.playback === 'buffering';
+    this.audioSubsystem?.setAudioSessionType(micOn ? 'play-and-record' : sounding ? 'playback' : 'auto');
   }
 
   /** What programs did, as text (see run-log.ts) */
