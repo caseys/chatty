@@ -36,6 +36,7 @@ import {
   inspectExecutableCode,
   syntaxErrorLine,
 } from '../tools/javascript-runtime.ts';
+import { appendRunLog } from './run-log.ts';
 import { applyFixReply, FIX_SYSTEM_PROMPT, fixRequest } from './line-fix.ts';
 import { AFTER_HEAVY_MS, settle } from './settle.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
@@ -182,6 +183,7 @@ const DRAWING_REQUEST =
   /\b(?:draw|paint|sketch|picture|image|art\b|animat|game|simulat|bounc|canvas|scene|shape|circle|square|triangle|stars?\b|sky|rainbow|landscape|pattern|fractal|particle|mov(?:e|ing)|getContext)/i;
 const THREE_D_REQUEST = /(?:\b3d\b|\bthree[- ]?d\b|\bcube|\bsphere|\bwebgl|\brotat|\bspin|\borbit|\bplanet|THREE\.)/i;
 const DIAGRAM_REQUEST = /\b(?:svg|diagram|icon|chart|graph|logo|vector|flowchart|map)/i;
+const TIMER_REQUEST = /\b(?:timer|countdown|count down|stopwatch|clock|alarm|remind|seconds?|minutes?|hours?)\b/i;
 const FACTS_REQUEST =
   /\b(?:who (?:was|is)|what (?:is|was|are) (?:a|an|the)|when|where|why|which|how (?:many|much|old|tall|far|big|long)|tell me about|look up|search|find out|history|define|meaning|capital|population|weather|news|facts?|wiki|fetch)\b/i;
 
@@ -203,20 +205,21 @@ const PROMPT_RULES: ReadonlyArray<{ text: string; when?: RegExp }> = [
   { text: '- Answer what you know directly. To look up facts you don\'t know, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it, not the whole text.', when: FACTS_REQUEST },
   { text: '- Write code instead of guessing results.' },
   { text: '- If you define a function, call it.' },
-  { text: '- The examples (zorbs, blips, Zibble, Zorblax) are made up: never reuse their names, numbers or formulas.' },
 ];
 
 /** The rules for a request: all of them, or (filter) only those it needs */
 export function promptRules(request = '', filter = false): string {
   const rules = PROMPT_RULES.filter((rule) => !filter || !rule.when || rule.when.test(request));
+  const names = EXAMPLES.filter((example) => !filter || !example.when || example.when.test(request)).flatMap((example) => example.names);
   return [
     "You are Chatty, a voice assistant that acts by writing JavaScript. Your reply runs as a program in the user's browser, immediately and exactly as written.",
     'Rules:',
     ...rules.map((rule) => rule.text),
+    // Names only of the examples shown: a name the model never sees is one less to copy
+    ...(names.length > 0 ? [`- The examples (${names.join(', ')}) are made up: never reuse their names, numbers or formulas.`] : []),
   ].join('\n');
 }
 
-export const CONCISE_VOICE_SYSTEM_PROMPT = promptRules();
 
 /**
  * Example exchanges, shown in the system prompt inside <examples> tags (EXAMPLES_PROMPT). Sent as
@@ -309,19 +312,47 @@ export const FORMAT_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content: 
   { role: 'assistant', content: 'document.body.innerHTML = "<h2>Hi!</h2>";\nspeak("Hi! What would you like me to make?");' },
 ];
 
-/** The example exchanges as the system prompt shows them (see EXAMPLE_TURNS) */
-const EXAMPLES_PROMPT = [
-  'Examples of requests and replies (made up, not part of this conversation):',
-  '<examples>',
-  ...EXAMPLE_TURNS.filter((t) => t.role === 'user').map(
-    (t, i) => `<example>\n<request>${t.content}</request>\n<reply>\n${EXAMPLE_TURNS[2 * i + 1].content}\n</reply>\n</example>`
-  ),
-  '</examples>',
-].join('\n');
+/**
+ * Which requests each example is for (in EXAMPLE_TURNS order) and the made-up names it holds. Like
+ * the rules, models with a small context see only the examples a request matches; the chat and
+ * interface examples always show.
+ */
+const EXAMPLE_KINDS: ReadonlyArray<{ when?: RegExp; names: string[] }> = [
+  { names: ['Zibble'] },
+  { when: SOUND_REQUEST, names: ['Zorblax'] },
+  { names: ['zorbs', 'blips'] },
+  { when: TIMER_REQUEST, names: ['Blip'] },
+  { when: FACTS_REQUEST, names: [] },
+];
+const EXAMPLES = EXAMPLE_KINDS.map((kind, i) => ({
+  ...kind,
+  request: EXAMPLE_TURNS[2 * i].content,
+  reply: EXAMPLE_TURNS[2 * i + 1].content,
+}));
+
+/** The example exchanges as the system prompt shows them: all, or (filter) those the request matches */
+export function examplesPrompt(request = '', filter = false): string {
+  const shown = EXAMPLES.filter((example) => !filter || !example.when || example.when.test(request));
+  return [
+    'Examples of requests and replies (made up, not part of this conversation):',
+    '<examples>',
+    ...shown.map((e) => `<example>\n<request>${e.request}</request>\n<reply>\n${e.reply}\n</reply>\n</example>`),
+    '</examples>',
+  ].join('\n');
+}
+const EXAMPLES_PROMPT = examplesPrompt();
+export const CONCISE_VOICE_SYSTEM_PROMPT = promptRules();
+
+/** A system prompt without its examples, or the rule naming them */
+function withoutExamples(systemPrompt: string): string {
+  return systemPrompt
+    .replace(/\nExamples of requests and replies[^\n]*\n<examples>[\s\S]*?<\/examples>/, '')
+    .replace(/\n- The examples \([^\n]*/, '');
+}
 
 /** Names from the examples: a reply that holds one the request doesn't was copied from them */
 const EXAMPLE_LEAK_WORDS = ['zibble', 'zorbs', 'blips', 'zorblax', 'okapi'];
-const LEAK_RETRY_NOTE = '\n(That reply reused the examples\' names. Write it again for this request.)';
+const LEAK_RETRY_NOTE = '\n(Write it for this request only.)';
 function leakWordsIn(text: string): string[] {
   const lower = text.toLowerCase();
   return EXAMPLE_LEAK_WORDS.filter((word) => lower.includes(word));
@@ -887,6 +918,10 @@ export class ConversationOrchestrator {
           !options?.autoFix && leakWordsIn(text).some((word) => !requestLower.includes(word));
         let leaked = false;
         let retriedForLeak = false;
+        let shownBeforeRetry = '';
+        /** The bubble's text: what an earlier attempt already showed, then this one's */
+        const afterShown = (text: string) =>
+          shownBeforeRetry && text && !shownBeforeRetry.includes(text.trim()) ? `${shownBeforeRetry} ${text}` : shownBeforeRetry || text;
         // Phone chat model replies in prose only; only the coder's output is run as code
         const forceProse = !!this.phonePipeline && generationProvider !== this.phonePipeline.coder;
         let streamMode: 'unknown' | 'code' | 'prose' = forceProse ? 'prose' : 'unknown';
@@ -904,7 +939,7 @@ export class ConversationOrchestrator {
         let stoppedRepeating = false;
         let repeatCheckedAt = 0;
 
-        const generateReply = (messages: typeof promptMessages) => withActivity('generating a reply', () => generationProvider.generate({
+        const generateReply = (messages: typeof promptMessages, retry = 0) => withActivity('generating a reply', () => generationProvider.generate({
           turnId,
           systemPrompt,
           messages,
@@ -912,6 +947,7 @@ export class ConversationOrchestrator {
           maxOutputTokens: generationProvider.maxOutputTokens,
           // A fix wants the one most likely line, not a varied one
           ...(options?.autoFix ? { exact: true } : {}),
+          ...(retry > 0 ? { retry } : {}),
           signal: generationAbort.signal,
           onToken: (chunk) => {
             if (!this.scheduler.isTurnValid(turnId) || stoppedRepeating || leaked) return;
@@ -927,6 +963,7 @@ export class ConversationOrchestrator {
               const cut = repetitionCutIndex(rawAccumulatedTokens);
               if (cut >= 0) {
                 stoppedRepeating = true;
+                appendRunLog('retry', 'the reply started repeating itself: generation stopped there (no retry)');
                 rawAccumulatedTokens = rawAccumulatedTokens.slice(0, cut);
                 if (streamMode === 'prose' && !quietReply) {
                   assistantMsg.canonicalContent = rawAccumulatedTokens;
@@ -1013,7 +1050,7 @@ export class ConversationOrchestrator {
                   ? latestSpoken.slice(lastSpokenTextEmitted.length)
                   : latestSpoken;
                 lastSpokenTextEmitted = latestSpoken;
-                assistantMsg.canonicalContent = latestSpoken;
+                assistantMsg.canonicalContent = afterShown(latestSpoken);
                 this.events.onTokenStream?.(turnId, delta, assistantMsg.canonicalContent);
                 this.events.onMessageUpdated?.({ ...assistantMsg });
               }
@@ -1024,7 +1061,12 @@ export class ConversationOrchestrator {
         let genResult = await generateReply(promptMessages);
         if (!retriedForLeak && this.scheduler.isTurnValid(turnId) && !signal.aborted && (leaked || leaksExamples(rawAccumulatedTokens || genResult.text))) {
           // Write it again for this request; the note goes with this attempt only, not into history
+          const copied = leakWordsIn(rawAccumulatedTokens || genResult.text).filter((word) => !requestLower.includes(word));
+          appendRunLog('retry', `the reply reused the examples' names (${copied.join(', ')}): writing it again without the examples, cooler`);
+          appendRunLog('discarded', rawAccumulatedTokens || genResult.text);
           retriedForLeak = true;
+          // What the chat already shows stays: the new attempt's words come after it
+          shownBeforeRetry = assistantMsg.canonicalContent;
           leaked = false;
           rawAccumulatedTokens = '';
           lastSpokenTextEmitted = '';
@@ -1033,15 +1075,13 @@ export class ConversationOrchestrator {
           stoppedRepeating = false;
           repeatCheckedAt = 0;
           generationAbort = new AbortController();
-          if (assistantMsg.canonicalContent) {
-            assistantMsg.canonicalContent = '';
-            this.events.onMessageUpdated?.({ ...assistantMsg });
-          }
+          // …and without the examples it copied from
+          systemPrompt = withoutExamples(systemPrompt);
           const last = promptMessages[promptMessages.length - 1];
           genResult = await generateReply([
             ...promptMessages.slice(0, -1),
             { ...last, content: `${last.content}${LEAK_RETRY_NOTE}` },
-          ]);
+          ], 1);
         }
 
         if (generationProvider !== this.llmProvider) this.events.onStatusChange?.(null);
@@ -1089,6 +1129,7 @@ export class ConversationOrchestrator {
               : unchangedProgram
                 ? "The fix didn't change the program"
                 : 'The fix came back incomplete';
+            appendRunLog('discarded', `// ${why}, so it was not run. The model replied:\n${rawContent}`);
             // The code panel shows what the model sent instead, to see why it didn't apply
             this.events.onRawOutput?.(turnId, `// ${why}. The model replied:\n${rawContent}`);
             this.events.onRunStatus?.(turnId, {
@@ -1096,7 +1137,10 @@ export class ConversationOrchestrator {
               text: `${why}, so it was not run. ${failed?.error ? errorText(failed.error, failed.errorLine) : 'The program failed.'}`,
             });
           } else if (isProse) {
-            if (options?.autoFix) this.finishFixLog('lost');
+            if (options?.autoFix) {
+              this.finishFixLog('lost');
+              appendRunLog('discarded', `// The fix came back as chat, so nothing was run:\n${rawContent}`);
+            }
             this.events.onRunStatus?.(turnId, { kind: 'none', text: 'No code to run in this reply' });
             // The reply is known not to be a program, so voice it now (not while it streamed, when
             // it might still have turned into code). Nothing was voiced yet unless it is the phone
@@ -1178,13 +1222,11 @@ export class ConversationOrchestrator {
             if (!isTalkOnly(executableCode)) {
               this.lastAction = { conversationId, kind: 'code', task: codeTask, code: executableCode };
             }
-            // A fix that works takes the broken program's place in the conversation, as if the
-            // model had written it right the first time (the fix turn itself stays hidden)
+            // A fix that works stands for the broken program in later prompts, as if the model had
+            // written it right the first time (see buildModelPrompt). The broken program's message
+            // isn't edited: messages are only ever added.
             if (fixedTurnId && !execResult.error) {
-              const originalId = `msg_assistant_${fixedTurnId}`;
-              this.memoryStore.updateMessage(originalId, { rawCode: executableCode });
-              const original = this.memoryStore.getMessages().find((m) => m.id === originalId);
-              if (original) this.events.onMessageUpdated?.({ ...original });
+              assistantMsg.fixesTurnId = fixedTurnId;
             }
 
             if (this.scheduler.isTurnValid(turnId)) {
@@ -1227,7 +1269,7 @@ export class ConversationOrchestrator {
               }
 
               if (spokenText) {
-                assistantMsg.canonicalContent = spokenText;
+                assistantMsg.canonicalContent = afterShown(spokenText);
                 this.events.onTokenStream?.(turnId, '', spokenText);
                 this.events.onMessageUpdated?.({ ...assistantMsg });
 
@@ -1286,6 +1328,7 @@ export class ConversationOrchestrator {
         phrases: assistantMsg.phrases,
         verified: assistantMsg.verified,
         toolCall: assistantMsg.toolCall,
+        fixesTurnId: assistantMsg.fixesTurnId,
         metrics: turnMetrics,
       });
 
@@ -1403,6 +1446,7 @@ export class ConversationOrchestrator {
     });
     const request = fixRequest(run.task, run.code, run.errorLine, run.error);
     this.startFixLog(run);
+    appendRunLog('retry', `the program failed (${errorText(run.error, run.errorLine)}): asking the model to fix the marked line`);
     // A short pause before the model runs again, unless the user moves on meanwhile
     void settle(AFTER_HEAVY_MS).then(() => {
       if (this.scheduler.getActiveTurnId()) return;
@@ -1686,10 +1730,12 @@ export class ConversationOrchestrator {
 
   private staticPromptParts(request?: string): { head: string[]; tail: string[] } {
     // The smallest models get only the rules this request needs
-    const rules = request !== undefined && this.isSmallModel ? promptRules(request, true) : CONCISE_VOICE_SYSTEM_PROMPT;
+    const filter = request !== undefined && this.isSmallModel;
+    const rules = filter ? promptRules(request, true) : CONCISE_VOICE_SYSTEM_PROMPT;
+    const examples = filter ? examplesPrompt(request, true) : EXAMPLES_PROMPT;
     const head = this.phonePipeline
       ? [`${this.phonePipeline.chatSystemPrompt} Current date and time: ${new Date().toLocaleString()}.`]
-      : [rules, EXAMPLES_PROMPT];
+      : [rules, examples];
 
     // The format, restated after the examples and everything else
     const tail = this.phonePipeline
@@ -1703,7 +1749,9 @@ export class ConversationOrchestrator {
     // Small models get a prompt with only the rules a request needs, so count the core rules
     // (the examples and format turns are always there)
     const { head, tail } = this.staticPromptParts(this.isSmallModel ? '' : undefined);
-    let tokens = this.memoryStore.estimateTokens([...head, ...tail].join('\n'));
+    // …and every example, which they get only when the request matches (the music one is long)
+    const parts = this.isSmallModel && !this.phonePipeline ? [head[0], EXAMPLES_PROMPT] : head;
+    let tokens = this.memoryStore.estimateTokens([...parts, ...tail].join('\n'));
     if (!this.phonePipeline) {
       // A few tokens per message for the chat template's role markers
       for (const turn of FORMAT_TURNS) tokens += this.memoryStore.estimateTokens(turn.content) + 4;
@@ -1786,8 +1834,16 @@ export class ConversationOrchestrator {
     // The request text of the last user message kept, as the user wrote it (for describePastProgram)
     let lastAsk = '';
 
-    for (const msg of context.workingMessages) {
-      if (fixTurnIds.has(msg.turnId)) continue;
+    // A working fix's program stands for the broken one it fixed (the broken message isn't edited)
+    const fixedCode = new Map<string, string>();
+    for (const m of context.workingMessages) {
+      if (m.role === 'assistant' && m.fixesTurnId && m.rawCode) fixedCode.set(m.fixesTurnId, m.rawCode);
+    }
+
+    for (const stored of context.workingMessages) {
+      if (fixTurnIds.has(stored.turnId)) continue;
+      const fixed = stored.role === 'assistant' ? fixedCode.get(stored.turnId) : undefined;
+      const msg = fixed ? { ...stored, rawCode: fixed, rawLlmOutput: fixed } : stored;
       if (msg.role === 'user') userHasSpoken = true;
       else if (msg.role === 'assistant' && !userHasSpoken) continue;
       if (msg.role === 'assistant') {

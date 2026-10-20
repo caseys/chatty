@@ -472,10 +472,11 @@ describe('context shared between the conversation and a fix turn', () => {
     expect(fixAsk).toContain('// >>> ERROR: t is not defined\nsetTimeout(() => send(t), 100);\n// <<< ERROR');
     const fixed = FASTER.replace('send(t)', 'send(1)');
     expect(executed[2]).toBe(fixed);
-    // The conversation now holds the working program as the reply to "make it faster"
+    // The broken reply isn't edited; the fix's own message holds the working program for that turn
     const messages = orchestrator.memoryStore.getMessages();
     const fasterTurn = messages.find((m) => m.role === 'user' && m.canonicalContent === 'make it faster')!.turnId;
-    expect(messages.find((m) => m.id === `msg_assistant_${fasterTurn}`)?.rawCode).toBe(fixed);
+    expect(messages.find((m) => m.id === `msg_assistant_${fasterTurn}`)?.rawCode).toBe(FASTER);
+    expect(messages.find((m) => m.fixesTurnId === fasterTurn)?.rawCode).toBe(fixed);
   });
 });
 
@@ -563,8 +564,12 @@ describe('the examples leak guard', () => {
     await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
     expect(llm.turns.length).toBe(2);
     expect(llm.turns[1].messages.at(-1)!.content).toBe(
-      "Make me a tea timer\n(That reply reused the examples' names. Write it again for this request.)"
+      'Make me a tea timer\n(Write it for this request only.)'
     );
+    // …and without the examples it copied from
+    expect(llm.turns[0].systemPrompt).toContain('<examples>');
+    expect(llm.turns[1].systemPrompt).not.toContain('<examples>');
+    expect(llm.turns[1].systemPrompt).not.toContain('Zibble');
     expect(executed).toEqual(['speak("Sure, here you go.");']);
     // The note is not kept in the history
     expect(store.getMessages().find((m) => m.role === 'user')!.canonicalContent).toBe('Make me a tea timer');

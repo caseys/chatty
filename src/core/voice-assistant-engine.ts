@@ -28,6 +28,7 @@ import { MODEL_REGISTRY } from './model-manager.ts';
 import { WebLlmProvider } from '../runtimes/webllm-provider.ts';
 import { OnnxLlmProvider } from '../runtimes/onnx-llm-provider.ts';
 import { clearActivity, readInterruptedActivity } from './activity-breadcrumbs.ts';
+import { appendRunLog, runLogText } from './run-log.ts';
 import {
   PHONE_CHAT_SYSTEM_PROMPT,
   PhoneModelSet,
@@ -244,6 +245,7 @@ export class VoiceAssistantEngine {
         this.events.onProgramSound?.(sounding);
       },
       onProgramActivity: (active) => this.events.onProgramActivity?.(active),
+      onRunLog: (kind, text) => appendRunLog(kind, text),
       onResult: (res) => {
         this.events.onJavascriptExecution?.(res);
       },
@@ -316,6 +318,8 @@ export class VoiceAssistantEngine {
       },
       events: {
         onMessageCreated: (msg) => {
+          // (A fix turn's request is logged as a retry, with its reason)
+          if (msg.role === 'user' && !msg.autoFix) appendRunLog('request', msg.canonicalContent);
           this.events.onMessageCreated?.(msg);
           void this.persistState();
         },
@@ -914,6 +918,11 @@ export class VoiceAssistantEngine {
       this.stateCoordinator.setMicrophoneState('unavailable');
       this.events.onStatusChange?.('Microphone unavailable.');
     }
+  }
+
+  /** What programs did, as text (see run-log.ts) */
+  getRunLog(): string {
+    return runLogText();
   }
 
   async submitText(text: string): Promise<ConversationMessage | null> {

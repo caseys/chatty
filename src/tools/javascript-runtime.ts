@@ -31,6 +31,8 @@ export interface JavascriptExecutionResult {
   errorLine?: number;
 }
 
+export type RunLogKind = 'program' | 'speak' | 'clear' | 'error';
+
 export interface ExecutionContextOptions {
   onSpeak?: (text: string) => void;
   audioContextAccessor?: () => Promise<AudioContext | null> | AudioContext | null;
@@ -58,6 +60,8 @@ export interface JavascriptRuntimeOptions {
   onProgramError?: (message: string, line?: number) => void;
   /** A program started making sound (true), or has been quiet for a few seconds (false) */
   onProgramAudio?: (sounding: boolean) => void;
+  /** Everything programs do that can be overwritten later: each program run, speak(), clear(), errors */
+  onRunLog?: (kind: RunLogKind, text: string) => void;
   /** A program has timers or async code pending (true), or its last one ended (false) */
   onProgramActivity?: (active: boolean) => void;
 }
@@ -559,6 +563,7 @@ export class JavascriptRuntime {
   private onProgramError?: (message: string, line?: number) => void;
   private onProgramAudio?: (sounding: boolean) => void;
   private onProgramActivity?: (active: boolean) => void;
+  private onRunLog?: (kind: RunLogKind, text: string) => void;
   private programSounding = false;
   // The last program_activity the sandbox reported: timers, animation frames or async work pending
   private programActive = false;
@@ -577,6 +582,7 @@ export class JavascriptRuntime {
     this.onProgramError = options?.onProgramError;
     this.onProgramAudio = options?.onProgramAudio;
     this.onProgramActivity = options?.onProgramActivity;
+    this.onRunLog = options?.onRunLog;
     if (this.getSharedAudioContext && typeof window !== 'undefined') {
       // Read by the sandbox's AudioContext stand-in (same origin)
       (window as unknown as { __chattySharedAudio?: () => unknown }).__chattySharedAudio = () => this.programAudio();
@@ -921,6 +927,8 @@ export class JavascriptRuntime {
     modeOverride?: JavascriptExecutionMode
   ): Promise<JavascriptExecutionResult> {
     const trimmedCode = (await letReassignedConsts(await makeAwaitingFunctionsAsync(code))).trim();
+    // The code as it runs (after the sandbox's repairs)
+    this.onRunLog?.('program', trimmedCode);
     const options = execOptions ?? this.defaultOptions;
     const runMode = modeOverride ?? this.mode;
     let result: JavascriptExecutionResult;
@@ -948,6 +956,7 @@ export class JavascriptRuntime {
       result = await this.executeInIframe(protectedCode, options);
     }
 
+    if (result.error) this.onRunLog?.('error', result.errorLine ? `line ${result.errorLine}: ${result.error}` : result.error);
     callback?.(result);
     this.onResult?.(result);
     return result;
@@ -982,6 +991,7 @@ export class JavascriptRuntime {
     const speak = (msg: unknown) => {
       const text = typeof msg === 'object' ? JSON.stringify(msg) : String(msg ?? '');
       spokenTexts.push(text);
+      this.onRunLog?.('speak', text);
       options?.onSpeak?.(text);
     };
 
@@ -1577,6 +1587,7 @@ export class JavascriptRuntime {
     // clear(): empties the card, so a program can start the screen over
     window.clear = () => {
       window.root.innerHTML = '';
+      window.parent.postMessage({ type: 'clear' }, '*');
     };
 
     // After the page has loaded, document.write would replace all of it (the card, the program's
@@ -1769,6 +1780,7 @@ export class JavascriptRuntime {
       const text = String(data.text ?? '');
       const run = this.pendingRuns.get(data.id);
       run?.spokenTexts.push(text);
+      this.onRunLog?.('speak', text);
       (run?.options ?? this.lastRunOptions ?? this.defaultOptions)?.onSpeak?.(text);
       return;
     }
@@ -1784,7 +1796,13 @@ export class JavascriptRuntime {
       return;
     }
 
+    if (data.type === 'clear') {
+      this.onRunLog?.('clear', '');
+      return;
+    }
+
     if (data.type === 'program_error') {
+      this.onRunLog?.('error', typeof data.line === 'number' ? `line ${data.line}: ${data.message}` : String(data.message ?? 'Unknown error'));
       this.onProgramError?.(String(data.message ?? 'Unknown error'), typeof data.line === 'number' ? data.line : undefined);
       return;
     }

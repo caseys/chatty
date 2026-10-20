@@ -171,6 +171,8 @@ export interface ConversationMessage {
   /** User turn Chatty sent itself to report a failed program back to the model (not shown as a bubble) */
   autoFix?: boolean;
   rawCode?: string;
+  /** A fix turn's reply whose program worked: it stands for this turn's broken program in later prompts */
+  fixesTurnId?: string;
   rawLlmOutput?: string;
   speechReadyContent?: string;
   phrases?: PhraseSegment[];
@@ -239,6 +241,8 @@ export interface LlmGenerationOptions {
    * use a low temperature and no repetition penalty
    */
   exact?: boolean;
+  /** How many times this reply was tried before: each retry samples cooler (see retryTemperature) */
+  retry?: number;
   signal?: AbortSignal;
   onToken?: (chunk: string, sequence: number) => void;
 }

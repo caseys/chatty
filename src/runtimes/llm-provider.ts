@@ -3,6 +3,7 @@
 // (Spec Section 3.2 & Addendum Section 8)
 // ============================================================================
 
+import { retryTemperature, RETRY_FLOOR_TEMPERATURE } from './retry-temperature.ts';
 import type {
   LlmGenerationOptions,
   LlmGenerationResult,
@@ -572,7 +573,10 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
       // Google's recommended Gemma sampling, except near-greedy for an exact answer (a fix turn's
       // corrected line). A fix turn has its own system prompt, so it starts a new conversation
       // anyway: the different temperature costs nothing extra.
-      const sampler = options.exact ? { ...GEMMA_SAMPLER, temperature: 0.2 } : GEMMA_SAMPLER;
+      // A retry samples cooler (retryTemperature)
+      const sampler = options.exact
+        ? { ...GEMMA_SAMPLER, temperature: RETRY_FLOOR_TEMPERATURE }
+        : { ...GEMMA_SAMPLER, temperature: retryTemperature(GEMMA_SAMPLER.temperature, options.retry) };
       const targetTemperature = sampler.temperature;
       const targetMaxOutputTokens = options.maxOutputTokens ?? this.maxOutputTokens;
 

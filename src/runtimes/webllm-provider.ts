@@ -4,6 +4,7 @@
 // which is what lets it load in mobile Safari. Downloads are kept in Cache Storage.
 // ============================================================================
 
+import { retryTemperature } from './retry-temperature.ts';
 import type { WebWorkerMLCEngine } from '@mlc-ai/web-llm';
 import type { LlmGenerationOptions, LlmGenerationResult, LlmRuntimeProvider } from '../types/index.ts';
 
@@ -32,14 +33,14 @@ const WEBLLM_EXACT_TEMPERATURE = 0.2;
  * near-greedy with no penalty at all.
  */
 export function webLlmSampling(
-  options: Pick<LlmGenerationOptions, 'temperature' | 'topP' | 'exact'>,
+  options: Pick<LlmGenerationOptions, 'temperature' | 'topP' | 'exact' | 'retry'>,
   spec: Pick<WebLlmModelSpec, 'mlcId' | 'noThinking'>
 ): { temperature: number; top_p: number; repetition_penalty?: number; presence_penalty?: number } {
   const top_p = options.topP ?? 0.8;
   if (options.exact) return { temperature: WEBLLM_EXACT_TEMPERATURE, top_p };
   // Small models get stuck repeating themselves on near-greedy decoding (Chatty asks for 0.1,
   // which suits Gemma on LiteRT), so normal turns keep a floor.
-  const temperature = Math.max(options.temperature ?? WEBLLM_MIN_TEMPERATURE, WEBLLM_MIN_TEMPERATURE);
+  const temperature = retryTemperature(Math.max(options.temperature ?? WEBLLM_MIN_TEMPERATURE, WEBLLM_MIN_TEMPERATURE), options.retry);
   const qwen3 = spec.noThinking || /^qwen3/i.test(spec.mlcId);
   return qwen3
     ? { temperature, top_p, presence_penalty: 0.5 }

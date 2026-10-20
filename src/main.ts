@@ -65,6 +65,9 @@ export class MinimalVoiceApp {
   // Set by Clear model cache; Settings' close then downloads the models in use again
   private modelCacheCleared = false;
   private rawOutputTurnId: string | null = null;
+  /** The raw panel shows the run log (tap the run status) instead of the newest code */
+  private showingRunLog = false;
+  private lastRawOutput = '';
   // Chat bubbles by message id and by turn (streamed text arrives before the reply is saved)
   private bubbles = new Map<string, HTMLElement>();
   private turnBubbles = new Map<string, HTMLElement>();
@@ -326,6 +329,13 @@ export class MinimalVoiceApp {
   }
 
   private bindEvents(): void {
+    // Tapping the run status switches the raw panel between the code and the run log
+    this.runStatusEl?.addEventListener('click', () => {
+      this.showingRunLog = !this.showingRunLog;
+      this.setRawOutput(this.lastRawOutput);
+      const hint = this.runStatusEl?.querySelector('.run-log-toggle');
+      if (hint) hint.textContent = this.showingRunLog ? 'code' : 'log';
+    });
     // Tapping an example sends it as if typed (the tap also unlocks audio for the reply)
     this.chatExamplesEl?.addEventListener('click', (e) => {
       const example = (e.target as HTMLElement).closest('.chat-example');
@@ -818,6 +828,12 @@ export class MinimalVoiceApp {
    */
   private setRawOutput(text: string): void {
     if (!this.rawOutputEl) return;
+    this.lastRawOutput = text;
+    if (this.showingRunLog) {
+      this.rawOutputEl.textContent = this.engine.getRunLog() || 'Nothing has run yet.';
+      this.rawOutputEl.scrollTop = this.rawOutputEl.scrollHeight;
+      return;
+    }
     // Without speak() lines (they're in the chat) and without code fences: an unmatched ``` reads
     // as an open template string and would turn everything after it into one green string
     const code = unwrapExampleFormat(text)
@@ -835,6 +851,14 @@ export class MinimalVoiceApp {
     if (!el) return;
     el.hidden = !status;
     el.textContent = status ? `${RUN_STATUS_ICONS[status.kind]} ${status.text}` : '';
+    if (status) {
+      const hint = document.createElement('span');
+      hint.className = 'run-log-toggle';
+      hint.textContent = this.showingRunLog ? 'code' : 'log';
+      el.append(hint);
+    }
+    // The run log grows with each run: keep it current while it's shown
+    if (this.showingRunLog) this.setRawOutput(this.lastRawOutput);
     el.dataset.kind = status?.kind ?? '';
   }
 

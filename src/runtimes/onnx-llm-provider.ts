@@ -5,6 +5,7 @@
 // time: dispose() terminates the worker, which releases all of the model's memory.
 // ============================================================================
 
+import { retryTemperature } from './retry-temperature.ts';
 import type { LlmGenerationOptions, LlmGenerationResult, LlmRuntimeProvider } from '../types/index.ts';
 
 export interface OnnxModelSpec {
@@ -186,7 +187,8 @@ export class OnnxLlmProvider implements LlmRuntimeProvider {
       messages,
       maxNewTokens: options.maxOutputTokens ?? this.maxOutputTokens,
       // Exact turn: greedy decoding (temperature 0 means do_sample false in the worker)
-      temperature: options.exact ? 0 : options.temperature,
+      // A retry samples cooler (retryTemperature)
+      temperature: options.exact ? 0 : options.temperature === undefined ? undefined : retryTemperature(options.temperature, options.retry),
       topP: options.topP,
       signal: options.signal,
       onToken: options.onToken,

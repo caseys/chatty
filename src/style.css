@@ -2045,6 +2045,17 @@ body {
   display: none;
 }
 
+.run-status {
+  cursor: pointer;
+}
+
+/* Tap the run status for the run log (every program, speak() and clear()) */
+.run-log-toggle {
+  float: right;
+  text-decoration: underline;
+  opacity: 0.7;
+}
+
 .run-status[data-kind='ok'] {
   color: var(--success);
 }
