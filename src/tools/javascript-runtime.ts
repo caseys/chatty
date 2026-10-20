@@ -1662,6 +1662,39 @@ export class JavascriptRuntime {
         };
       }
     }
+    // Controls a program makes but never puts on the page (inputs inside a <div> it never added):
+    // at the end of its run, the detached container holding them goes into the card, logged.
+    // An input, button, select or text area off the page can't be used, so it has one clear place.
+    let createdThisRun = [];
+    const createElementNative = Document.prototype.createElement;
+    Document.prototype.createElement = function (...args) {
+      const el = createElementNative.apply(this, args);
+      if (runningProgram) createdThisRun.push(el);
+      return el;
+    };
+    function describeControl(el) {
+      const tag = el.tagName.toLowerCase();
+      const label = el.id ? '#' + el.id : el.textContent ? " '" + el.textContent.trim().slice(0, 20) + "'" : '';
+      return tag + label;
+    }
+    function attachOrphanedControls() {
+      const roots = new Map();
+      for (const el of createdThisRun) {
+        if (el.isConnected || !/^(?:INPUT|BUTTON|SELECT|TEXTAREA)$/.test(el.tagName)) continue;
+        let top = el;
+        while (top.parentNode) top = top.parentNode;
+        if (top.nodeType !== 1) continue;
+        if (!roots.has(top)) roots.set(top, []);
+        roots.get(top).push(el);
+      }
+      createdThisRun = [];
+      for (const [top, controls] of roots) {
+        window.root.appendChild(top);
+        const holder = top === controls[0] && controls.length === 1 ? '' : '<' + top.tagName.toLowerCase() + '> holding ';
+        imagined('never added to the page: ' + holder + controls.map(describeControl).join(', ') + ' → added to the card');
+      }
+    }
+
     // Every browser interface a program draws, builds or plays with: elements and nodes, canvas
     // and WebGL contexts, audio nodes and params, paths, class lists
     const WATCHED = /^(?:Node|Element|HTML\\w*Element|SVG\\w*Element|CharacterData|Text|CanvasRenderingContext2D|OffscreenCanvasRenderingContext2D|WebGL2?RenderingContext|Path2D|DOMTokenList|BaseAudioContext|AudioContext|AudioNode|\\w+Node|AudioParam|AudioScheduledSourceNode)$/;
@@ -2059,6 +2092,7 @@ export class JavascriptRuntime {
       soundErrorSent = false;
       rejected = null;
       rejectedReported = false;
+      createdThisRun = [];
       runningProgram = true;
       const logs = [];
       const origLog = console.log;
@@ -2098,6 +2132,7 @@ export class JavascriptRuntime {
           res = await res;
         }
 
+        attachOrphanedControls();
         const hasVisualElements = hasVisualNow();
 
         // A function (often the program's last line defines or exposes one) is never a reply
