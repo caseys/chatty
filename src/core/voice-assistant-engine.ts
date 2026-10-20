@@ -28,7 +28,7 @@ import { MODEL_REGISTRY } from './model-manager.ts';
 import { WebLlmProvider } from '../runtimes/webllm-provider.ts';
 import { OnnxLlmProvider } from '../runtimes/onnx-llm-provider.ts';
 import { clearActivity, readInterruptedActivity } from './activity-breadcrumbs.ts';
-import { appendRunLog, runLogText } from './run-log.ts';
+import { appendRunLog, runLogText, setRunLogChat } from './run-log.ts';
 import {
   PHONE_CHAT_SYSTEM_PROMPT,
   PhoneModelSet,
@@ -235,6 +235,8 @@ export class VoiceAssistantEngine {
     this.speechEnabled = initialSettings.speechEnabled;
     this.sidebarOpen = initialSettings.sidebarOpen;
 
+    // The run log is kept per chat
+    setRunLogChat(() => this.activeConversationId);
     this.jsRuntime = new JavascriptRuntime({
       mode: 'iframe',
       getSharedAudioContext: () => this.audioSubsystem.getAudioContext(),

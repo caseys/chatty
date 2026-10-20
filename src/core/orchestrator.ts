@@ -273,6 +273,8 @@ export class ConversationOrchestrator {
     /** Slips already corrected without the model in this program (see runCorrected) */
     corrections?: number;
   } | null = null;
+  /** The system prompt last written to the run log, so it is logged only when it changes */
+  private loggedSystemPrompt: { chat: string; text: string } | null = null;
   /** Programs whose slips were corrected and re-run, by turn: they stand for the turn's program in later prompts */
   private correctedPrograms = new Map<string, string>();
   // User messages that went out with notes added (see buildModelPrompt), by message id
@@ -898,6 +900,23 @@ export class ConversationOrchestrator {
           },
         }));
 
+        // What goes to the model: which model, the conversation's length, the request as sent (with
+        // its notes) and the system prompt whenever it differs from the one last logged
+        {
+          const chat = this.getConversationId?.() ?? '';
+          const systemChanged = this.loggedSystemPrompt?.chat !== chat || this.loggedSystemPrompt.text !== systemPrompt;
+          if (systemChanged) this.loggedSystemPrompt = { chat, text: systemPrompt };
+          const last = promptMessages[promptMessages.length - 1];
+          appendRunLog(
+            'sent',
+            [
+              `model ${generationProvider.modelId}${options?.autoFix ? ' (fix turn)' : ''}, ${promptMessages.length} messages`,
+              ...(systemChanged ? ['system prompt:', systemPrompt] : ['system prompt: same as before']),
+              `last message (${last?.role ?? 'none'}):`,
+              last?.content ?? '',
+            ].join('\n')
+          );
+        }
         const genResult = await generateReply(promptMessages);
 
         if (generationProvider !== this.llmProvider) this.events.onStatusChange?.(null);
