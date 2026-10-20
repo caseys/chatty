@@ -126,6 +126,7 @@ export class MinimalVoiceApp {
   private toggleSidebarBtn = document.getElementById('btn-toggle-sidebar') as HTMLButtonElement | null;
   private closeSidebarBtn = document.getElementById('btn-close-sidebar') as HTMLButtonElement | null;
   private sidebarNewChatBtn = document.getElementById('btn-sidebar-new-chat') as HTMLButtonElement | null;
+  private clearAllChatsBtn = document.getElementById('btn-clear-all-chats') as HTMLButtonElement | null;
   private sidebarChatList = document.getElementById('sidebar-chat-list') as HTMLUListElement | null;
 
   constructor() {
@@ -434,6 +435,15 @@ export class MinimalVoiceApp {
       if (window.innerWidth <= 640) {
         this.toggleSidebar(false);
       }
+    });
+
+    this.clearAllChatsBtn?.addEventListener('click', async () => {
+      if (!window.confirm("Delete all chats? This can't be undone.")) return;
+      this.resetVisualScreen();
+      await this.engine.clearAllConversations();
+      this.clearChatLog();
+      if (typeof document !== 'undefined') document.title = 'New Chat — Chatty';
+      this.updateUiState();
     });
 
     this.toggleSidebarBtn?.addEventListener('click', () => {

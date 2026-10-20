@@ -1292,6 +1292,21 @@ export class VoiceAssistantEngine {
     return true;
   }
 
+  /** Deletes every chat and starts a new one */
+  async clearAllConversations(): Promise<StoredConversation> {
+    this.interrupt('Cleared all conversations');
+    this.cancelPendingPersist();
+    this.memoryStore.clearConversation();
+    const ids = [...this.conversations.keys()];
+    this.conversations.clear();
+    for (const id of ids) {
+      try {
+        await this.modelManager.db.deleteConversation(id);
+      } catch {}
+    }
+    return this.createConversation('New Chat');
+  }
+
   async deleteConversation(id: string): Promise<void> {
     this.conversations.delete(id);
     try {
