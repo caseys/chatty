@@ -26,6 +26,7 @@ import { createWikipediaTool, createInstantAnswersTool } from '../tools/web-tool
 import { NEEDLE_LABEL } from '../runtimes/needle-router.ts';
 import { MODEL_REGISTRY } from './model-manager.ts';
 import { WebLlmProvider } from '../runtimes/webllm-provider.ts';
+import { OnnxLlmProvider } from '../runtimes/onnx-llm-provider.ts';
 import { clearActivity, readInterruptedActivity } from './activity-breadcrumbs.ts';
 import {
   PHONE_CHAT_SYSTEM_PROMPT,
@@ -203,7 +204,7 @@ export class VoiceAssistantEngine {
   private codingLlmProvider: WorkerLlmProvider | null = null;
   private phoneModels: PhoneModelSet | null = null;
   // Chat model when a WebLLM model is picked (always on phones); else Gemma 4 via llmProvider
-  private localChat: WebLlmProvider | null = null;
+  private localChat: WebLlmProvider | OnnxLlmProvider | null = null;
   private isPhone = false;
   // Every model load takes the next ticket; only the newest may mark the model ready or report
   // an error (a model switch in Settings supersedes a load that is still running)
@@ -1368,7 +1369,17 @@ export class VoiceAssistantEngine {
       void this.localChat.dispose();
       this.localChat = null;
     }
-    if (model && !this.localChat) this.localChat = new WebLlmProvider(model.id, model);
+    if (model && !this.localChat) {
+      // Models WebLLM has no build of run with Transformers.js (ONNX) instead
+      this.localChat = model.onnx
+        ? new OnnxLlmProvider(model.id, {
+            repo: model.onnx.repo,
+            dtype: model.onnx.dtype,
+            contextLimit: model.contextLimit,
+            maxOutputTokens: model.maxOutputTokens,
+          })
+        : new WebLlmProvider(model.id, model);
+    }
     this.orchestrator.setLlmProvider(this.chatLlm);
     this.jsRuntime.setLlmProvider(this.chatLlm);
   }

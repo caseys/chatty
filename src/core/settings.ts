@@ -29,6 +29,8 @@ export interface ModelOptionItem {
  */
 export interface LocalChatModel extends ModelOptionItem, WebLlmModelSpec {
   label: string;
+  /** Runs with Transformers.js (ONNX, WebGPU) instead of WebLLM: models WebLLM has no build of */
+  onnx?: { repo: string; dtype: string };
 }
 
 const local = (
@@ -56,6 +58,10 @@ const local = (
 
 export const LOCAL_CHAT_MODELS: ReadonlyArray<LocalChatModel> = [
   // Phone-sized (smallest memory first)
+  {
+    ...local('lfm2.5-230m', 'LFM2.5 230M', '', 200, 450, 'Liquid AI, tiniest and fastest (experimental)', true),
+    onnx: { repo: 'LiquidAI/LFM2.5-230M-ONNX', dtype: 'q4' },
+  },
   local('smollm2-360m', 'SmolLM2 360M', 'SmolLM2-360M-Instruct-q4f16_1-MLC', 204, 376, 'Tiniest download, basic answers', true),
   local('llama-3.2-1b', 'Llama 3.2 1B', 'Llama-3.2-1B-Instruct-q4f16_1-MLC', 705, 879, 'Meta on-device model', true),
   local('qwen2.5-coder-0.5b', 'Qwen2.5-Coder 0.5B', 'Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC', 290, 945, 'Small model tuned for code', true),

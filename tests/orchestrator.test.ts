@@ -981,6 +981,7 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
       expect(SUPPORTED_CHAT_MODELS.map((m) => m.id)).toEqual([
         'gemma-4-e2b-it-web',
         'gemma-4-e4b-it-web',
+        'lfm2.5-230m',
         'smollm2-360m',
         'llama-3.2-1b',
         'qwen2.5-coder-0.5b',
