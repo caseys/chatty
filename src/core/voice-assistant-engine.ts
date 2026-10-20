@@ -64,6 +64,8 @@ const WELCOME_MESSAGE =
   'look up things in Wikipedia or DuckDuckGo and more!';
 /** Returning users get the short greeting (set after the first full welcome) */
 const WELCOMED_KEY = 'chatty_welcomed';
+/** Events in which browsers let a page start sound */
+const AUDIO_GESTURES = ['pointerdown', 'pointerup', 'touchend', 'click', 'keydown'];
 /** Chats kept: a new chat beyond this deletes the one used least recently */
 const MAX_CHATS = 10;
 const WELCOME_BACK_MESSAGE = 'Welcome back, what would you like to do with this browser?';
@@ -251,12 +253,9 @@ export class VoiceAssistantEngine {
     // Browsers start audio only in a tap or key press: every one, anywhere in Chatty (the
     // program's card included, see the sandbox), creates or resumes the one shared AudioContext
     if (typeof document !== 'undefined') {
-      const unlockAudio = () => {
-        const context = this.audioSubsystem?.getAudioContext();
-        if (!context || context.state !== 'running') void this.audioSubsystem?.ensureAudioContext().catch(() => {});
-      };
-      document.addEventListener('pointerdown', unlockAudio, true);
-      document.addEventListener('keydown', unlockAudio, true);
+      // Safari grants sound only in click, touchend and keydown; Chrome also in pointerdown
+      const unlockAudio = () => this.audioSubsystem?.unlockInGesture();
+      for (const type of AUDIO_GESTURES) document.addEventListener(type, unlockAudio, true);
       (window as unknown as { __chattyUnlockAudio?: () => void }).__chattyUnlockAudio = unlockAudio;
     }
     this.jsRuntime = new JavascriptRuntime({

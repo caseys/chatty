@@ -799,12 +799,15 @@ export class JavascriptRuntime {
       } catch {
         // Already disconnected by a screen wipe
       }
+      // The browser's audio session (Safari): 'auto' can be silenced by the iPhone's silent switch
+      const sessionType = (navigator as { audioSession?: { type?: string } }).audioSession?.type;
+      const session = sessionType ? `, session ${sessionType}` : '';
       this.soundLevelPending = false;
       this.onRunLog?.(
         peak > 0.001 ? 'console' : 'error',
         peak > 0.001
-          ? `sound: reached the speakers (level ${peak.toFixed(2)}, audio ${context.state}, ${context.sampleRate} Hz)`
-          : `sound: notes were sent, but nothing reached the speakers (audio ${context.state}, ${context.sampleRate} Hz)`
+          ? `sound: reached the speakers (level ${peak.toFixed(2)}, audio ${context.state}, ${context.sampleRate} Hz${session})`
+          : `sound: notes were sent, but nothing reached the speakers (audio ${context.state}, ${context.sampleRate} Hz${session})`
       );
     }, 100);
   }
@@ -2197,7 +2200,7 @@ export class JavascriptRuntime {
     });
 
     // A tap or key press in the card starts Chatty's audio too (browsers only start it in one)
-    for (const type of ['pointerdown', 'keydown']) {
+    for (const type of ['pointerdown', 'pointerup', 'touchend', 'click', 'keydown']) {
       window.addEventListener(type, () => { try { window.parent.__chattyUnlockAudio?.(); } catch {} }, true);
     }
 

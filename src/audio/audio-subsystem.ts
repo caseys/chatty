@@ -235,6 +235,29 @@ export class SharedAudioSubsystem {
     await old.close().catch(() => {});
   }
 
+  private gestureSoundPlayed = false;
+
+  /**
+   * Called inside a tap, click or key press: creates or resumes the AudioContext there, and the
+   * first time starts a silent one-frame sound in the gesture too, which Safari (iPhone above all)
+   * needs before it lets later sound out of a running context
+   */
+  unlockInGesture(): void {
+    const running = this.audioCtx?.state === 'running';
+    if (!running) void this.ensureAudioContext().catch(() => {});
+    const context = this.audioCtx;
+    if (!context || this.gestureSoundPlayed) return;
+    try {
+      const source = context.createBufferSource();
+      source.buffer = context.createBuffer(1, 1, context.sampleRate);
+      source.connect(context.destination);
+      source.start(0);
+      this.gestureSoundPlayed = true;
+    } catch {
+      // A later gesture tries again
+    }
+  }
+
   async ensureAudioContext(): Promise<AudioContext> {
     // 1. Configure iOS/WebKit AudioSession category for simultaneous full-duplex mic & speaker
     this.configureAudioSession();
