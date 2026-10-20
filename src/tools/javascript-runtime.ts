@@ -759,6 +759,7 @@ export class JavascriptRuntime {
       this.programOutput.connect(context.destination);
     }
     this.watchProgramSound(this.programOutput);
+    this.reportProgramSoundLevel(context, this.programOutput);
     if (context.state !== 'running') {
       void context.resume().catch(() => {});
       // Browsers (Safari above all) keep audio paused until a tap: say so (any tap starts it,
@@ -774,6 +775,42 @@ export class JavascriptRuntime {
    * A program is about to make sound: tells the host (which switches the audio session to
    * playback), then reports when its output has been quiet for 3 seconds.
    */
+  /**
+   * Once a program has asked for sound: whether any of it reached the speakers, measured on its
+   * output over its first two seconds, in the run log (a silent program otherwise looks the same
+   * as a working one)
+   */
+  private reportProgramSoundLevel(context: AudioContext, output: GainNode): void {
+    if (this.soundLevelPending) return;
+    this.soundLevelPending = true;
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 2048;
+    output.connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+    let peak = 0;
+    let checks = 0;
+    const timer = setInterval(() => {
+      analyser.getFloatTimeDomainData(samples);
+      for (const v of samples) peak = Math.max(peak, Math.abs(v));
+      if (++checks < 20) return;
+      clearInterval(timer);
+      try {
+        output.disconnect(analyser);
+      } catch {
+        // Already disconnected by a screen wipe
+      }
+      this.soundLevelPending = false;
+      this.onRunLog?.(
+        peak > 0.001 ? 'console' : 'error',
+        peak > 0.001
+          ? `sound: reached the speakers (level ${peak.toFixed(2)}, audio ${context.state}, ${context.sampleRate} Hz)`
+          : `sound: notes were sent, but nothing reached the speakers (audio ${context.state}, ${context.sampleRate} Hz)`
+      );
+    }, 100);
+  }
+
+  private soundLevelPending = false;
+
   private watchProgramSound(output: GainNode): void {
     if (!this.onProgramAudio) return;
     if (!this.programSounding) {
