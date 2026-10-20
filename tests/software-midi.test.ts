@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { parseMidiMessages, SoftwareMIDIAccess, SoftwareMIDIOutput } from '../src/audio/software-midi.ts';
+import { parseMidiMessages, SoftwareMIDIOutput } from '../src/audio/software-midi.ts';
 
 describe('forgiving MIDI messages', () => {
   it('reads correct messages as they are', () => {
@@ -43,6 +43,25 @@ describe('friendly MIDI messages', () => {
     expect(sent).toEqual([[0xc0, 0], [0x90, 55, 90], [0x90, 59, 90], [0x90, 62, 90]]);
     advance(500);
     expect(sent.slice(4)).toEqual([[0x80, 55, 0], [0x80, 59, 0], [0x80, 62, 0]]);
+    vi.useRealTimers();
+  });
+
+  it('takes the plain form: send(instrument, notes, duration, time)', () => {
+    vi.useFakeTimers();
+    const { sent, output, advance } = setup();
+    output.send('piano', 'C4', 500, 1500);
+    // The instrument is set up now; the note waits for its time
+    expect(sent).toEqual([[0xc0, 0]]);
+    advance(500);
+    expect(sent).toEqual([[0xc0, 0], [0x90, 60, 100]]);
+    advance(500);
+    expect(sent.at(-1)).toEqual([0x80, 60, 0]);
+    // Named values
+    output.send({ instrument: 'piano', notes: 'E4', loudness: 60, duration: 300, time: 0 });
+    expect(sent.at(-1)).toEqual([0x90, 64, 60]);
+    // With a velocity, five values
+    output.send('bass', 'G2', 70, 400, 0);
+    expect(sent.at(-1)).toEqual([0x91, 43, 70]);
     vi.useRealTimers();
   });
 
@@ -181,17 +200,3 @@ describe('invented method names', () => {
   });
 });
 
-describe('finding the synth output', () => {
-  it('finds the one output however a program looks it up', () => {
-    const output = new SoftwareMIDIOutput({
-      synth: { send() {}, setAudioContext() {}, setTsMode() {}, reset() {} },
-      now: () => 0,
-      resumeFromCurrentCall() {},
-    });
-    const access = new SoftwareMIDIAccess(output);
-    expect(access.outputs.values().next().value).toBe(output);
-    expect(access.outputs.get('AudioOut')).toBe(output);
-    expect((access.outputs as unknown as SoftwareMIDIOutput[])[0]).toBe(output);
-    expect(access.outputs.size).toBe(1);
-  });
-});

@@ -126,15 +126,29 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
    * - durationMs stops each note by itself (under 20 it's taken as seconds)
    */
   /** Names small models invent for send() ("piano.play([...])"): the same thing */
-  play(data: unknown, timestamp = 0): void {
-    this.send(data, timestamp);
+  play(data: unknown, timestamp: unknown = 0, ...rest: unknown[]): void {
+    this.send(data, timestamp, ...rest);
   }
 
-  playNote(data: unknown, timestamp = 0): void {
-    this.send(data, timestamp);
+  playNote(data: unknown, timestamp: unknown = 0, ...rest: unknown[]): void {
+    this.send(data, timestamp, ...rest);
   }
 
-  send(data: unknown, timestamp = 0): void {
+  /**
+   * Plays notes. The plain form is send(instrument, notes, duration, time) (with a velocity
+   * before the duration when there are five values); the Web MIDI form send([…], time) and
+   * raw bytes work too.
+   */
+  send(data: unknown, time: unknown = 0, ...rest: unknown[]): void {
+    let timestamp = Number(time);
+    // send('piano', 'G major', 500, start): the values as arguments, not in an array
+    if (typeof data === 'string' && !/^\s*\d+\s*$/.test(data)) {
+      const args = [data, time, ...rest];
+      const [instrument, notes] = args;
+      const [velocity, duration, at] = args.length >= 5 ? [args[2], args[3], args[4]] : [undefined, args[2], args[3]];
+      data = [instrument, notes, velocity, duration];
+      timestamp = Number(at ?? 0);
+    }
     // Forgiving, like the rest of the sandbox: a bad time plays now, bad bytes are fixed or skipped
     if (!Number.isFinite(timestamp)) timestamp = 0;
     const now = this.runtime.now();
@@ -258,7 +272,8 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
     }
     const level =
       velocity === undefined || !Number.isFinite(Number(velocity)) ? 100 : Math.max(0, Math.min(127, Math.round(Number(velocity))));
-    let ms = Number(duration) > 0 ? Number(duration) : 0;
+    // No duration: one beat at 120 bpm, so a note never rings on forever
+    let ms = Number(duration) > 0 ? Number(duration) : DEFAULT_NOTE_MS;
     if (ms > 0 && ms < 20) ms *= 1000; // seconds
     const stepMs = Number(step) > 0 ? Number(step) : sequence ? ms || 300 : 0;
 
@@ -347,27 +362,6 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
   }
 }
 
-/**
- * The outputs of the software synth: there is only one, so every way a program looks one up
- * finds it. Real Web MIDI keys outputs by device id, and programs guess ids ('AudioOut', 'Synth')
- * or index it like an array.
- */
-class AnyOutputMap extends Map<string, SoftwareMIDIOutput> {
-  constructor(private readonly only: SoftwareMIDIOutput) {
-    super([[only.id, only]]);
-    Object.defineProperty(this, 0, { value: only, enumerable: false });
-    Object.defineProperty(this, 'length', { value: 1, enumerable: false });
-  }
-
-  override get(key: string): SoftwareMIDIOutput {
-    return super.get(key) ?? this.only;
-  }
-
-  override has(_key: string): boolean {
-    return true;
-  }
-}
-
 export class SoftwareMIDIAccess extends StateChangeTarget {
   readonly sysexEnabled = false;
   readonly inputs: ReadonlyMap<string, never> = new Map<string, never>();
@@ -375,7 +369,7 @@ export class SoftwareMIDIAccess extends StateChangeTarget {
 
   constructor(output: SoftwareMIDIOutput) {
     super();
-    this.outputs = new AnyOutputMap(output);
+    this.outputs = new Map([[output.id, output]]);
     output.attachAccess(this);
   }
 
@@ -632,6 +626,9 @@ function noteValues(value: unknown, drums: boolean, program: number): { notes: n
   return { notes: [bass ? toBassRange(note) : note], scale: false };
 }
 
+/** A note's length when send() gives none: one beat at 120 bpm */
+const DEFAULT_NOTE_MS = 500;
+
 type PatternNote = { beat: number; note: number; beats: number };
 
 /**
@@ -704,7 +701,7 @@ function toItems(data: unknown): unknown[] {
       return [
         o.instrument ?? 'piano',
         o.notes ?? o.note ?? o.chord ?? o.scale,
-        o.velocity ?? o.volume,
+        o.velocity ?? o.loudness ?? o.volume,
         o.duration ?? o.durationMs ?? o.length,
         o.step ?? o.stepMs ?? o.gap,
       ];

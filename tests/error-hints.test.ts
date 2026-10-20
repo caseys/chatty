@@ -62,3 +62,37 @@ describe('used before its declaration', () => {
     expect(errorHint(code, "Cannot access 'beat' before initialization", 3)!.text).toBe('beat is declared at line 5 but used at line 3, before it.');
   });
 });
+
+describe('repairs by rule', () => {
+  it('awaits a promise used as its value', () => {
+    const code = "const res = fetch('https://x.org/a');\nconst data = res.json();";
+    const hint = errorHint(code, 'res.json is not a function', 2)!;
+    expect(hint.correction!.code).toBe("const res = await fetch('https://x.org/a');\nconst data = res.json();");
+  });
+
+  it('turns = into : in an object', () => {
+    const code = "out.send({ instrument = 'flute', notes: 'C5' });";
+    const hint = errorHint(code, 'Invalid shorthand property initializer', 1)!;
+    expect(hint.correction!.code).toBe("out.send({ instrument: 'flute', notes: 'C5' });");
+  });
+
+  it('quotes words left unquoted in an object', () => {
+    const code = "out.send({ instrument: 'bass', notes: G major, duration: 500 });";
+    const hint = errorHint(code, "Unexpected identifier 'major'", 1)!;
+    expect(hint.correction!.code).toBe("out.send({ instrument: 'bass', notes: 'G major', duration: 500 });");
+  });
+
+  it('assigns a name declared twice the second time', () => {
+    const code = 'const time = 1;\nplay(time);\nconst time = 2;\nplay(time);';
+    const hint = errorHint(code, "Identifier 'time' has already been declared", 3)!;
+    expect(hint.correction!.code).toBe('let time = 1;\nplay(time);\ntime = 2;\nplay(time);');
+  });
+});
+
+describe('a program that makes its own copy of a helper', () => {
+  it('drops the copy so the ready-made helper is used', () => {
+    const code = "const out = new Out({ instrument: 'piano' });\nout.send({ notes: 'C4' });";
+    const hint = errorHint(code, 'Out is not defined', 1)!;
+    expect(hint.correction!.code).toBe("out.send({ notes: 'C4' });");
+  });
+});

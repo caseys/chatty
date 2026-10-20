@@ -1526,7 +1526,7 @@ export class JavascriptRuntime {
               // createDrumMachine() makes something; createNote('G2', 500) plays
               if (/^create/i.test(prop) && args.length === 0) return standInNode(prop.replace(/^create/i, '') || 'node');
               if (PLAY_NAME.test(prop)) {
-                if (args.length > 0) forgivingOut.send(sendArgs(args));
+                if (args.length > 0) playOn(forgivingOut, args);
                 return contextProxy;
               }
               if (/^create/i.test(prop)) return standInNode(prop.replace(/^create/i, '') || 'node');
@@ -1635,21 +1635,19 @@ export class JavascriptRuntime {
     // starts only when it first plays a note
     let defaultMidi = null;
     const defaultMidiOut = {
-      send(data, time) {
+      send(...args) {
         defaultMidi ??= navigator.requestMIDIAccess().then((access) => access.outputs.values().next().value);
-        defaultMidi.then((output) => output && output.send(data, time)).catch(() => {});
+        defaultMidi.then((output) => output && output.send(...args)).catch(() => {});
       },
-      play(data, time) { this.send(data, time); },
-      playNote(data, time) { this.send(data, time); },
+      play(...args) { this.send(...args); },
+      playNote(...args) { this.send(...args); },
     };
 
-    // Models call methods our objects don't have (out.playChord(), access.getOutputs(),
-    // out.setTempo(90)). On the objects Chatty gives programs (MIDI access, outputs, out), a
-    // missing method does what its name says: play-like names play, lookup-like names return
-    // the output, anything else does nothing and returns the object (so chains keep going).
-    // Every such call goes to the run log as "imagined".
+    // Models call methods Chatty's own helpers don't have (out.playChord(), out.setTempo(90)).
+    // A missing method does what its name says: play-like names play, anything else does nothing
+    // and returns the helper (so chains keep going). Every such call goes to the run log as
+    // "imagined".
     const PLAY_NAME = /^(?:play|note|send|trigger|hit|strike|sound|fire)|note|chord|drum|melody/i;
-    const LOOKUP_NAME = /^(?:get|first|default|find|select|open|connect|output|port|synth|instrument)/i;
     // Names JavaScript itself asks for: a real answer (undefined), never a made-up method
     const PROTOCOL_NAMES = new Set(['then', 'catch', 'finally', 'toJSON', 'constructor', 'prototype', 'nodeType', 'valueOf', 'toString', 'asymmetricMatch', '$$typeof']);
     function imagined(text) {
@@ -1674,34 +1672,28 @@ export class JavascriptRuntime {
       }
       return args;
     }
+    // A made-up play call's arguments, played: a whole message ([…], time), the plain form
+    // (instrument, notes, duration, time), or bare notes / a frequency (see sendArgs)
+    function playOn(port, args) {
+      const [first] = args;
+      // Named values: { instrument, notes, loudness, duration, time }
+      if (first && typeof first === 'object' && !Array.isArray(first)) return port.send(first, args[1]);
+      if (Array.isArray(first) && typeof first[0] === 'string' && !/^[A-Ga-g](?:#|b)?-?\\d/.test(first[0])) port.send(first, args[1]);
+      else if (typeof first === 'string' && !/^[A-Ga-g](?:#|b)?-?\\d?(?:\\s|$|m|maj|min|dim|aug|sus|7)/.test(first)) port.send(...args);
+      else port.send(sendArgs(args));
+    }
     const forgivingCache = new WeakMap();
-    function forgiving(target, name, output) {
-      if (!target || (typeof target !== 'object' && typeof target !== 'function')) return target;
+    function forgiving(target, name) {
       if (forgivingCache.has(target)) return forgivingCache.get(target);
       const proxy = new Proxy(target, {
         get(obj, prop) {
-          if (typeof prop === 'symbol' || PROTOCOL_NAMES.has(prop)) {
+          if (typeof prop === 'symbol' || PROTOCOL_NAMES.has(prop) || prop in obj) {
             const value = Reflect.get(obj, prop, obj);
             return typeof value === 'function' ? value.bind(obj) : value;
           }
-          if (prop in obj) {
-            const value = Reflect.get(obj, prop, obj);
-            if (typeof value !== 'function') return prop === 'outputs' || prop === 'value' ? forgiving(value, name + '.' + prop, output) : value;
-            return (...args) => {
-              const result = value.apply(obj, args);
-              // A lookup's result (the output, its iterator step) stays forgiving too
-              return result && typeof result === 'object' && typeof result.then !== 'function' ? forgiving(result, name, output) : result;
-            };
-          }
           return (...args) => {
             imagined(name + '.' + prop + '(' + argText(args) + ')');
-            const port = output?.() ?? (typeof obj.send === 'function' ? obj : null);
-            if (PLAY_NAME.test(prop) && port) {
-              if (Array.isArray(args[0])) port.send(args[0], args[1]);
-              else port.send(sendArgs(args));
-              return proxy;
-            }
-            if (LOOKUP_NAME.test(prop) && port) return forgiving(port, 'out', output);
+            if (PLAY_NAME.test(prop) && args.length > 0) playOn(obj, args);
             return proxy;
           };
         },
@@ -1720,7 +1712,7 @@ export class JavascriptRuntime {
         disconnect() {},
         start() {},
         stop() {},
-        send(data, time) { forgivingOut.send(Array.isArray(data) ? data : sendArgs([data]), time); },
+        send(...args) { playOn(forgivingOut, args); },
       };
       const proxy = forgiving(node, kind.charAt(0).toLowerCase() + kind.slice(1));
       return proxy;
@@ -1872,11 +1864,7 @@ export class JavascriptRuntime {
     // desktop Web MIDI only reaches plugged-in devices). Timestamps are on this page's clock.
     Object.defineProperty(navigator, 'requestMIDIAccess', {
       configurable: true,
-      value: (options) =>
-        Promise.resolve(window.parent.__chattyMidi(options, () => performance.now())).then((access) => {
-          const first = () => access.outputs.values().next().value;
-          return forgiving(access, 'midiAccess', first);
-        }),
+      value: (options) => window.parent.__chattyMidi(options, () => performance.now()),
     });
 
     // Whether the program has put anything on screen (canvas, svg, div, table, etc.)
@@ -1941,14 +1929,6 @@ export class JavascriptRuntime {
       window.beat = 60000 / 100;
       window.start = performance.now() + 100;
       window.out = forgivingOut;
-      // Programs that skip requestMIDIAccess and read this.outputs (this is the window) or
-      // outputs directly get the synth through any lookup
-      window.outputs = Object.assign(new Map([['synth', defaultMidiOut]]), {
-        get: () => forgivingOut,
-        has: () => true,
-        0: forgivingOut,
-        length: 1,
-      });
       const logs = [];
       const origLog = console.log;
       const origWarn = console.warn;

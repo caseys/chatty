@@ -18,6 +18,7 @@
     "@mlc-ai/web-llm": "^0.2.85",
     "@realtimex/piper-tts-web": "^1.1.1",
     "acorn": "^8.19.0",
+    "acorn-loose": "^8.5.2",
     "cactus-needle": "^0.3.0",
     "onnxruntime-web": "^1.30.0",
     "prismjs": "^1.30.0",

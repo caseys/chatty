@@ -76,3 +76,20 @@ describe('applying a fix reply', () => {
     expect(applyFixReply(failed, '<<<<<<< SEARCH\nconst t = 1;\n=======', 5)).toBe(failed);
   });
 });
+
+describe('finding what does not parse', () => {
+  it('marks the statements that do not parse, from the first to the last', async () => {
+    const { brokenLines } = await import('../src/core/line-fix.ts');
+    const code = 'const a = 1;\nout.send({ notes: G major });\nconst b = 2;\nfunction f() {\n  play(\n}\nspeak("hi");';
+    expect(brokenLines(code)).toEqual({ start: 2, end: 6 });
+    expect(brokenLines('const a = 1;\nspeak(a);')).toBeNull();
+  });
+
+  it('asks for the marked lines rewritten when they do not parse', async () => {
+    const { fixRequest } = await import('../src/core/line-fix.ts');
+    const request = fixRequest('play a song', 'const a = 1;\nout.send({ notes: G major });', 2, "Unexpected identifier 'major'", undefined, { start: 2, end: 2, why: 'syntax' });
+    expect(request).toContain("The marked lines don't parse");
+    expect(request).toContain('// >>> ERROR');
+    expect(request).toContain('rewritten as valid JavaScript');
+  });
+});

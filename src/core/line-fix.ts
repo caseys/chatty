@@ -1,4 +1,5 @@
 import { parse } from 'acorn';
+import { parse as parseLoose } from 'acorn-loose';
 /**
  * Fixing a failed program. A fix turn has its own short system prompt (FIX_SYSTEM_PROMPT) and one
  * message, the user's: what the program is for, the error, what to reply, then the whole program
@@ -36,6 +37,41 @@ export function enclosingFunction(code: string, line: number | undefined): { sta
   return best;
 }
 
+const STRICT = { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true } as const;
+
+/**
+ * The lines of a program that don't parse: the forgiving parser (acorn-loose) splits even a
+ * broken program into its statements, and each is checked on its own with the strict one. The
+ * span from the first broken statement to the last, or null when the program parses (or the
+ * span is too long to ask for).
+ */
+export function brokenLines(code: string): { start: number; end: number } | null {
+  try {
+    parse(code, STRICT);
+    return null;
+  } catch {
+    // Broken: find where
+  }
+  let program: { body: Array<{ start: number; end: number; loc: { start: { line: number }; end: { line: number } } }> };
+  try {
+    program = parseLoose(code, { ecmaVersion: 'latest', locations: true }) as unknown as typeof program;
+  } catch {
+    return null;
+  }
+  const broken = program.body.filter((statement) => {
+    try {
+      parse(code.slice(statement.start, statement.end), STRICT);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (broken.length === 0) return null;
+  const start = broken[0].loc.start.line;
+  const end = broken[broken.length - 1].loc.end.line;
+  return end - start < 60 ? { start, end } : null;
+}
+
 /** The system prompt of a fix turn: only what fixing needs */
 export const FIX_SYSTEM_PROMPT = [
   "You fix JavaScript programs that run in the user's browser. Each request gives the error and the program, with the failing code between // >>> ERROR and // <<< ERROR comments.",
@@ -60,7 +96,7 @@ export function fixRequest(
   line: number | undefined,
   error: string,
   hint?: string,
-  block?: { start: number; end: number }
+  block?: { start: number; end: number; why?: 'unchanged' | 'syntax' }
 ): string {
   const task = request.replace(/\s+/g, ' ').trim().replace(/[.!?:,;\s]+$/, '').slice(0, 200);
   const problem = error.trim().replace(/\.+$/, '');
@@ -73,9 +109,11 @@ export function fixRequest(
     lines.splice(block.start - 1, 0, `${indent}${MARK_START}: ${problem}${at ? ` (at line ${at})` : ''}`);
     return [
       ...(task ? [`This program was written for: ${task}`] : []),
-      `It failed in the marked function: ${problem}`,
+      block.why === 'syntax' ? `The marked lines don't parse: ${problem}` : `It failed in the marked function: ${problem}`,
       ...(hint ? [hint] : []),
-      'Changing only the failing line did not fix it. Reply with one comment line saying what caused the error (// Cause: ...), then the whole marked function, corrected, without the ERROR comments.',
+      block.why === 'syntax'
+        ? 'Reply with one comment line saying what is wrong (// Cause: ...), then the marked lines rewritten as valid JavaScript, without the ERROR comments.'
+        : 'Changing only the failing line did not fix it. Reply with one comment line saying what caused the error (// Cause: ...), then the whole marked function, corrected, without the ERROR comments.',
       '```js',
       lines.join('\n'),
       '```',

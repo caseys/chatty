@@ -233,8 +233,103 @@ function tooEarly(code: string, error: string, errorLine?: number): ErrorHint | 
   return { text: `${d.name} is declared at line ${d.line} but used${errorLine ? ` at line ${errorLine}` : ''}, before it.` };
 }
 
+/** The line the parser stops at, or 0 when the program parses */
+function parseErrorLine(code: string): number {
+  try {
+    parse(code, PARSE_OPTIONS);
+    return 0;
+  } catch (err) {
+    return (err as { loc?: { line?: number } }).loc?.line ?? -1;
+  }
+}
+
+/** A repair of one line that gets the parser past it */
+function repairLine(code: string, line: number, repair: (text: string) => string, note: string): ErrorHint | null {
+  const lines = code.split('\n');
+  if (!line || line > lines.length) return null;
+  const fixed = repair(lines[line - 1]);
+  if (fixed === lines[line - 1]) return null;
+  const repaired = [...lines.slice(0, line - 1), fixed, ...lines.slice(line)].join('\n');
+  const stop = parseErrorLine(repaired);
+  return stop === 0 || stop > line ? { correction: { code: repaired, note } } : null;
+}
+
+/**
+ * Object and declaration slips small models make, repaired by rule: `{ notes = 'C4' }` (= for :),
+ * `{ notes: G major }` (words left unquoted), and a name declared twice
+ */
+function syntaxSlip(code: string, error: string, errorLine?: number): ErrorHint | null {
+  const line = errorLine ?? 0;
+  if (/shorthand property initializer|Expected a ':' following the property name/i.test(error)) {
+    return repairLine(code, line, (text) => text.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*=(?![=>])\s*/g, '$1$2: '), '= in an object → :');
+  }
+  if (/Unexpected identifier|Unexpected token|missing } after property list/i.test(error)) {
+    const quoted = repairLine(
+      code,
+      line,
+      (text) => text.replace(/(:\s*)([A-Za-z][\w#]*(?:[ \t]+[A-Za-z0-9#][\w#]*)+)(?=\s*[,}]|\s*$)/g, "$1'$2'"),
+      'unquoted words in an object → quoted'
+    );
+    if (quoted) return quoted;
+  }
+  const twice = error.match(/Identifier '([^']+)' has already been declared/) ?? error.match(/Cannot declare a (?:const|let) variable twice: '([^']+)'/);
+  if (twice) {
+    const name = twice[1].replace(/\$/g, '\\$');
+    let seen = 0;
+    const repaired = code
+      .replace(new RegExp(`\\b(const|let|var)(\\s+)${name}\\b`, 'g'), (_match, _kind, space) => (seen++ === 0 ? `let${space}${twice[1]}` : twice[1]));
+    if (seen > 1 && parseErrorLine(repaired) === 0) {
+      return { correction: { code: repaired, note: `${twice[1]} declared twice → assigned the second time` } };
+    }
+  }
+  return null;
+}
+
+/** Helpers every program already has, ready to use */
+const HELPERS = ['out', 'speak', 'clear', 'root'];
+
+/**
+ * A program that makes its own copy of a ready-made helper (`const out = new Out({…})`,
+ * `const speak = speak.bind(…)`): the declaration goes, so the real helper is used
+ */
+function redeclaredHelper(code: string, error: string): ErrorHint | null {
+  if (!/is not defined|Can't find variable|before initialization|uninitialized variable|is not a constructor/i.test(error)) return null;
+  for (const helper of HELPERS) {
+    const declaration = new RegExp(`^[ \\t]*(?:const|let|var)\\s+${helper}\\s*=\\s*(?:new\\s+)?${helper}\\b[^\\n]*\\n?`, 'im');
+    if (declaration.test(code)) {
+      return { correction: { code: code.replace(declaration, ''), note: `its own ${helper} → the ready-made one` } };
+    }
+  }
+  return null;
+}
+
+/** Calls whose value is a promise: await them to get the thing itself */
+const PROMISE_CALL = /\b(?:fetch|requestMIDIAccess|getUserMedia|requestPermission|json|text|blob|arrayBuffer|decodeAudioData|resume|requestFullscreen|play)\s*\(/;
+
+/**
+ * A promise used as the value it promises (`const res = fetch(url); res.json()`): the call that
+ * made it gets an await (an enclosing function is made async before it runs)
+ */
+function missingAwait(code: string, error: string): ErrorHint | null {
+  const subject =
+    error.match(/([A-Za-z_$][\w$]*)\.[A-Za-z_$][\w$]* is not a function/)?.[1] ??
+    error.match(/undefined is not an object \(evaluating '([A-Za-z_$][\w$]*)\./)?.[1];
+  if (!subject) return null;
+  const asyncFunctions = [...code.matchAll(/async\s+function\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
+  const assignment = new RegExp(`(\\b(?:const|let|var)\\s+${subject.replace(/\$/g, '\\$')}\\s*=\\s*)(?!await\\b)([^;\\n]+)`);
+  const found = code.match(assignment);
+  if (!found) return null;
+  const init = found[2];
+  const promises = PROMISE_CALL.test(init) || asyncFunctions.some((fn) => new RegExp(`^\\s*${fn}\\s*\\(`).test(init));
+  if (!promises) return null;
+  return { correction: { code: code.replace(assignment, '$1await $2'), note: `${subject} was a promise → await` } };
+}
+
 /** Help for a failed program: a correction, or facts for the fix request */
 export function errorHint(code: string, error: string, errorLine?: number, page?: PageFacts): ErrorHint | null {
+  // Corrections by rule first: they need no model
+  const rule = redeclaredHelper(code, error) ?? missingAwait(code, error) ?? syntaxSlip(code, error, errorLine);
+  if (rule) return rule;
   const method = methodHint(code, error);
   if (method) {
     return method.correction

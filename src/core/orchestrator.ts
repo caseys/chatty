@@ -37,7 +37,7 @@ import {
   syntaxErrorLine,
 } from '../tools/javascript-runtime.ts';
 import { appendRunLog } from './run-log.ts';
-import { applyFixReply, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest } from './line-fix.ts';
+import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest } from './line-fix.ts';
 import { errorHint } from './error-hints.ts';
 import { AFTER_HEAVY_MS, settle } from './settle.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
@@ -200,7 +200,7 @@ const PROMPT_RULES: ReadonlyArray<{ text: string; when?: RegExp }> = [
   { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations.', when: DRAWING_REQUEST },
   { text: '- For 3D, use WebGL on a <canvas>.', when: THREE_D_REQUEST },
   { text: '- <svg> works for diagrams and icons.', when: DIAGRAM_REQUEST },
-  { text: "- Sound: music and instruments go to the MIDI output out (from navigator.requestMIDIAccess()): call out.send([instrument, notes, velocity, durationMs], time) once per note, chord, drum hit or pattern, like out.send(['piano', 'G major', 80, 4 * beat], start + n * beat). Other sounds (beeps, effects) use Web Audio. Instruments: piano, bass, organ, guitar, strings, violin, trumpet, sax, flute, drums. Notes: a note ('G3'), a chord ('G major', 'Am7'), a scale ('G pentatonic down'), drum hits ('kick', 'snare', 'hihat'), or an array (up to 4 sound together, more play in turn). Patterns fill a 4/4 bar over the duration: grooves ('boom-chuck', 'rock', 'shuffle', 'four on the floor') and 'walking G major'. A beat or groove means drums. Declare const bpm, beat = 60000 / bpm and start = performance.now() at the top. To loop, put the bars in a function ending with start += their length, call it, then setInterval it with that length.", when: SOUND_REQUEST },
+  { text: "- Sound: music and instruments: out is ready to use. Call out.send once per note, chord, drum hit or pattern, with named values (durations and times in ms), like out.send({ instrument: 'piano', notes: 'G major', loudness: 80, duration: 4 * beat, time: start + 2 * beat }). Only notes is needed: the rest default to piano, loudness 100, half a second and now. Other sounds (beeps, effects) use Web Audio. Instruments: piano, bass, organ, guitar, strings, violin, trumpet, sax, flute, drums. Notes: a note ('G3'), a chord ('G major', 'Am7'), a scale ('G pentatonic down'), drum hits ('kick', 'snare', 'hihat'), or an array (up to 4 sound together, more play in turn). Patterns fill a 4/4 bar over the duration: grooves ('boom-chuck', 'rock', 'shuffle', 'four on the floor') and 'walking G major'. A beat or groove means drums. Declare const bpm, beat = 60000 / bpm and start = performance.now() at the top. To loop, put the bars in a function ending with start += their length, call it, then setInterval it with that length.", when: SOUND_REQUEST },
   { text: '- Answer what you know directly. For facts you lack, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it.', when: FACTS_REQUEST },
 ];
 
@@ -1360,13 +1360,19 @@ export class ConversationOrchestrator {
       kind: 'error',
       text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
-    const request = fixRequest(run.task, run.code, run.errorLine, run.error, hint?.text);
+    // A program that doesn't parse: every statement that doesn't is marked, not just one line
+    const broken = brokenLines(run.code);
+    const block = broken ? { ...broken, why: 'syntax' as const } : undefined;
+    const request = fixRequest(run.task, run.code, run.errorLine, run.error, hint?.text, block);
     this.startFixLog(run);
-    appendRunLog('retry', `the program failed (${errorText(run.error, run.errorLine)}): asking the model to fix the marked line`);
+    appendRunLog(
+      'retry',
+      `the program failed (${errorText(run.error, run.errorLine)}): asking the model to fix ${block ? `lines ${block.start}-${block.end}, which don't parse` : 'the marked line'}`
+    );
     // A short pause before the model runs again, unless the user moves on meanwhile
     void settle(AFTER_HEAVY_MS).then(() => {
       if (this.scheduler.getActiveTurnId()) return;
-      return this.submitUserInput(request, { autoFix: run.code });
+      return this.submitUserInput(request, { autoFix: run.code, ...(block ? { fixBlock: { start: block.start, end: block.end } } : {}) });
     });
   }
 
