@@ -3,7 +3,7 @@
  * speak() and clear() calls, its errors, and every retry with its reason and the reply it threw away. A later program or a fix replaces what the card and
  * the chat show; this keeps all of it. Kept in localStorage (chatty_run_log, the last 300 entries).
  */
-export type RunLogEntryKind = 'request' | 'reply' | 'program' | 'speak' | 'clear' | 'console' | 'error' | 'retry' | 'discarded';
+export type RunLogEntryKind = 'request' | 'reply' | 'program' | 'speak' | 'clear' | 'imagined' | 'console' | 'error' | 'retry' | 'discarded';
 
 const KEY = 'chatty_run_log';
 const MAX_ENTRIES = 300;

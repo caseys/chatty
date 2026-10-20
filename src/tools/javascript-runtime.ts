@@ -31,7 +31,7 @@ export interface JavascriptExecutionResult {
   errorLine?: number;
 }
 
-export type RunLogKind = 'program' | 'speak' | 'clear' | 'console' | 'error';
+export type RunLogKind = 'program' | 'speak' | 'clear' | 'imagined' | 'console' | 'error';
 
 export interface ExecutionContextOptions {
   onSpeak?: (text: string) => void;
@@ -1579,6 +1579,70 @@ export class JavascriptRuntime {
       playNote(data, time) { this.send(data, time); },
     };
 
+    // Models call methods our objects don't have (out.playChord(), access.getOutputs(),
+    // out.setTempo(90)). On the objects Chatty gives programs (MIDI access, outputs, out), a
+    // missing method does what its name says: play-like names play, lookup-like names return
+    // the output, anything else does nothing and returns the object (so chains keep going).
+    // Every such call goes to the run log as "imagined".
+    const PLAY_NAME = /^(?:play|note|send|trigger|hit|strike|sound|fire)|note|chord|drum|melody/i;
+    const LOOKUP_NAME = /^(?:get|first|default|find|select|open|connect|output|port|synth|instrument)/i;
+    // Names JavaScript itself asks for: a real answer (undefined), never a made-up method
+    const PROTOCOL_NAMES = new Set(['then', 'catch', 'finally', 'toJSON', 'constructor', 'prototype', 'nodeType', 'valueOf', 'toString', 'asymmetricMatch', '$$typeof']);
+    function imagined(text) {
+      window.parent.postMessage({ type: 'imagined', id: currentExecId, text: String(text).slice(0, 200) }, '*');
+    }
+    function argText(args) {
+      try { return args.map((a) => typeof a === 'function' ? 'fn' : JSON.stringify(a)).join(', '); } catch { return '…'; }
+    }
+    const forgivingCache = new WeakMap();
+    function forgiving(target, name, output) {
+      if (!target || (typeof target !== 'object' && typeof target !== 'function')) return target;
+      if (forgivingCache.has(target)) return forgivingCache.get(target);
+      const proxy = new Proxy(target, {
+        get(obj, prop) {
+          if (typeof prop === 'symbol' || PROTOCOL_NAMES.has(prop)) {
+            const value = Reflect.get(obj, prop, obj);
+            return typeof value === 'function' ? value.bind(obj) : value;
+          }
+          if (prop in obj) {
+            const value = Reflect.get(obj, prop, obj);
+            if (typeof value !== 'function') return prop === 'outputs' || prop === 'value' ? forgiving(value, name + '.' + prop, output) : value;
+            return (...args) => {
+              const result = value.apply(obj, args);
+              // A lookup's result (the output, its iterator step) stays forgiving too
+              return result && typeof result === 'object' && typeof result.then !== 'function' ? forgiving(result, name, output) : result;
+            };
+          }
+          return (...args) => {
+            imagined(name + '.' + prop + '(' + argText(args) + ')');
+            const port = output?.() ?? (typeof obj.send === 'function' ? obj : null);
+            if (PLAY_NAME.test(prop) && port) {
+              if (Array.isArray(args[0])) port.send(args[0], args[1]);
+              else port.send(args);
+              return proxy;
+            }
+            if (LOOKUP_NAME.test(prop) && port) return forgiving(port, 'out', output);
+            return proxy;
+          };
+        },
+      });
+      forgivingCache.set(target, proxy);
+      return proxy;
+    }
+    const forgivingOut = forgiving(defaultMidiOut, 'out');
+
+    // Element.clear() (document.body.clear() is a common guess): empties it like clear()
+    if (!('clear' in HTMLElement.prototype)) {
+      Object.defineProperty(HTMLElement.prototype, 'clear', {
+        configurable: true,
+        value: function () {
+          imagined((this === document.body ? 'document.body' : this.tagName.toLowerCase()) + '.clear()');
+          if (this === document.body || this === window.root) window.clear();
+          else this.replaceChildren();
+        },
+      });
+    }
+
     // Programs often wait for the page to load (DOMContentLoaded, load, window.onload), but it
     // already has, so that setup would never run: it runs right away instead
     const LOAD_EVENTS = new Set(['DOMContentLoaded', 'load']);
@@ -1690,7 +1754,11 @@ export class JavascriptRuntime {
     // desktop Web MIDI only reaches plugged-in devices). Timestamps are on this page's clock.
     Object.defineProperty(navigator, 'requestMIDIAccess', {
       configurable: true,
-      value: (options) => window.parent.__chattyMidi(options, () => performance.now()),
+      value: (options) =>
+        Promise.resolve(window.parent.__chattyMidi(options, () => performance.now())).then((access) => {
+          const first = () => access.outputs.values().next().value;
+          return forgiving(access, 'midiAccess', first);
+        }),
     });
 
     // Whether the program has put anything on screen (canvas, svg, div, table, etc.)
@@ -1754,13 +1822,13 @@ export class JavascriptRuntime {
       window.bpm = 100;
       window.beat = 60000 / 100;
       window.start = performance.now() + 100;
-      window.out = defaultMidiOut;
+      window.out = forgivingOut;
       // Programs that skip requestMIDIAccess and read this.outputs (this is the window) or
       // outputs directly get the synth through any lookup
       window.outputs = Object.assign(new Map([['synth', defaultMidiOut]]), {
-        get: () => defaultMidiOut,
+        get: () => forgivingOut,
         has: () => true,
-        0: defaultMidiOut,
+        0: forgivingOut,
         length: 1,
       });
       const logs = [];
@@ -1919,6 +1987,11 @@ export class JavascriptRuntime {
 
     if (data.type === 'clear') {
       this.onRunLog?.('clear', '');
+      return;
+    }
+
+    if (data.type === 'imagined') {
+      this.onRunLog?.('imagined', String(data.text ?? ''));
       return;
     }
 
