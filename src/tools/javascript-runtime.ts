@@ -31,7 +31,7 @@ export interface JavascriptExecutionResult {
   errorLine?: number;
 }
 
-export type RunLogKind = 'program' | 'speak' | 'clear' | 'error';
+export type RunLogKind = 'program' | 'speak' | 'clear' | 'console' | 'error';
 
 export interface ExecutionContextOptions {
   onSpeak?: (text: string) => void;
@@ -403,27 +403,12 @@ function normalizeFences(text: string): string {
   );
 }
 
-/**
- * Small models sometimes answer in the format the prompt shows its examples in
- * (<example><request>…</request><reply>…</reply></example>): the program is in the last <reply>.
- * Also used for the code panel, which shows the reply as it streams in.
- */
-export function unwrapExampleFormat(text: string): string {
-  if (!/<\/?(?:examples|example|request|reply)>/i.test(text)) return text;
-  const replies = [...text.matchAll(/<reply>([\s\S]*?)(?:<\/reply>|$)/gi)];
-  if (replies.length > 0) return replies[replies.length - 1][1].trim();
-  return text
-    .replace(/<request>[\s\S]*?(?:<\/request>|$)/gi, '')
-    .replace(/<\/?(?:examples|example|request|reply)>/gi, '')
-    .trim();
-}
-
 /** A reply that starts with a real HTML tag (not just any <word>) */
 const HTML_START =
   /^<(?:!doctype\b|!--|(?:html|head|body|div|span|p|h[1-6]|canvas|svg|style|script|button|input|form|label|section|main|header|footer|nav|article|ul|ol|li|table|img|a|pre|br|hr|center|select|textarea|video|audio|b|i|strong|em|small)[\s>/])/i;
 
 export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
-  let cleaned = normalizeFences(unwrapExampleFormat((rawText || '').trim()));
+  let cleaned = normalizeFences((rawText || '').trim());
 
   // HTML instead of JavaScript (a whole page for "an app", or bare <canvas> + <script>): its
   // markup goes on screen and its scripts run, as with an ```html block. Never spoken as prose.
@@ -956,6 +941,7 @@ export class JavascriptRuntime {
       result = await this.executeInIframe(protectedCode, options);
     }
 
+    if (result.logs.length > 0) this.onRunLog?.('console', result.logs.join('\n'));
     if (result.error) this.onRunLog?.('error', result.errorLine ? `line ${result.errorLine}: ${result.error}` : result.error);
     callback?.(result);
     this.onResult?.(result);

@@ -32,15 +32,6 @@ describe('running code the model wrapped or forgot to call', () => {
     expect(out.code).toBe('document.body.insertAdjacentHTML("beforeend", "<canvas id=\\"c\\"></canvas>");\n\nconst a = 1;\n\nspeak("Here it is.");');
   });
 
-  it('runs the program from a reply written in the examples\' tag format', () => {
-    const reply = '<examples>\n<example>\n<request>Play a loop</request>\n<reply>\nconst out = 1;\nspeak("Here it is.");\n</reply>\n</example>\n</examples>';
-    const out = inspectExecutableCode(reply);
-    expect(out.isProse).toBe(false);
-    expect(out.code).toBe('const out = 1;\nspeak("Here it is.");');
-    // Without a <reply>, the tags and the request are dropped
-    expect(inspectExecutableCode('<example><request>x</request>\nspeak("Hi");</example>').code).toBe('speak("Hi");');
-  });
-
   it('runs unfenced code between explanations', () => {
     const out = inspectExecutableCode('I will draw it now.\nconst c = document.createElement("canvas");\nroot.appendChild(c);\nThis creates a canvas.');
     expect(out.isProse).toBe(false);
@@ -124,12 +115,29 @@ describe('repeat-loop guard', () => {
   });
 
   it('leaves normal code alone', async () => {
-    const { repetitionCutIndex, EXAMPLE_TURNS } = await import('../src/core/orchestrator.ts');
+    const { repetitionCutIndex } = await import('../src/core/orchestrator.ts');
+    const program = [
+      'const out = (await navigator.requestMIDIAccess()).outputs.values().next().value;',
+      'const bpm = 90;',
+      'const beat = 60000 / bpm;',
+      "const theme = ['D4', 'F4', 'A4', 'G4', 'F4', 'E4', 'D4', 'A3'];",
+      'let start = performance.now() + 100;',
+      'function playTheme() {',
+      '  for (let i = 0; i < theme.length; i++) {',
+      '    const t = start + i * beat;',
+      "    out.send(['organ', theme[i], 80, beat], t);",
+      "    if (i % 4 === 0) out.send(['strings', 'D minor', 60, 4 * beat], t);",
+      "    out.send(['drums', i % 2 ? 'snare' : 'kick', 90], t);",
+      '  }',
+      '  start += theme.length * beat;',
+      '}',
+      'playTheme();',
+      'setInterval(playTheme, theme.length * beat);',
+      'speak("Here it is, on repeat.");',
+    ].join('\n');
     // Checked as the reply streams in, like the real guard
-    for (const turn of EXAMPLE_TURNS.filter((t) => t.role === 'assistant')) {
-      for (let end = 40; end <= turn.content.length + 40; end += 40) {
-        expect(repetitionCutIndex(turn.content.slice(0, end))).toBe(-1);
-      }
+    for (let end = 40; end <= program.length + 40; end += 40) {
+      expect(repetitionCutIndex(program.slice(0, end))).toBe(-1);
     }
     expect(repetitionCutIndex('function a() {\n  if (x) {\n    y();\n  }\n}\n}\n}\n}')).toBe(-1);
     expect(repetitionCutIndex('ctx.lineTo(1, 2);\nctx.lineTo(3, 4);\nctx.lineTo(5, 6);\nctx.lineTo(7, 8);')).toBe(-1);

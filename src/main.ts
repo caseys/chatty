@@ -8,7 +8,6 @@ import { VoiceAssistantEngine } from './core/voice-assistant-engine.ts';
 import { MODEL_REGISTRY } from './core/model-manager.ts';
 import { FluidAudioVisualizer } from './audio/visualizer.ts';
 import { clearModelCache, getModelCacheBytes } from './core/model-cache.ts';
-import { unwrapExampleFormat } from './tools/javascript-runtime.ts';
 import { isAppleMobile } from './core/settings.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
 import type { RunStatus } from './core/orchestrator.ts';
@@ -836,7 +835,7 @@ export class MinimalVoiceApp {
     }
     // Without speak() lines (they're in the chat) and without code fences: an unmatched ``` reads
     // as an open template string and would turn everything after it into one green string
-    const code = unwrapExampleFormat(text)
+    const code = text
       .split('\n')
       .filter((line) => !/^\s*(?:await\s+)?speak\(.*\);?\s*$/.test(line))
       .filter((line) => !/^\s*(?:(?:javascript|js|html|css)[ \t:]*)?(?:```|~~~|"""|''')[\w-]*\s*$/i.test(line))

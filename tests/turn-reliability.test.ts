@@ -342,7 +342,7 @@ describe('the prompt budget counts what the prompt really holds', () => {
   it('compacts before a 4,096-token window with 1,536 tokens set aside for the reply overflows', async () => {
     const llm = new QueueLlm([], 4096, 1536);
     const orchestrator = orchestratorFor(llm);
-    const filler = ' word'.repeat(200); // about 250 tokens a message
+    const filler = ' word'.repeat(300); // about 375 tokens a message
     for (let i = 1; i <= 8; i++) {
       llm.replies.push(`speak("Answer ${i}.${filler}");`);
       await orchestrator.submitUserInput(`Question number ${i}${filler}`);
@@ -358,8 +358,8 @@ describe('the prompt budget counts what the prompt really holds', () => {
     const store = new ConversationMemoryStore();
     const orchestrator = orchestratorFor(new QueueLlm([], 4096, 1536), { memoryStore: store });
     store.addMessage({ id: 'u1', turnId: 't1', role: 'user', canonicalContent: 'Hi', timestamp: 0 });
-    // System prompt (rules, examples) and format turns come to well over a thousand tokens
-    expect(store.getCurrentContextTokens()).toBeGreaterThan(900);
+    // The system prompt's rules and the format turns come to a few hundred tokens
+    expect(store.getCurrentContextTokens()).toBeGreaterThan(250);
     expect(orchestrator).toBeDefined();
   });
 
@@ -551,42 +551,6 @@ describe('fix turns and compaction', () => {
     add('a3', 't3', 'assistant');
     store.compactIfNecessary();
     expect(store.getMessages().map((m) => m.id)).toEqual(['fixu', 'fixa', 'u3', 'a3']); // the fix turns stay but count for nothing
-  });
-});
-
-describe('the examples leak guard', () => {
-  it('writes a reply again once when it reuses an example name the request lacks', async () => {
-    const llm = new QueueLlm(['speak("Zibble would love that.");', 'speak("Sure, here you go.");']);
-    const { executed, runtime } = fakeRuntime([]);
-    const store = new ConversationMemoryStore();
-    const orchestrator = orchestratorFor(llm, { javascriptRuntime: runtime, memoryStore: store });
-    await orchestrator.submitUserInput('Make me a tea timer');
-    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
-    expect(llm.turns.length).toBe(2);
-    expect(llm.turns[1].messages.at(-1)!.content).toBe(
-      'Make me a tea timer\n(Write it for this request only.)'
-    );
-    // …and without the examples it copied from
-    expect(llm.turns[0].systemPrompt).toContain('<examples>');
-    expect(llm.turns[1].systemPrompt).not.toContain('<examples>');
-    expect(llm.turns[1].systemPrompt).not.toContain('Zibble');
-    expect(executed).toEqual(['speak("Sure, here you go.");']);
-    // The note is not kept in the history
-    expect(store.getMessages().find((m) => m.role === 'user')!.canonicalContent).toBe('Make me a tea timer');
-  });
-
-  it('leaves a reply alone when the request has the name, and retries only once', async () => {
-    const llm = new QueueLlm(['speak("Zibble is a fine name.");']);
-    const orchestrator = orchestratorFor(llm, { javascriptRuntime: fakeRuntime([]).runtime });
-    await orchestrator.submitUserInput('Name my dragon Zibble');
-    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
-    expect(llm.turns.length).toBe(1);
-
-    const again = new QueueLlm(['speak("zorbs");', 'speak("okapi");']);
-    const second = orchestratorFor(again, { javascriptRuntime: fakeRuntime([]).runtime });
-    await second.submitUserInput('Make me a tea timer');
-    await vi.waitFor(() => expect(second.scheduler.getActiveTurnId()).toBeNull());
-    expect(again.turns.length).toBe(2);
   });
 });
 

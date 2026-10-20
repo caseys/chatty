@@ -183,7 +183,6 @@ const DRAWING_REQUEST =
   /\b(?:draw|paint|sketch|picture|image|art\b|animat|game|simulat|bounc|canvas|scene|shape|circle|square|triangle|stars?\b|sky|rainbow|landscape|pattern|fractal|particle|mov(?:e|ing)|getContext)/i;
 const THREE_D_REQUEST = /(?:\b3d\b|\bthree[- ]?d\b|\bcube|\bsphere|\bwebgl|\brotat|\bspin|\borbit|\bplanet|THREE\.)/i;
 const DIAGRAM_REQUEST = /\b(?:svg|diagram|icon|chart|graph|logo|vector|flowchart|map)/i;
-const TIMER_REQUEST = /\b(?:timer|countdown|count down|stopwatch|clock|alarm|remind|seconds?|minutes?|hours?)\b/i;
 const FACTS_REQUEST =
   /\b(?:who (?:was|is)|what (?:is|was|are) (?:a|an|the)|when|where|why|which|how (?:many|much|old|tall|far|big|long)|tell me about|look up|search|find out|history|define|meaning|capital|population|weather|news|facts?|wiki|fetch)\b/i;
 
@@ -196,7 +195,7 @@ const FACTS_REQUEST =
 const PROMPT_RULES: ReadonlyArray<{ text: string; when?: RegExp }> = [
   { text: '- Reply with perfect JavaScript syntax ONLY. Concise logic, fully functional.' },
   { text: '- Act first: do what was asked (draw, build, play, compute, look up) as a live, working browser app, then tell the user what you did with speak("...").' },
-  { text: '- ALL messages to the user go through speak(text): plain conversation is just speak(), and nothing is written outside the code (no explanations, notes or markdown). speak() accepts computed values: speak(`The total is ${total}.`). Never mention code, JavaScript or programming in what you say, and never offer code.' },
+  { text: '- ALL messages to the user go through speak(text): plain conversation is just speak(), and nothing is written outside the code (no explanations, notes or markdown). speak() accepts computed values in template strings. Never mention code, JavaScript or programming in what you say, and never offer code.' },
   { text: '- What you add to document.body appears in a card in the middle of the screen. Use HTML and CSS for interfaces: buttons, forms, cards, notes, tables, gauges, dashboards and widgets. The screen is wiped with clear(): to completely update the screen, call clear() first.' },
   { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations.', when: DRAWING_REQUEST },
   { text: '- For 3D, use WebGL on a <canvas>.', when: THREE_D_REQUEST },
@@ -210,97 +209,13 @@ const PROMPT_RULES: ReadonlyArray<{ text: string; when?: RegExp }> = [
 /** The rules for a request: all of them, or (filter) only those it needs */
 export function promptRules(request = '', filter = false): string {
   const rules = PROMPT_RULES.filter((rule) => !filter || !rule.when || rule.when.test(request));
-  const names = EXAMPLES.filter((example) => !filter || !example.when || example.when.test(request)).flatMap((example) => example.names);
   return [
     "You are Chatty, a voice assistant that acts by writing JavaScript. Your reply runs as a program in the user's browser, immediately and exactly as written.",
     'Rules:',
     ...rules.map((rule) => rule.text),
-    // Names only of the examples shown: a name the model never sees is one less to copy
-    ...(names.length > 0 ? [`- The examples (${names.join(', ')}) are made up: never reuse their names, numbers or formulas.`] : []),
   ].join('\n');
 }
 
-
-/**
- * Example exchanges, shown in the system prompt inside <examples> tags (EXAMPLES_PROMPT). Sent as
- * chat turns they read as the model's own earlier answers, and their content was carried into new
- * replies; tagged, the model can tell them apart from the conversation. Their content is made up
- * (zorbs, blips, a pet dragon, the Zorblax theme): small models copy whatever concrete content an
- * example holds into unrelated replies, and made-up content never fits a real request, so only
- * the structure carries over. Each reply acts before it speaks.
- */
-export const EXAMPLE_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content: string }> = [
-  { role: 'user', content: 'Good morning! Any tips for training my pet dragon, Zibble?' },
-  {
-    role: 'assistant',
-    content: 'speak("Morning! Keep Zibble\'s flying lessons short, reward every good landing, and keep the snacks away from the curtains.");',
-  },
-  { role: 'user', content: 'Play the Zorblax theme on organ with strings and a slow beat, on repeat' },
-  {
-    role: 'assistant',
-    content: [
-      'const out = (await navigator.requestMIDIAccess()).outputs.values().next().value;',
-      'const bpm = 90;',
-      'const beat = 60000 / bpm;',
-      "const theme = ['D4', 'F4', 'A4', 'G4', 'F4', 'E4', 'D4', 'A3'];",
-      'let start = performance.now() + 100;',
-      'function playTheme() {',
-      '  for (let i = 0; i < theme.length; i++) {',
-      '    const t = start + i * beat;',
-      "    out.send(['organ', theme[i], 80, beat], t);",
-      "    if (i % 4 === 0) out.send(['strings', 'D minor', 60, 4 * beat], t);",
-      "    out.send(['drums', i % 2 ? 'snare' : 'kick', 90], t);",
-      '  }',
-      '  start += theme.length * beat;',
-      '}',
-      'playTheme();',
-      'setInterval(playTheme, theme.length * beat);',
-      'speak("Here\'s the Zorblax theme, on repeat.");',
-    ].join('\n'),
-  },
-  { role: 'user', content: 'Make a zorbs to blips converter' },
-  {
-    role: 'assistant',
-    content: [
-      "document.body.innerHTML = '<h2>Zorbs to blips</h2><input id=\"zorbs\" type=\"number\" value=\"5\"> zorbs<p id=\"blips\"></p>';",
-      "const zorbs = document.getElementById('zorbs');",
-      "const blips = document.getElementById('blips');",
-      'function convert() {',
-      '  // Input values are text: Number() turns them into numbers',
-      '  const result = Number(zorbs.value) * 3 + 7;',
-      '  blips.textContent = `${zorbs.value} zorbs is ${result} blips`;',
-      '}',
-      "zorbs.addEventListener('input', convert);",
-      'convert();',
-      'speak("Type a number of zorbs to see it in blips.");',
-    ].join('\n'),
-  },
-  { role: 'user', content: 'Show a seven second launch timer for my toy rocket, Blip' },
-  {
-    role: 'assistant',
-    content: [
-      'const box = document.createElement("div");',
-      'box.style.cssText = "padding:16px 28px;font:600 40px sans-serif;";',
-      'document.body.appendChild(box);',
-      'let left = 7;',
-      'box.textContent = left;',
-      'const tick = setInterval(() => {',
-      '  left -= 1;',
-      '  box.textContent = left;',
-      '  if (left === 0) {',
-      '    clearInterval(tick);',
-      '    speak("Time\'s up.");',
-      '  }',
-      '}, 1000);',
-      'speak("Blip lifts off in seven seconds.");',
-    ].join('\n'),
-  },
-  { role: 'user', content: 'Tell me about the okapi' },
-  {
-    role: 'assistant',
-    content: 'const res = await fetch("https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent("Okapi"));\nconst page = await res.json();\nspeak(page.extract.split(". ").slice(0, 2).join(". "));',
-  },
-];
 
 /**
  * One real chat exchange before the conversation, there only to show the reply format (a
@@ -309,59 +224,16 @@ export const EXAMPLE_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content:
  */
 export const FORMAT_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content: string }> = [
   { role: 'user', content: 'Hi Chatty!' },
-  { role: 'assistant', content: 'document.body.innerHTML = "<h2>Hi!</h2>";\nspeak("Hi! What would you like me to make?");' },
+  // Only speech: small models copied a drawn "Hi!" heading into every program
+  { role: 'assistant', content: 'speak("Hi! What would you like me to make?");' },
 ];
 
-/**
- * Which requests each example is for (in EXAMPLE_TURNS order) and the made-up names it holds. Like
- * the rules, models with a small context see only the examples a request matches; the chat and
- * interface examples always show.
- */
-const EXAMPLE_KINDS: ReadonlyArray<{ when?: RegExp; names: string[] }> = [
-  { names: ['Zibble'] },
-  { when: SOUND_REQUEST, names: ['Zorblax'] },
-  { names: ['zorbs', 'blips'] },
-  { when: TIMER_REQUEST, names: ['Blip'] },
-  { when: FACTS_REQUEST, names: [] },
-];
-const EXAMPLES = EXAMPLE_KINDS.map((kind, i) => ({
-  ...kind,
-  request: EXAMPLE_TURNS[2 * i].content,
-  reply: EXAMPLE_TURNS[2 * i + 1].content,
-}));
-
-/** The example exchanges as the system prompt shows them: all, or (filter) those the request matches */
-export function examplesPrompt(request = '', filter = false): string {
-  const shown = EXAMPLES.filter((example) => !filter || !example.when || example.when.test(request));
-  return [
-    'Examples of requests and replies (made up, not part of this conversation):',
-    '<examples>',
-    ...shown.map((e) => `<example>\n<request>${e.request}</request>\n<reply>\n${e.reply}\n</reply>\n</example>`),
-    '</examples>',
-  ].join('\n');
-}
-const EXAMPLES_PROMPT = examplesPrompt();
 export const CONCISE_VOICE_SYSTEM_PROMPT = promptRules();
-
-/** A system prompt without its examples, or the rule naming them */
-function withoutExamples(systemPrompt: string): string {
-  return systemPrompt
-    .replace(/\nExamples of requests and replies[^\n]*\n<examples>[\s\S]*?<\/examples>/, '')
-    .replace(/\n- The examples \([^\n]*/, '');
-}
-
-/** Names from the examples: a reply that holds one the request doesn't was copied from them */
-const EXAMPLE_LEAK_WORDS = ['zibble', 'zorbs', 'blips', 'zorblax', 'okapi'];
-const LEAK_RETRY_NOTE = '\n(Write it for this request only.)';
-function leakWordsIn(text: string): string[] {
-  const lower = text.toLowerCase();
-  return EXAMPLE_LEAK_WORDS.filter((word) => lower.includes(word));
-}
 
 /** A line of a streaming reply that starts code: the reply isn't prose (shown and spoken as it comes) */
 const STREAM_CODE_LINE = /^(?:const|let|var|function|class|import|MODE:|```|\/\/|\/\*|root\.|document\.|window\.)\b/m;
-/** Markup in a streaming reply: HTML, or the examples' tag format */
-const STREAM_MARKUP = /<(?:script|canvas|html|!doctype|examples?|request|reply)\b/i;
+/** Markup in a streaming reply */
+const STREAM_MARKUP = /<(?:script|canvas|html|!doctype)\b/i;
 
 export class ConversationOrchestrator {
   readonly stateCoordinator: StateMachineCoordinator;
@@ -911,17 +783,6 @@ export class ConversationOrchestrator {
       if (!finalCanonicalText) {
         let rawAccumulatedTokens = '';
         let lastSpokenTextEmitted = '';
-        // A normal reply that reuses the examples' names (and the request doesn't) is written again
-        // once, before anything of it runs; its streamed speech stops at the word (see EXAMPLE_LEAK_WORDS)
-        const requestLower = `${normalized}\n${programBeingEdited ?? ''}`.toLowerCase();
-        const leaksExamples = (text: string) =>
-          !options?.autoFix && leakWordsIn(text).some((word) => !requestLower.includes(word));
-        let leaked = false;
-        let retriedForLeak = false;
-        let shownBeforeRetry = '';
-        /** The bubble's text: what an earlier attempt already showed, then this one's */
-        const afterShown = (text: string) =>
-          shownBeforeRetry && text && !shownBeforeRetry.includes(text.trim()) ? `${shownBeforeRetry} ${text}` : shownBeforeRetry || text;
         // Phone chat model replies in prose only; only the coder's output is run as code
         const forceProse = !!this.phonePipeline && generationProvider !== this.phonePipeline.coder;
         let streamMode: 'unknown' | 'code' | 'prose' = forceProse ? 'prose' : 'unknown';
@@ -939,7 +800,7 @@ export class ConversationOrchestrator {
         let stoppedRepeating = false;
         let repeatCheckedAt = 0;
 
-        const generateReply = (messages: typeof promptMessages, retry = 0) => withActivity('generating a reply', () => generationProvider.generate({
+        const generateReply = (messages: typeof promptMessages) => withActivity('generating a reply', () => generationProvider.generate({
           turnId,
           systemPrompt,
           messages,
@@ -947,17 +808,11 @@ export class ConversationOrchestrator {
           maxOutputTokens: generationProvider.maxOutputTokens,
           // A fix wants the one most likely line, not a varied one
           ...(options?.autoFix ? { exact: true } : {}),
-          ...(retry > 0 ? { retry } : {}),
           signal: generationAbort.signal,
           onToken: (chunk) => {
-            if (!this.scheduler.isTurnValid(turnId) || stoppedRepeating || leaked) return;
+            if (!this.scheduler.isTurnValid(turnId) || stoppedRepeating) return;
 
             rawAccumulatedTokens += chunk;
-            if (!retriedForLeak && leaksExamples(rawAccumulatedTokens)) {
-              leaked = true;
-              generationAbort.abort();
-              return;
-            }
             if (rawAccumulatedTokens.length - repeatCheckedAt >= 40) {
               repeatCheckedAt = rawAccumulatedTokens.length;
               const cut = repetitionCutIndex(rawAccumulatedTokens);
@@ -977,7 +832,7 @@ export class ConversationOrchestrator {
             this.events.onRawOutput?.(turnId, currentFull);
 
             if (streamMode === 'unknown') {
-              // Markup counts as code too: an HTML reply, or one in the examples' tag format
+              // Markup counts as code too: an HTML reply
               const hasCodeSignature =
                 currentFull.includes('speak(') || STREAM_CODE_LINE.test(currentFull) || /^\s*</.test(currentFull);
               if (hasCodeSignature) {
@@ -1021,68 +876,14 @@ export class ConversationOrchestrator {
                   }
                 }
               }
-            } else if (streamMode === 'code' && !quietReply) {
-              // Extract completed plain string arguments inside speak(...) calls.
-              // Template literals with ${...} are left to the runtime onSpeak (real values).
-              const speakMatches = Array.from(currentFull.matchAll(/speak\(\s*(["'`])([\s\S]*?)\1\s*\)/g));
-              let latestSpoken = '';
-              speakMatches.forEach((m, idx) => {
-                const quote = m[1];
-                const spokenStr = m[2];
-                // Skip non-literal args (e.g. "a" + b) and template interpolation
-                const isPlainLiteral =
-                  !(quote === '`' && spokenStr.includes('${')) &&
-                  !new RegExp(`(^|[^\\\\])${quote}`).test(spokenStr);
-                if (!isPlainLiteral) return;
-                latestSpoken += (latestSpoken ? ' ' : '') + spokenStr;
-                if (idx < processedSpeakMatches) return;
-                const key = speakKey(spokenStr);
-                bump(spokenSpeakCounts, key);
-                bump(streamedSpeakPending, key);
-                spokenPhrasesSeen.add(spokenStr);
-                for (const phrase of segmenter.push(spokenStr + ' ')) {
-                  enqueuePhraseForSpeech(phrase);
-                }
-              });
-              processedSpeakMatches = speakMatches.length;
-              if (latestSpoken && latestSpoken !== lastSpokenTextEmitted) {
-                const delta = latestSpoken.startsWith(lastSpokenTextEmitted)
-                  ? latestSpoken.slice(lastSpokenTextEmitted.length)
-                  : latestSpoken;
-                lastSpokenTextEmitted = latestSpoken;
-                assistantMsg.canonicalContent = afterShown(latestSpoken);
-                this.events.onTokenStream?.(turnId, delta, assistantMsg.canonicalContent);
-                this.events.onMessageUpdated?.({ ...assistantMsg });
-              }
             }
+            // In code mode nothing is shown or voiced while it streams: a reply can still be cut
+            // or come back unusable, and the chat only adds messages. What the program
+            // says when it runs fills the bubble and the voice.
           },
         }));
 
-        let genResult = await generateReply(promptMessages);
-        if (!retriedForLeak && this.scheduler.isTurnValid(turnId) && !signal.aborted && (leaked || leaksExamples(rawAccumulatedTokens || genResult.text))) {
-          // Write it again for this request; the note goes with this attempt only, not into history
-          const copied = leakWordsIn(rawAccumulatedTokens || genResult.text).filter((word) => !requestLower.includes(word));
-          appendRunLog('retry', `the reply reused the examples' names (${copied.join(', ')}): writing it again without the examples, cooler`);
-          appendRunLog('discarded', rawAccumulatedTokens || genResult.text);
-          retriedForLeak = true;
-          // What the chat already shows stays: the new attempt's words come after it
-          shownBeforeRetry = assistantMsg.canonicalContent;
-          leaked = false;
-          rawAccumulatedTokens = '';
-          lastSpokenTextEmitted = '';
-          processedSpeakMatches = 0;
-          streamMode = forceProse ? 'prose' : 'unknown';
-          stoppedRepeating = false;
-          repeatCheckedAt = 0;
-          generationAbort = new AbortController();
-          // …and without the examples it copied from
-          systemPrompt = withoutExamples(systemPrompt);
-          const last = promptMessages[promptMessages.length - 1];
-          genResult = await generateReply([
-            ...promptMessages.slice(0, -1),
-            { ...last, content: `${last.content}${LEAK_RETRY_NOTE}` },
-          ], 1);
-        }
+        const genResult = await generateReply(promptMessages);
 
         if (generationProvider !== this.llmProvider) this.events.onStatusChange?.(null);
 
@@ -1096,6 +897,8 @@ export class ConversationOrchestrator {
         turnMetrics.generationThroughputTps = genResult.tokensPerSecond;
 
         const rawContent = rawAccumulatedTokens || assistantMsg.canonicalContent || genResult.text;
+        // The model's whole reply, before the program is taken out of it
+        appendRunLog('reply', rawContent);
 
         if (this.scheduler.isTurnValid(turnId)) {
           // A fix reply is search/replace edits to the failed program: they're applied, and the
@@ -1269,8 +1072,12 @@ export class ConversationOrchestrator {
               }
 
               if (spokenText) {
-                assistantMsg.canonicalContent = afterShown(spokenText);
-                this.events.onTokenStream?.(turnId, '', spokenText);
+                const shown = assistantMsg.canonicalContent;
+                assistantMsg.canonicalContent = spokenText;
+                const added = assistantMsg.canonicalContent.startsWith(shown)
+                  ? assistantMsg.canonicalContent.slice(shown.length)
+                  : assistantMsg.canonicalContent;
+                this.events.onTokenStream?.(turnId, added, assistantMsg.canonicalContent);
                 this.events.onMessageUpdated?.({ ...assistantMsg });
 
                 if (!spokenTextsHandled && !spokenPhrasesSeen.has(spokenText)) {
@@ -1732,12 +1539,11 @@ export class ConversationOrchestrator {
     // The smallest models get only the rules this request needs
     const filter = request !== undefined && this.isSmallModel;
     const rules = filter ? promptRules(request, true) : CONCISE_VOICE_SYSTEM_PROMPT;
-    const examples = filter ? examplesPrompt(request, true) : EXAMPLES_PROMPT;
     const head = this.phonePipeline
       ? [`${this.phonePipeline.chatSystemPrompt} Current date and time: ${new Date().toLocaleString()}.`]
-      : [rules, examples];
+      : [rules];
 
-    // The format, restated after the examples and everything else
+    // The format, restated after everything else
     const tail = this.phonePipeline
       ? []
       : ['Reply with one JavaScript program: first the code that does the request, then one speak() sentence about it. ALL messages to the user go through speak().'];
@@ -1747,11 +1553,10 @@ export class ConversationOrchestrator {
   /** Estimated tokens of what every prompt carries: the system prompt and the format turns */
   private fixedPromptTokens(): number {
     // Small models get a prompt with only the rules a request needs, so count the core rules
-    // (the examples and format turns are always there)
+    // (the format turns are always there)
     const { head, tail } = this.staticPromptParts(this.isSmallModel ? '' : undefined);
     // …and every example, which they get only when the request matches (the music one is long)
-    const parts = this.isSmallModel && !this.phonePipeline ? [head[0], EXAMPLES_PROMPT] : head;
-    let tokens = this.memoryStore.estimateTokens([...parts, ...tail].join('\n'));
+    let tokens = this.memoryStore.estimateTokens([...head, ...tail].join('\n'));
     if (!this.phonePipeline) {
       // A few tokens per message for the chat template's role markers
       for (const turn of FORMAT_TURNS) tokens += this.memoryStore.estimateTokens(turn.content) + 4;

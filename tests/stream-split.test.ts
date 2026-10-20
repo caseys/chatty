@@ -40,14 +40,6 @@ async function chatShown(reply: string): Promise<string[]> {
 }
 
 describe('splitting a streaming reply between the chat and the code', () => {
-  it('never shows a reply in the examples\' tag format in the chat', async () => {
-    const shown = await chatShown(
-      '<examples>\n<example>\n<request>Play a loop</request>\n<reply>\nconst bpm = 90;\nspeak("Here it is.");\n</reply>\n</example>\n</examples>'
-    );
-    expect(shown.some((s) => s.includes('<'))).toBe(false);
-    expect(shown.some((s) => s.includes('const'))).toBe(false);
-  });
-
   it('stops showing an explanation once unfenced code starts', async () => {
     const shown = await chatShown('To play a loop, use this:\nconst bpm = 90;\nconst beat = 60000 / bpm;\nspeak("Here it is.");');
     expect(shown.some((s) => s.includes('const beat'))).toBe(false);
