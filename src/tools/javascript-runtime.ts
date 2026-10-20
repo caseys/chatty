@@ -1755,6 +1755,14 @@ export class JavascriptRuntime {
       window.beat = 60000 / 100;
       window.start = performance.now() + 100;
       window.out = defaultMidiOut;
+      // Programs that skip requestMIDIAccess and read this.outputs (this is the window) or
+      // outputs directly get the synth through any lookup
+      window.outputs = Object.assign(new Map([['synth', defaultMidiOut]]), {
+        get: () => defaultMidiOut,
+        has: () => true,
+        0: defaultMidiOut,
+        length: 1,
+      });
       const logs = [];
       const origLog = console.log;
       const origWarn = console.warn;

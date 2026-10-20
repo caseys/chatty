@@ -334,6 +334,27 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
   }
 }
 
+/**
+ * The outputs of the software synth: there is only one, so every way a program looks one up
+ * finds it. Real Web MIDI keys outputs by device id, and programs guess ids ('AudioOut', 'Synth')
+ * or index it like an array.
+ */
+class AnyOutputMap extends Map<string, SoftwareMIDIOutput> {
+  constructor(private readonly only: SoftwareMIDIOutput) {
+    super([[only.id, only]]);
+    Object.defineProperty(this, 0, { value: only, enumerable: false });
+    Object.defineProperty(this, 'length', { value: 1, enumerable: false });
+  }
+
+  override get(key: string): SoftwareMIDIOutput {
+    return super.get(key) ?? this.only;
+  }
+
+  override has(_key: string): boolean {
+    return true;
+  }
+}
+
 export class SoftwareMIDIAccess extends StateChangeTarget {
   readonly sysexEnabled = false;
   readonly inputs: ReadonlyMap<string, never> = new Map<string, never>();
@@ -341,7 +362,7 @@ export class SoftwareMIDIAccess extends StateChangeTarget {
 
   constructor(output: SoftwareMIDIOutput) {
     super();
-    this.outputs = new Map([[output.id, output]]);
+    this.outputs = new AnyOutputMap(output);
     output.attachAccess(this);
   }
 

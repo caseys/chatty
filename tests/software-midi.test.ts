@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { parseMidiMessages, SoftwareMIDIOutput } from '../src/audio/software-midi.ts';
+import { parseMidiMessages, SoftwareMIDIAccess, SoftwareMIDIOutput } from '../src/audio/software-midi.ts';
 
 describe('forgiving MIDI messages', () => {
   it('reads correct messages as they are', () => {
@@ -154,5 +154,20 @@ describe('invented method names', () => {
     output.play(['piano', 'C4']);
     output.playNote(['piano', 'E4']);
     expect(sent.filter((m) => (m[0] & 0xf0) === 0x90).map((m) => m[1])).toEqual([60, 64]);
+  });
+});
+
+describe('finding the synth output', () => {
+  it('finds the one output however a program looks it up', () => {
+    const output = new SoftwareMIDIOutput({
+      synth: { send() {}, setAudioContext() {}, setTsMode() {}, reset() {} },
+      now: () => 0,
+      resumeFromCurrentCall() {},
+    });
+    const access = new SoftwareMIDIAccess(output);
+    expect(access.outputs.values().next().value).toBe(output);
+    expect(access.outputs.get('AudioOut')).toBe(output);
+    expect((access.outputs as unknown as SoftwareMIDIOutput[])[0]).toBe(output);
+    expect(access.outputs.size).toBe(1);
   });
 });
