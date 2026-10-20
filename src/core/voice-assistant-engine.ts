@@ -141,6 +141,10 @@ export interface VoiceAssistantEngineEvents {
   onTokenStream?: (turnId: string, chunk: string, fullText: string) => void;
   onRawOutput?: (turnId: string, rawSoFar: string) => void;
   onRunStatus?: (turnId: string | null, status: RunStatus) => void;
+  /** A program started or stopped making sound (quiet for 3 seconds) */
+  onProgramSound?: (sounding: boolean) => void;
+  /** A program has timers or async code pending, or its last one ended */
+  onProgramActivity?: (active: boolean) => void;
   onMessageCreated?: (message: ConversationMessage) => void;
   onMessageUpdated?: (message: ConversationMessage) => void;
   onTelemetryUpdated?: (telemetry: SystemTelemetry) => void;
@@ -236,7 +240,9 @@ export class VoiceAssistantEngine {
       // Speech off: 'playback' only while a program makes sound (see setAudioSessionType)
       onProgramAudio: (sounding) => {
         if (!this.speechEnabled) this.audioSubsystem.setAudioSessionType(sounding ? 'playback' : 'auto');
+        this.events.onProgramSound?.(sounding);
       },
+      onProgramActivity: (active) => this.events.onProgramActivity?.(active),
       onResult: (res) => {
         this.events.onJavascriptExecution?.(res);
       },

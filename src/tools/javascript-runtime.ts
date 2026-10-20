@@ -57,6 +57,8 @@ export interface JavascriptRuntimeOptions {
   onProgramError?: (message: string, line?: number) => void;
   /** A program started making sound (true), or has been quiet for a few seconds (false) */
   onProgramAudio?: (sounding: boolean) => void;
+  /** A program has timers or async code pending (true), or its last one ended (false) */
+  onProgramActivity?: (active: boolean) => void;
 }
 
 export const CODING_AGENT_SYSTEM_PROMPT = [
@@ -255,13 +257,14 @@ function normalizeFences(text: string): string {
 /**
  * Small models sometimes answer in the format the prompt shows its examples in
  * (<example><request>…</request><reply>…</reply></example>): the program is in the last <reply>.
+ * Also used for the code panel, which shows the reply as it streams in.
  */
-function unwrapExampleFormat(text: string): string {
+export function unwrapExampleFormat(text: string): string {
   if (!/<\/?(?:examples|example|request|reply)>/i.test(text)) return text;
   const replies = [...text.matchAll(/<reply>([\s\S]*?)(?:<\/reply>|$)/gi)];
   if (replies.length > 0) return replies[replies.length - 1][1].trim();
   return text
-    .replace(/<request>[\s\S]*?<\/request>/gi, '')
+    .replace(/<request>[\s\S]*?(?:<\/request>|$)/gi, '')
     .replace(/<\/?(?:examples|example|request|reply)>/gi, '')
     .trim();
 }
@@ -410,6 +413,7 @@ export class JavascriptRuntime {
   private getSharedAudioContext?: () => AudioContext | null;
   private onProgramError?: (message: string, line?: number) => void;
   private onProgramAudio?: (sounding: boolean) => void;
+  private onProgramActivity?: (active: boolean) => void;
   private programSounding = false;
   private quietWatch: { timer: ReturnType<typeof setInterval>; analyser: AnalyserNode } | null = null;
   private programOutput: GainNode | null = null;
@@ -425,6 +429,7 @@ export class JavascriptRuntime {
     this.getSharedAudioContext = options?.getSharedAudioContext;
     this.onProgramError = options?.onProgramError;
     this.onProgramAudio = options?.onProgramAudio;
+    this.onProgramActivity = options?.onProgramActivity;
     if (this.getSharedAudioContext && typeof window !== 'undefined') {
       // Read by the sandbox's AudioContext stand-in (same origin)
       (window as unknown as { __chattySharedAudio?: () => unknown }).__chattySharedAudio = () => this.programAudio();
@@ -597,6 +602,8 @@ export class JavascriptRuntime {
     const hadIframe = Boolean(this.activeIframe);
     this.abortPendingRuns('Visual screen was cleared');
     this.silenceProgramAudio();
+    // The program's timers go with its page
+    this.onProgramActivity?.(false);
     this.cardShadow?.remove();
     this.cardShadow = null;
     if (this.activeIframe) {
@@ -1228,6 +1235,64 @@ export class JavascriptRuntime {
       await probe('expr', () => new ProgramFunction('speak', 'playNotes', 'searchWikipedia', 'root', 'return (null.probe);' + SOURCE_TAG)());
     })();
 
+    // What the program still has pending (timeouts, intervals, animation frames, its own async
+    // code): the host shows Stop while anything is, and hides it when the last one ends
+    const programWork = new Set();
+    let workReported = false;
+    let workCheck = null;
+    const realSetTimeout = window.setTimeout.bind(window);
+    const realClearTimeout = window.clearTimeout.bind(window);
+    const realSetInterval = window.setInterval.bind(window);
+    const realClearInterval = window.clearInterval.bind(window);
+    const realRequestFrame = window.requestAnimationFrame.bind(window);
+    const realCancelFrame = window.cancelAnimationFrame.bind(window);
+    function workChanged() {
+      // Checked a moment later, so a loop scheduling its next step doesn't flicker
+      if (workCheck !== null) return;
+      workCheck = realSetTimeout(() => {
+        workCheck = null;
+        const active = programWork.size > 0;
+        if (active === workReported) return;
+        workReported = active;
+        window.parent.postMessage({ type: 'program_activity', active }, '*');
+      }, 200);
+    }
+    window.setTimeout = (fn, ms, ...args) => {
+      if (typeof fn !== 'function') return realSetTimeout(fn, ms, ...args);
+      const id = realSetTimeout((...a) => {
+        programWork.delete('t' + id);
+        try { fn(...a); } finally { workChanged(); }
+      }, ms, ...args);
+      programWork.add('t' + id);
+      workChanged();
+      return id;
+    };
+    window.setInterval = (fn, ms, ...args) => {
+      const id = realSetInterval(fn, ms, ...args);
+      programWork.add('t' + id);
+      workChanged();
+      return id;
+    };
+    // Timeouts and intervals share ids, and programs mix up which one they clear
+    window.clearTimeout = window.clearInterval = (id) => {
+      realClearTimeout(id);
+      realClearInterval(id);
+      if (programWork.delete('t' + id)) workChanged();
+    };
+    window.requestAnimationFrame = (fn) => {
+      const id = realRequestFrame((time) => {
+        programWork.delete('f' + id);
+        try { fn(time); } finally { workChanged(); }
+      });
+      programWork.add('f' + id);
+      workChanged();
+      return id;
+    };
+    window.cancelAnimationFrame = (id) => {
+      realCancelFrame(id);
+      if (programWork.delete('f' + id)) workChanged();
+    };
+
     // Programs often wait for the page to load (DOMContentLoaded, load, window.onload), but it
     // already has, so that setup would never run: it runs right away instead
     const LOAD_EVENTS = new Set(['DOMContentLoaded', 'load']);
@@ -1378,6 +1443,8 @@ export class JavascriptRuntime {
       console.warn = (...args) => logs.push('[warn] ' + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
       console.error = (...args) => logs.push('[error] ' + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
 
+      programWork.add('run');
+      workChanged();
       try {
         const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
         let compiledFn;
@@ -1446,6 +1513,8 @@ export class JavascriptRuntime {
         console.log = origLog;
         console.warn = origWarn;
         console.error = origError;
+        programWork.delete('run');
+        workChanged();
       }
     });
 
@@ -1513,6 +1582,11 @@ export class JavascriptRuntime {
 
     if (data.type === 'playNotes' || data.type === 'searchWikipedia') {
       void this.handleAsyncCall(iframe, data);
+      return;
+    }
+
+    if (data.type === 'program_activity') {
+      this.onProgramActivity?.(Boolean(data.active));
       return;
     }
 

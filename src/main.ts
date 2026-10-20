@@ -8,6 +8,7 @@ import { VoiceAssistantEngine } from './core/voice-assistant-engine.ts';
 import { MODEL_REGISTRY } from './core/model-manager.ts';
 import { FluidAudioVisualizer } from './audio/visualizer.ts';
 import { clearModelCache, getModelCacheBytes } from './core/model-cache.ts';
+import { unwrapExampleFormat } from './tools/javascript-runtime.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
 import type { RunStatus } from './core/orchestrator.ts';
 import { createToolSummaryElement, parseStreamingToolCall, stripToolCallMarkup } from './tools/tool-formatter.ts';
@@ -88,6 +89,11 @@ export class MinimalVoiceApp {
   private keepAwakeRetryTimer = 0;
   private screenVisualLayer = document.getElementById('screen-visual-layer') as HTMLElement | null;
   private clearScreenBtn = document.getElementById('btn-clear-screen') as HTMLButtonElement | null;
+  // A program still making sound or with timers pending (a loop, a countdown): the bottom button shows as Stop
+  private programSounding = false;
+  private programRunning = false;
+  // Set by updateUiState: the bottom button stops the program (nothing else to stop)
+  private stopButtonStopsProgram = false;
 
   private jsIframeContainer = document.getElementById('js-runtime-iframe-container');
 
@@ -166,6 +172,14 @@ export class MinimalVoiceApp {
       },
       onRunStatus: (_turnId, status) => {
         this.setRunStatus(status);
+      },
+      onProgramSound: (sounding) => {
+        this.programSounding = sounding;
+        this.updateUiState();
+      },
+      onProgramActivity: (active) => {
+        this.programRunning = active;
+        this.updateUiState();
       },
       onMessageCreated: (msg) => {
         // Chatty's own "fix this error" turns aren't the user's words
@@ -354,6 +368,12 @@ export class MinimalVoiceApp {
         navigator.vibrate?.(15);
       } catch {
         // ignore haptic errors
+      }
+      // Stop with only a program running (a music loop): stops the program
+      if (this.stopButtonStopsProgram) {
+        this.resetVisualScreen();
+        this.updateUiState();
+        return;
       }
       await this.engine.toggleMicrophone();
       this.updateUiState();
@@ -795,7 +815,7 @@ export class MinimalVoiceApp {
     if (!this.rawOutputEl) return;
     // Without speak() lines (they're in the chat) and without code fences: an unmatched ``` reads
     // as an open template string and would turn everything after it into one green string
-    const code = text
+    const code = unwrapExampleFormat(text)
       .split('\n')
       .filter((line) => !/^\s*(?:await\s+)?speak\(.*\);?\s*$/.test(line))
       .filter((line) => !/^\s*(?:(?:javascript|js|html|css)[ \t:]*)?(?:```|~~~|"""|''')[\w-]*\s*$/i.test(line))
@@ -851,12 +871,16 @@ export class MinimalVoiceApp {
     const isActive = isListening || canInterrupt;
     const hasHistory = this.engine.hasHistory();
 
+    // A program still running or making sound can be stopped with the same button
+    const programActive = this.programSounding || this.programRunning;
+    this.stopButtonStopsProgram = programActive && !isActive;
+
     // Speech off: no Start (chat is typed) and no waveforms; the button only appears as Stop
     const speechOn = this.engine.isSpeechEnabled();
     if (this.micBtn) {
       this.micBtn.disabled = isModelLoading;
-      this.micBtn.classList.toggle('listening', isActive);
-      this.micBtn.hidden = !speechOn && !canInterrupt;
+      this.micBtn.classList.toggle('listening', isActive || programActive);
+      this.micBtn.hidden = !speechOn && !canInterrupt && !programActive;
     }
     const waves = document.querySelector<HTMLElement>('.chat-waveforms');
     if (waves) waves.hidden = !speechOn;
@@ -864,7 +888,13 @@ export class MinimalVoiceApp {
     if (examplesTitle) examplesTitle.textContent = speechOn ? 'Try saying' : 'Try typing';
 
     if (this.micLabel) {
-      this.micLabel.textContent = isModelLoading ? 'Loading…' : isActive ? 'Stop' : hasHistory ? 'Continue' : 'Start';
+      this.micLabel.textContent = isModelLoading
+        ? 'Loading…'
+        : isActive || programActive
+          ? 'Stop'
+          : hasHistory
+            ? 'Continue'
+            : 'Start';
     }
     if (this.chatSendBtn) this.chatSendBtn.disabled = isModelLoading;
 
@@ -1241,6 +1271,8 @@ export class MinimalVoiceApp {
   }
 
   private resetVisualScreen(): void {
+    this.programSounding = false;
+    this.programRunning = false;
     this.showScreenContent(false);
     const iframe = this.engine.getActiveIframe();
     if (iframe) iframe.style.pointerEvents = 'none';
