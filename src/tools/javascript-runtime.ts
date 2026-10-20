@@ -1525,6 +1525,7 @@ export class JavascriptRuntime {
 
     window.speak = (text) => {
       const s = typeof text === 'object' ? JSON.stringify(text) : String(text ?? '');
+      if (typeof noteRejected === 'function' && badValue(s)) noteRejected('speak(' + shown(s.slice(0, 60)) + ') says ' + (s.match(/NaN|undefined|Infinity/) || [''])[0] + ': almost surely a bug');
       window.parent.postMessage({ type: 'speak', id: currentExecId, text: s }, '*');
     };
 
@@ -1610,6 +1611,75 @@ export class JavascriptRuntime {
       const line = stackLine(err);
       const offset = lineOffsets[runMode];
       return line !== null && offset !== null && line - offset >= 1 ? line - offset : undefined;
+    }
+
+    // Values the browser silently ignores: NaN, Infinity or undefined given to a canvas style or
+    // drawing call, a CSS property or an attribute does nothing, with no error. The first one a
+    // program gives is reported as its error, with the line, so a fix can find it.
+    let rejected = null;
+    let runningProgram = false;
+    let rejectedReported = false;
+    const badValue = (v) =>
+      v === undefined || (typeof v === 'number' && !Number.isFinite(v)) ||
+      (typeof v === 'string' && /\\b(?:NaN|undefined|Infinity)\\b/.test(v));
+    function noteRejected(message) {
+      if (rejected || rejectedReported) return;
+      const line = errorLine(new Error());
+      if (runningProgram) {
+        rejected = { message, line };
+      } else {
+        rejectedReported = true;
+        window.parent.postMessage({ type: 'program_error', message, line }, '*');
+      }
+    }
+    const shown = (v) => (typeof v === 'string' ? "'" + v + "'" : String(v));
+    function watchSetters(proto, label) {
+      if (!proto) return;
+      for (const key of Object.getOwnPropertyNames(proto)) {
+        const d = Object.getOwnPropertyDescriptor(proto, key);
+        if (!d || !d.set || !d.configurable) continue;
+        Object.defineProperty(proto, key, {
+          ...d,
+          set(value) {
+            if (badValue(value)) noteRejected(label + '.' + key + ' = ' + shown(typeof value === 'string' ? value.slice(0, 60) : value) + ': almost surely a bug');
+            return d.set.call(this, value);
+          },
+        });
+      }
+    }
+    function watchCalls(proto, label) {
+      if (!proto) return;
+      for (const key of Object.getOwnPropertyNames(proto)) {
+        const d = Object.getOwnPropertyDescriptor(proto, key);
+        if (!d || typeof d.value !== 'function' || key === 'constructor' || !d.configurable) continue;
+        const fn = d.value;
+        proto[key] = function (...args) {
+          const bad = args.find((a) => (typeof a === 'number' && !Number.isFinite(a)) || (typeof a === 'string' && badValue(a)));
+          if (bad !== undefined) {
+            noteRejected(label + '.' + key + '(' + args.map((a) => (typeof a === 'number' ? String(a) : typeof a === 'string' ? shown(a.slice(0, 40)) : '…')).join(', ') + ') got ' + shown(typeof bad === 'string' ? bad.slice(0, 40) : bad) + ': almost surely a bug');
+          }
+          return fn.apply(this, args);
+        };
+      }
+    }
+    // Every browser interface a program draws, builds or plays with: elements and nodes, canvas
+    // and WebGL contexts, audio nodes and params, paths, class lists
+    const WATCHED = /^(?:Node|Element|HTML\\w*Element|SVG\\w*Element|CharacterData|Text|CanvasRenderingContext2D|OffscreenCanvasRenderingContext2D|WebGL2?RenderingContext|Path2D|DOMTokenList|BaseAudioContext|AudioContext|AudioNode|\\w+Node|AudioParam|AudioScheduledSourceNode)$/;
+    for (const name of Object.getOwnPropertyNames(window)) {
+      if (!WATCHED.test(name)) continue;
+      const proto = window[name] && window[name].prototype;
+      const label = /Context/.test(name) ? 'ctx' : /Audio|Node$/.test(name) && !/^(?:Node|Text)$/.test(name) ? 'audio' : 'element';
+      watchSetters(proto, label);
+      watchCalls(proto, label);
+    }
+    {
+      // Style properties sit on the style object's own prototype in some browsers
+      let proto = Object.getPrototypeOf(document.createElement('div').style);
+      while (proto && proto !== Object.prototype) {
+        watchSetters(proto, 'style');
+        watchCalls(proto, 'style');
+        proto = Object.getPrototypeOf(proto);
+      }
     }
     (async () => {
       const probe = async (mode, run) => {
@@ -1987,6 +2057,9 @@ export class JavascriptRuntime {
       window.start = performance.now() + 100;
       window.out = forgivingOut;
       soundErrorSent = false;
+      rejected = null;
+      rejectedReported = false;
+      runningProgram = true;
       const logs = [];
       const origLog = console.log;
       const origWarn = console.warn;
@@ -2039,6 +2112,22 @@ export class JavascriptRuntime {
           out = typeof out === 'function' ? '[function ' + (out.name || 'anonymous') + ']' : String(out);
         }
 
+        // It ran, but gave the browser a value it ignores (NaN, undefined): that is its error
+        if (rejected) {
+          const first = rejected;
+          rejected = null;
+          rejectedReported = true;
+          window.parent.postMessage({
+            type: 'result',
+            id,
+            success: false,
+            error: first.message,
+            errorLine: first.line,
+            logs,
+            hasVisual: hasVisualElements,
+          }, '*');
+          return;
+        }
         window.parent.postMessage({
           type: 'result',
           id,
@@ -2059,6 +2148,7 @@ export class JavascriptRuntime {
           hasVisual: hasVisualNow(),
         }, '*');
       } finally {
+        runningProgram = false;
         console.log = origLog;
         console.warn = origWarn;
         console.error = origError;
