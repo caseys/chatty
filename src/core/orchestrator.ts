@@ -178,12 +178,13 @@ export const CONCISE_VOICE_SYSTEM_PROMPT = [
   '6. Answer what you know directly. To look up facts you don\'t know, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it, not the whole text.',
   '7. Write code instead of guessing results.',
   '8. If you define a function, call it.',
-  '9. The example chats (zorbs, blips, Zibble, Zorblax) are made up: never reuse their names, numbers or formulas.',
+  '9. The examples (zorbs, blips, Zibble, Zorblax) are made up: never reuse their names, numbers or formulas.',
 ].join('\n');
 
 /**
- * Example exchanges sent as real chat turns before the conversation (small models follow the
- * chat format far better than examples written into the instructions). Their content is made up
+ * Example exchanges, shown in the system prompt inside <examples> tags (EXAMPLES_PROMPT). Sent as
+ * chat turns they read as the model's own earlier answers, and their content was carried into new
+ * replies; tagged, the model can tell them apart from the conversation. Their content is made up
  * (zorbs, blips, a pet dragon, the Zorblax theme): small models copy whatever concrete content an
  * example holds into unrelated replies, and made-up content never fits a real request, so only
  * the structure carries over. Each reply acts before it speaks.
@@ -262,6 +263,16 @@ export const EXAMPLE_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content:
     content: 'const res = await fetch("https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent("Okapi"));\nconst page = await res.json();\nspeak(page.extract.split(". ").slice(0, 2).join(". "));',
   },
 ];
+
+/** The example exchanges as the system prompt shows them (see EXAMPLE_TURNS) */
+const EXAMPLES_PROMPT = [
+  'Examples of requests and replies (made up, not part of this conversation):',
+  '<examples>',
+  ...EXAMPLE_TURNS.filter((t) => t.role === 'user').map(
+    (t, i) => `<example>\n<request>${t.content}</request>\n<reply>\n${EXAMPLE_TURNS[2 * i + 1].content}\n</reply>\n</example>`
+  ),
+  '</examples>',
+].join('\n');
 
 export class ConversationOrchestrator {
   readonly stateCoordinator: StateMachineCoordinator;
@@ -1790,11 +1801,9 @@ export class ConversationOrchestrator {
     systemPrompt: string;
     promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   } {
-    const systemParts: string[] = [
-      this.phonePipeline
-        ? `${this.phonePipeline.chatSystemPrompt} Current date and time: ${new Date().toLocaleString()}.`
-        : CONCISE_VOICE_SYSTEM_PROMPT,
-    ];
+    const systemParts: string[] = this.phonePipeline
+      ? [`${this.phonePipeline.chatSystemPrompt} Current date and time: ${new Date().toLocaleString()}.`]
+      : [CONCISE_VOICE_SYSTEM_PROMPT, EXAMPLES_PROMPT];
 
     if (context.relevantMemories.length > 0) {
       const memStr = context.relevantMemories.map((m) => `${m.key}: ${m.value}`).join('; ');
@@ -1833,13 +1842,10 @@ export class ConversationOrchestrator {
       );
     }
 
-    // Code-writing models see the example exchanges first (the phone chat model writes prose)
-    const promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> =
-      this.phonePipeline ? [] : EXAMPLE_TURNS.map((t) => ({ ...t }));
+    const promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [];
     const pastPrograms: string[] = [];
-    // Assistant messages before the user's first one are the app's own (the welcome greeting).
-    // Sent, they'd merge into the last example's reply (consecutive turns are joined), and the
-    // model would take that example's program for its own earlier answer and copy it.
+    // Assistant messages before the user's first one are the app's own (the welcome greeting):
+    // left out, so the conversation starts with the user.
     let userHasSpoken = false;
 
     for (const msg of context.workingMessages) {
@@ -1904,6 +1910,8 @@ export class ConversationOrchestrator {
         `Programs you ran earlier in this conversation (write a complete new program for each request):\n${pastPrograms.slice(-8).join('\n')}`
       );
     }
+    // The format, restated after the examples and everything else
+    if (!this.phonePipeline) systemParts.push('Reply with perfect JavaScript syntax ONLY.');
     const systemPrompt = systemParts.join('\n');
     return { systemPrompt, promptMessages };
   }
