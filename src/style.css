@@ -2387,3 +2387,12 @@ body {
   font-size: 14px;
   text-align: center;
 }
+
+/* Top-left of Settings, opposite the close button: the memory the browser reports */
+.settings-device-memory {
+  position: absolute;
+  top: 20px;
+  left: 18px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}

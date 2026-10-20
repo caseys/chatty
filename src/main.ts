@@ -1361,6 +1361,14 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
 
   // iPhone: a quality warning in place of installing (the models that fit Safari are the smallest)
+  // The memory the browser reports (Chrome's navigator.deviceMemory), which picks the phone model
+  const memoryEl = document.getElementById('settings-device-memory');
+  if (memoryEl) {
+    const gb = (navigator as { deviceMemory?: number }).deviceMemory;
+    memoryEl.textContent = typeof gb === 'number' ? `Memory ${gb} GB` : 'Memory not reported';
+    memoryEl.title = typeof gb === 'number' ? 'Reported by the browser, rounded' : "This browser doesn't report memory";
+  }
+
   const installField = document.getElementById('settings-install-field');
   const iphoneWarning = isAppleMobile() && !!installField;
   if (iphoneWarning && installField) {
