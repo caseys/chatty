@@ -38,7 +38,7 @@ import {
 } from '../tools/javascript-runtime.ts';
 import { appendRunLog } from './run-log.ts';
 import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest } from './line-fix.ts';
-import { errorHint } from './error-hints.ts';
+import { dropHelperCopies, errorHint } from './error-hints.ts';
 import { renameMembers, unknownMemberError, unknownMembers } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle } from './settle.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
@@ -201,7 +201,7 @@ const PROMPT_RULES: ReadonlyArray<{ text: string; when?: RegExp }> = [
   { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations.', when: DRAWING_REQUEST },
   { text: '- For 3D, use WebGL on a <canvas>.', when: THREE_D_REQUEST },
   { text: '- <svg> works for diagrams and icons.', when: DIAGRAM_REQUEST },
-  { text: "- Sound: music and instruments: out is ready to use. Call out.send once per note, chord, drum hit or pattern, with named values (durations and times in ms), like out.send({ instrument: 'piano', notes: 'G major', loudness: 80, duration: 4 * beat, time: start + 2 * beat }). Only notes is needed: the rest default to piano, loudness 100, half a second and now. Instruments: piano, bass, organ, guitar, strings, violin, trumpet, sax, flute, drums. Notes: a note ('G3'), a chord ('G major', 'Am7'), a scale ('G pentatonic down'), drum hits ('kick', 'snare', 'hihat'), or an array (up to 4 sound together, more play in turn). Patterns fill a 4/4 bar over the duration: grooves ('boom-chuck', 'rock', 'shuffle', 'four on the floor') and 'walking G major'. A beat or groove means drums. Declare const bpm, beat = 60000 / bpm and start = performance.now() at the top. To loop, put the bars in a function ending with start += their length, call it, then setInterval it with that length.", when: SOUND_REQUEST },
+  { text: "- Sound: music and instruments: out is ready to use. Call out.send once per note, chord or drum hit, with named values (durations and times in ms), like out.send({ instrument: 'piano', notes: 'G major', loudness: 80, duration: 4 * beat, time: start + 2 * beat }). Only notes is needed: the rest default to piano, loudness 100, half a second and now. Instruments: piano, bass, organ, guitar, strings, violin, trumpet, sax, flute, drums. Notes: a note ('G3'), a chord ('G major', 'Am7'), a scale ('G pentatonic down'), drum hits ('kick', 'snare', 'hihat'), or an array (up to 4 sound together, more play in turn). A beat or groove means drums. Declare const bpm, beat = 60000 / bpm and start = performance.now() at the top. To loop, put the bars in a function ending with start += their length, call it, then setInterval it with that length.", when: SOUND_REQUEST },
   { text: '- Answer what you know directly. For facts you lack, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it.', when: FACTS_REQUEST },
 ];
 
@@ -974,6 +974,14 @@ export class ConversationOrchestrator {
             for (const issue of slips) appendRunLog('imagined', `${issue.object}.${issue.member} → ${issue.object}.${issue.slip}: corrected before running`);
           }
           const notThere = unknown.filter((issue) => !issue.slip);
+          // Its own speak()/out/clear: taken out so the real helpers are used (error-hints.ts)
+          if (!inspected.isProse) {
+            const copies = dropHelperCopies(executableCode);
+            if (copies.dropped.length > 0) {
+              executableCode = copies.code;
+              for (const name of copies.dropped) appendRunLog('imagined', `its own ${name} → the ready-made one: corrected before running`);
+            }
+          }
           const isProse = inspected.isProse || forceProse;
           assistantMsg.rawCode = executableCode;
           assistantMsg.rawLlmOutput = rawContent;
@@ -1050,9 +1058,15 @@ export class ConversationOrchestrator {
               ? (this.memoryStore.getMessages().find((m) => m.id === `msg_assistant_${fixedTurnId}`)?.canonicalContent ?? '')
               : '';
             const saidBefore = (phrase: string) => !!fixSaid && !!phrase.trim() && fixSaid.includes(phrase.trim());
+            const spokenThisRun = new Set<string>();
             const execResult = await this.javascriptRuntime.execute(executableCode, undefined, {
               onSpeak: (phrase) => {
                 if (saidBefore(phrase)) return;
+                // The same sentence twice in one run (said before and inside its code) is said once
+                if (!runFinished) {
+                  if (spokenThisRun.has(phrase.trim())) return;
+                  spokenThisRun.add(phrase.trim());
+                }
                 if (runFinished) {
                   void this.speakOutOfTurn(phrase);
                 } else if (this.scheduler.isTurnValid(turnId)) {
@@ -1112,7 +1126,7 @@ export class ConversationOrchestrator {
             if (this.scheduler.isTurnValid(turnId)) {
               let spokenText = '';
               let spokenTextsHandled = false;
-              const spokenTexts = (execResult.spokenTexts ?? []).filter((t) => !saidBefore(t));
+              const spokenTexts = [...new Set((execResult.spokenTexts ?? []).map((t) => t.trim()))].filter((t) => t && !saidBefore(t));
               if (spokenTexts.length > 0) {
                 spokenText = spokenTexts.join(' ');
                 spokenTextsHandled = true;

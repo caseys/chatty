@@ -67,3 +67,76 @@ export function appendRunLog(kind: RunLogEntryKind, text: string): void {
 export function runLogText(): string {
   return (load()[currentChat()] ?? []).join('\n');
 }
+
+export interface RepairTally {
+  /** Corrections made without the model, by kind of change */
+  imagined: Record<string, number>;
+  /** Retries, by reason */
+  retry: Record<string, number>;
+  /** Replies or fixes thrown away, by reason */
+  discarded: Record<string, number>;
+}
+
+/** A word that is code rather than English: camelCase, snake_case, dotted, called, quoted, digits, one letter */
+const codeLike = (w: string) => /[A-Z_$.()'"`\d]/.test(w) || (w.length === 1 && !/[aAI]/.test(w));
+
+/** "ctx.fillstyle → ctx.fillStyle: corrected before running" → "… → … (before running)": the kind of change, names left out */
+function imaginedKind(text: string): string {
+  let note = text.replace(/\n[\s\S]*$/, '');
+  let when = '';
+  const suffix = /: corrected( before running| and run again)?\s*$/.exec(note);
+  if (suffix) {
+    note = note.slice(0, suffix.index);
+    if (suffix[1]?.includes('before')) when = ' (before running)';
+  }
+  const parts = note.split(' → ');
+  // A lone plain word stays when the other side says more ("… was a promise → await"); names are left out
+  const lone = parts.every((p) => p.trim().split(/\s+/).length === 1);
+  const side = (s: string) => {
+    const words = s.trim().split(/\s+/);
+    if (words.length === 1) return lone || codeLike(words[0]) ? '…' : words[0];
+    return words.map((w) => (codeLike(w) ? '…' : w)).join(' ').replace(/(… ?){2,}/g, '… ');
+  };
+  return (parts.length > 1 ? parts.map(side).join(' → ') : side(note)).slice(0, 60) + when;
+}
+
+const retryKind = (text: string) => text.replace(/\n[\s\S]*$/, '').split(/ \(|: /)[0].slice(0, 80);
+
+function discardedKind(text: string): string {
+  const first = text.split('\n')[0];
+  if (!first.startsWith('// ')) return 'a reply thrown away';
+  return first.slice(3).split(/: |\.\s/)[0].replace(/[.:]$/, '').slice(0, 80);
+}
+
+/** Count how often each repair fired across the given logs (oldest to newest entries, any chats) */
+export function tallyRepairs(all: Record<string, string[]>): RepairTally {
+  const tally: RepairTally = { imagined: {}, retry: {}, discarded: {} };
+  for (const log of Object.values(all)) {
+    for (const entry of log) {
+      const m = /^\[[^\]]*\] (imagined|retry|discarded):\s?([\s\S]*)$/.exec(entry);
+      if (!m) continue;
+      const kind = m[1] as keyof RepairTally;
+      const key = (kind === 'imagined' ? imaginedKind : kind === 'retry' ? retryKind : discardedKind)(m[2].trim());
+      tally[kind][key] = (tally[kind][key] ?? 0) + 1;
+    }
+  }
+  return tally;
+}
+
+/** Tally across every chat's log in storage */
+export function repairTally(): RepairTally {
+  return tallyRepairs(load());
+}
+
+/** One compact line: "Repairs across chats: fixed … → … ×3; retry the program failed ×2; discarded … ×1" */
+export function formatRepairTally(tally: RepairTally, max = 8): string {
+  const parts: string[] = [];
+  const labels: Record<keyof RepairTally, string> = { imagined: 'fixed', retry: 'retry', discarded: 'discarded' };
+  for (const kind of Object.keys(labels) as Array<keyof RepairTally>) {
+    for (const [key, n] of Object.entries(tally[kind])) parts.push(`${labels[kind]} ${key} ×${n}`);
+  }
+  if (parts.length === 0) return 'Repairs across chats: none yet';
+  const sorted = parts.sort((a, b) => Number(b.split('×')[1]) - Number(a.split('×')[1]));
+  const shown = sorted.slice(0, max);
+  return `Repairs across chats: ${shown.join('; ')}${sorted.length > max ? `; +${sorted.length - max} more` : ''}`;
+}

@@ -3,6 +3,7 @@
 // Powered by the unified VoiceAssistantEngine
 // ============================================================================
 
+import { formatRepairTally, repairTally } from './core/run-log.ts';
 import Prism from 'prismjs';
 import { VoiceAssistantEngine } from './core/voice-assistant-engine.ts';
 import { MODEL_REGISTRY } from './core/model-manager.ts';
@@ -844,7 +845,7 @@ export class MinimalVoiceApp {
     if (!this.rawOutputEl) return;
     this.lastRawOutput = text;
     if (this.showingRunLog) {
-      this.rawOutputEl.textContent = this.engine.getRunLog() || 'Nothing has run yet.';
+      this.rawOutputEl.textContent = `${formatRepairTally(repairTally())}\n\n${this.engine.getRunLog() || 'Nothing has run yet.'}`;
       this.rawOutputEl.scrollTop = this.rawOutputEl.scrollHeight;
       return;
     }

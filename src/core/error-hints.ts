@@ -1,4 +1,10 @@
 /**
+ * Admission rule for everything here (and in method-hints.ts / property-check.ts): a repair or a
+ * fact must be grounded in the language (the parser, scopes), the browser (its own names and
+ * types) or Chatty's own helpers, never in what particular requests or test cases say. A
+ * correction is made only when there is exactly one clear answer, and is logged; otherwise the
+ * model gets the facts. Repairs that never fire on real failures (tests/replay) are removed.
+ *
  * Smarter answers to the errors programs hit most. For each, either a correction Chatty can make
  * itself (exactly one clear match: a typo of a declared name, an element id one slip away from
  * an id on the page, a method's wrong case) or the facts the model is missing, for the fix
@@ -287,6 +293,39 @@ function syntaxSlip(code: string, error: string, errorLine?: number): ErrorHint 
 
 /** Helpers every program already has, ready to use */
 const HELPERS = ['out', 'speak', 'clear', 'root'];
+
+/**
+ * Before a program runs: its own definitions of a ready-made helper (`function speak(text) {
+ * console.log(text) }`, `const out = …`) are taken out, so the real helper is used. A function
+ * declaration applies to the whole program, so one such definition silently swallows every call.
+ */
+export function dropHelperCopies(code: string): { code: string; dropped: string[] } {
+  const ast = tryParse(code);
+  if (!ast) return { code, dropped: [] };
+  const spans: Array<{ start: number; end: number; name: string }> = [];
+  for (const statement of ast.body as AnyNode[]) {
+    if (statement.type === 'FunctionDeclaration' && HELPERS.includes(((statement.id as AnyNode)?.name as string) ?? '')) {
+      spans.push({ start: statement.start, end: statement.end, name: (statement.id as AnyNode).name as string });
+    }
+    if (statement.type === 'VariableDeclaration') {
+      const declarations = statement.declarations as AnyNode[];
+      const id = declarations[0]?.id as AnyNode | undefined;
+      const init = declarations[0]?.init as AnyNode | null | undefined;
+      // Only a stand-in for the helper (a function, a class, a `new …`); a real value it was given
+      // (const out = MIDI output) stays
+      const standIn = !!init && /^(?:FunctionExpression|ArrowFunctionExpression|ClassExpression|NewExpression)$/.test(init.type);
+      if (declarations.length === 1 && standIn && id?.type === 'Identifier' && HELPERS.includes(id.name as string)) {
+        spans.push({ start: statement.start, end: statement.end, name: id.name as string });
+      }
+    }
+  }
+  let out = code;
+  for (const { start, end } of spans.reverse()) {
+    const after = out.slice(end).match(/^[ \t]*\n?/)?.[0].length ?? 0;
+    out = out.slice(0, start) + out.slice(end + after);
+  }
+  return { code: out, dropped: spans.map((s) => s.name).reverse() };
+}
 
 /**
  * A program that makes its own copy of a ready-made helper (`const out = new Out({…})`,

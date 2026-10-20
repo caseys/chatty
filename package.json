@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "replay": "REPLAY_REPORT=1 vitest run tests/replay.test.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.0",

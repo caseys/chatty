@@ -111,3 +111,12 @@ describe('calls that pass too few values', () => {
     );
   });
 });
+
+describe("a program's own copy of a helper", () => {
+  it('is taken out before running, so the real helper is used', async () => {
+    const { dropHelperCopies } = await import('../src/core/error-hints.ts');
+    const code = 'speak("Hi.");\nfunction speak(text) {\n  console.log(text);\n}\nspeak("Hi.");';
+    expect(dropHelperCopies(code)).toEqual({ code: 'speak("Hi.");\nspeak("Hi.");', dropped: ['speak'] });
+    expect(dropHelperCopies('const total = 1;\nspeak(total);').dropped).toEqual([]);
+  });
+});
