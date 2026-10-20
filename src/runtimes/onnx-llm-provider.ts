@@ -1,8 +1,8 @@
 // ============================================================================
 // OnnxLlmProvider: small ONNX causal LMs (Transformers.js, WebGPU) in a dedicated worker.
-// Used on memory-constrained phones for the FunctionGemma router, the Gemma 3 1B chat
-// model and the Qwen2.5-Coder JavaScript writer. Models are meant to be resident one at a
-// time: dispose() terminates the worker, which releases all of the model's memory.
+// Used for chat models WebLLM has no build of (LFM2.5, desktop only) and by the opt-in
+// ?pipeline=split phone pipeline (Gemma 3 chat, Qwen2.5-Coder). Models are meant to be resident
+// one at a time: dispose() terminates the worker, which releases all of the model's memory.
 // ============================================================================
 
 import { retryTemperature } from './retry-temperature.ts';

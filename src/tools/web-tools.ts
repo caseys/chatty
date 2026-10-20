@@ -1,5 +1,5 @@
 // ============================================================================
-// Web Search & Knowledge Tools for Gemma
+// Web Search & Knowledge Tools
 // - Wikipedia Search & Summary Tool
 // - Instant Answers Tool (DuckDuckGo open CORS endpoint)
 // Keeps descriptions and parameter options minimal, clean, and easy to understand.

@@ -1,7 +1,7 @@
 // ============================================================================
 // Core Voice Assistant Engine: Unified Reusable Module
 // Encapsulates ModelManager, StateMachineCoordinator, ConversationMemoryStore,
-// Whistle STT, Worker LLM (LiteRT-LM Gemma 4 WebGPU), Worker TTS (Piper ONNX),
+// Whistle STT, Worker LLMs (LiteRT-LM Gemma 4 or WebLLM, on WebGPU), Worker TTS (Piper ONNX),
 // and SharedAudioSubsystem (VAD, 16kHz resampling, gapless playback).
 // ============================================================================
 

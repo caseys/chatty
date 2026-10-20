@@ -1,7 +1,7 @@
 // ============================================================================
 // Application Settings & Model Preferences
-// Supports selecting Chat Gemma model size, Coding Agent Gemma model size,
-// and Piper ONNX Voice choice with localStorage & IndexedDB persistence.
+// The chat model list (Gemma 4 on LiteRT-LM; Qwen, Llama and others on WebLLM), which models
+// phones get, the Piper voice and the speech switch, persisted in localStorage & IndexedDB.
 // ============================================================================
 
 import type { WebLlmModelSpec } from '../runtimes/webllm-provider.ts';

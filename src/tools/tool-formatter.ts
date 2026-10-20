@@ -1,6 +1,6 @@
 // ============================================================================
 // Tool Summary Formatter for Chatty
-// Generates compact, clean summary lines for tool calls made by Gemma
+// Generates compact, clean summary lines for tool calls made by the model
 // and summary lines for tool results or execution errors.
 // ============================================================================
 

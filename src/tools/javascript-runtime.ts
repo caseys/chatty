@@ -1,5 +1,5 @@
 // ============================================================================
-// JavaScript Runtime Tool for Gemma
+// JavaScript Runtime: runs the model's programs
 // Supports Sandboxed IFrame (default, with DOM/visual rendering),
 // Web Worker (headless background compute), and Direct Eval ((0, eval) strict).
 // ============================================================================

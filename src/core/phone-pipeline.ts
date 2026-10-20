@@ -1,5 +1,6 @@
 // ============================================================================
-// Phone pipeline: small ONNX models that fit a mobile browser tab.
+// Split phone pipeline (opt-in with ?pipeline=split; phones normally run the same one-model
+// pipeline as desktop, on WebLLM): small ONNX models that fit a mobile browser tab.
 //
 //   Needle 3 (35 MB, CPU)  picks a ready-made tool or coder_agent on turns that ask for an action
 //   Gemma 3 1B             writes spoken replies (prose only)

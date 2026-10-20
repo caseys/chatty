@@ -1,4 +1,13 @@
 node_modules/
 dist/
+coverage/
 .DS_Store
+*.log
+.env
+.env.*
+*.local
 .claude/settings.local.json
+
+# Run logs pasted in for the replay corpus (tests/replay/extract.mjs merges them into cases.json)
+tests/replay/logs/*
+!tests/replay/logs/.gitkeep

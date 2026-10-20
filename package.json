@@ -3,7 +3,28 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Privacy-first fully client-side browser voice assistant",
+  "description": "A local AI that runs in your browser and answers by writing JavaScript: Gemma, Qwen and Llama on WebGPU, with on-device speech in and out",
+  "homepage": "https://www.mudberry.com/chatty/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/caseys/chatty.git"
+  },
+  "bugs": {
+    "url": "https://github.com/caseys/chatty/issues"
+  },
+  "keywords": [
+    "webgpu",
+    "llm",
+    "local-ai",
+    "gemma",
+    "webllm",
+    "litert",
+    "speech",
+    "pwa"
+  ],
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -33,5 +54,7 @@
     "typescript": "^6.0.2",
     "vite": "^8.0.8",
     "vitest": "^4.1.4"
-  }
+  },
+  "license": "Apache-2.0",
+  "author": "Casey"
 }

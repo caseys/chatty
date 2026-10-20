@@ -1,6 +1,6 @@
 // ============================================================================
 // ONNX causal-LM worker (Transformers.js on WebGPU)
-// Runs one small model per worker (FunctionGemma router, Gemma 3 1B chat, Qwen coder).
+// Runs one small model per worker (see runtimes/onnx-llm-provider.ts for which ones).
 // Terminating the worker frees the model's GPU/WASM memory, which is how models are
 // swapped on memory-constrained phones.
 // ============================================================================

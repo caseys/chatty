@@ -1,16 +1,24 @@
 {
-  "name": "Chatty — 100% Client-Side Voice AI",
+  "name": "Chatty — Local AI in Your Browser",
   "short_name": "Chatty",
-  "description": "Private, local client-side voice assistant powered by Whistle STT, Gemma 4 WebGPU, and Piper ONNX TTS with zero server calls.",
+  "description": "An AI that runs entirely in your browser and answers by writing JavaScript that draws, plays music and builds small apps. Models run on your device with WebGPU.",
   "start_url": "./",
   "scope": "./",
   "id": "./",
   "display": "standalone",
-  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "display_override": [
+    "window-controls-overlay",
+    "standalone",
+    "minimal-ui"
+  ],
   "orientation": "any",
   "background_color": "#0a0d14",
   "theme_color": "#0a0d14",
-  "categories": ["utilities", "productivity", "ai"],
+  "categories": [
+    "utilities",
+    "productivity",
+    "ai"
+  ],
   "lang": "en",
   "dir": "ltr",
   "icons": [
@@ -49,16 +57,26 @@
     {
       "name": "Voice Assistant",
       "short_name": "Assistant",
-      "description": "Open the minimal voice assistant interface",
+      "description": "Open Chatty",
       "url": "./",
-      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+      "icons": [
+        {
+          "src": "icons/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
     },
     {
       "name": "Debug Console",
       "short_name": "Debug",
       "description": "Open the telemetry, memory inspector, and benchmark runner",
       "url": "debug.html",
-      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+      "icons": [
+        {
+          "src": "icons/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
     }
   ],
   "screenshots": [
@@ -67,105 +85,14 @@
       "sizes": "1280x720",
       "type": "image/png",
       "form_factor": "wide",
-      "label": "Chatty Voice Assistant Desktop"
+      "label": "Chatty on desktop"
     },
     {
       "src": "screenshots/screenshot-narrow.png",
       "sizes": "720x1280",
       "type": "image/png",
       "form_factor": "narrow",
-      "label": "Chatty Voice Assistant Mobile"
-    }
-  ],
-  "models": [
-    {
-      "id": "whistle-stt-base",
-      "name": "Whistle WASM Speech Recognition",
-      "task": "stt",
-      "runtime": "whistle-wasm",
-      "url": "https://huggingface.co/Cactus-Compute/whistle/resolve/b358ddadd89b7a713b5aa131f23032d3cca1b251/whistle.cact",
-      "expectedSizeBytes": 16919407,
-      "sha256": "b358ddadd89b7a713b5aa131f23032d3cca1b251",
-      "cacheStorage": "opfs",
-      "targetFile": "whistle-stt-base.cact",
-      "requiredForStartup": true,
-      "format": "cactus"
-    },
-    {
-      "id": "gemma-4-e2b-it-web",
-      "name": "Google Gemma 4 E2B Instruct (WebGPU INT4)",
-      "task": "llm",
-      "runtime": "litert-lm-webgpu",
-      "url": "https://huggingface.co/litert-community/Gemma-4-E2B-it-web/resolve/main/model.litertlm",
-      "expectedSizeBytes": 2057750000,
-      "sha256": "a37f5b217e94c98234857b28d7e97d1b329c298b472e39b9409825b42c8135be",
-      "cacheStorage": "opfs",
-      "targetFile": "gemma-4-e2b-it-web.litertlm",
-      "requiredForStartup": true,
-      "format": "litertlm"
-    },
-    {
-      "id": "gemma-4-e4b-it-web",
-      "name": "Google Gemma 4 E4B Instruct (WebGPU INT4)",
-      "task": "llm",
-      "runtime": "litert-lm-webgpu",
-      "url": "https://huggingface.co/litert-community/Gemma-4-E4B-it-web/resolve/main/model.litertlm",
-      "expectedSizeBytes": 3980000000,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "cacheStorage": "opfs",
-      "targetFile": "gemma-4-e4b-it-web.litertlm",
-      "requiredForStartup": false,
-      "format": "litertlm"
-    },
-    {
-      "id": "en_US-hfc_female-medium",
-      "name": "Piper US English Female (Medium ONNX)",
-      "task": "tts",
-      "runtime": "piper-onnx",
-      "url": "https://huggingface.co/diffusionstudio/piper-voices/resolve/main/en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx",
-      "configUrl": "https://huggingface.co/diffusionstudio/piper-voices/resolve/main/en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx.json",
-      "expectedSizeBytes": 63201294,
-      "sha256": "piper-en-us-hfc-female-medium",
-      "cacheStorage": "opfs",
-      "targetFile": "en_US-hfc_female-medium.onnx",
-      "requiredForStartup": true,
-      "format": "onnx"
-    },
-    {
-      "id": "en_US-hfc_male-medium",
-      "name": "Piper US English Male (Medium ONNX)",
-      "task": "tts",
-      "runtime": "piper-onnx",
-      "url": "https://huggingface.co/diffusionstudio/piper-voices/resolve/main/en/en_US/hfc_male/medium/en_US-hfc_male-medium.onnx",
-      "configUrl": "https://huggingface.co/diffusionstudio/piper-voices/resolve/main/en/en_US/hfc_male/medium/en_US-hfc_male-medium.onnx.json",
-      "expectedSizeBytes": 63201294,
-      "sha256": "piper-en-us-hfc-male-medium",
-      "cacheStorage": "opfs",
-      "targetFile": "en_US-hfc_male-medium.onnx",
-      "requiredForStartup": false,
-      "format": "onnx"
-    },
-    {
-      "id": "onnxruntime-wasm",
-      "name": "ONNX Runtime Web SIMD JSEP WASM",
-      "task": "runtime",
-      "runtime": "wasm",
-      "url": "/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm",
-      "expectedSizeBytes": 28312024,
-      "cacheStorage": "cache-api",
-      "requiredForStartup": true,
-      "format": "wasm"
-    },
-    {
-      "id": "litertlm-wasm",
-      "name": "LiteRT-LM Core WASM Compat Binary",
-      "task": "runtime",
-      "runtime": "wasm",
-      "url": "/node_modules/@litert-lm/core/wasm/litertlm_wasm_compat_internal.wasm",
-      "expectedSizeBytes": 24200000,
-      "cacheStorage": "cache-api",
-      "requiredForStartup": true,
-      "format": "wasm"
+      "label": "Chatty on a phone"
     }
   ]
 }

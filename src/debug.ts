@@ -1,5 +1,5 @@
 // ============================================================================
-// Main Application Controller & UI Integration
+// Debug Console Controller (debug.html): telemetry, memory inspector, benchmarks
 // Coordinates StateMachineCoordinator, ConversationOrchestrator, SharedAudioSubsystem,
 // Whistle STT, Worker LLM (LiteRT-LM Gemma 4 WebGPU), Worker TTS (Piper ONNX),
 // and IndexedDB / OPFS Model Manager.

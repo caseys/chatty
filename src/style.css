@@ -262,13 +262,8 @@ body {
   height: 8px;
   border-radius: 50%;
   background: var(--accent);
-  animation: pulse 1.2s infinite ease-in-out;
 }
 
-@keyframes pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.8); }
-}
 
 .voice-controls {
   display: flex;
@@ -313,7 +308,6 @@ body {
   object-fit: contain;
   margin-bottom: 12px;
   filter: drop-shadow(0 4px 14px rgba(56, 189, 248, 0.28));
-  animation: floatMascot 4s ease-in-out infinite;
   user-select: none;
 }
 
@@ -343,7 +337,7 @@ body {
   color: var(--text-primary);
   font-size: 12px;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+
 }
 
 .chip-prompt:hover {
@@ -457,7 +451,7 @@ body {
 
 .chat-tool-summary-card.clickable {
   cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+  transition: transform 0.15s ease;
 }
 
 .chat-tool-summary-card.clickable:hover {
@@ -725,7 +719,7 @@ body {
   font-weight: 600;
   border: 1px solid transparent;
   cursor: pointer;
-  transition: opacity 0.15s, background 0.15s;
+  transition: opacity 0.15s;
 }
 
 .btn:disabled {
@@ -927,7 +921,7 @@ body {
   letter-spacing: -0.01em;
   cursor: pointer;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+  transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.15s ease;
   -webkit-tap-highlight-color: transparent;
   user-select: none;
 }
@@ -977,7 +971,7 @@ body {
   justify-content: center;
   stroke: currentColor;
   stroke-width: 2;
-  transition: stroke 0.15s ease, transform 0.15s ease;
+  transition: transform 0.15s ease;
 }
 
 .minimal-corner-btn:hover .sidebar-box-icon {
@@ -998,8 +992,7 @@ body {
   max-height: 9.5vh;
   object-fit: contain;
   filter: drop-shadow(0 6px 16px rgba(56, 189, 248, 0.25));
-  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.35s ease;
-  animation: floatMascot 4.5s ease-in-out infinite;
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
   user-select: none;
   -webkit-user-drag: none;
 }
@@ -1014,14 +1007,6 @@ body {
   transform: scale(1.08);
 }
 
-@keyframes floatMascot {
-  0%, 100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-6px);
-  }
-}
 
 /* Narrow status box (phones): label and token count each stay on one line, stacking if needed */
 .bottom-bar .context-meter-header {
@@ -1130,26 +1115,10 @@ body {
   letter-spacing: -0.01em;
   cursor: pointer;
   box-shadow: 0 6px 26px rgba(59, 130, 246, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.25);
-  transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+  transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1);
   -webkit-tap-highlight-color: transparent;
   user-select: none;
-  /* The glow layer (::before) sits behind the button's own background */
   position: relative;
-  isolation: isolate;
-}
-
-/* Glow for the loading and Stop states: a fixed shadow whose opacity breathes, so the
-   animation stays on the compositor instead of repainting a box-shadow every frame */
-.minimal-start-btn::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  border-radius: inherit;
-  pointer-events: none;
-  opacity: 0;
-  box-shadow: 0 6px 30px rgba(59, 130, 246, 0.6);
-  transition: opacity 0.25s ease;
 }
 
 .minimal-start-btn:hover:not(:disabled) {
@@ -1162,26 +1131,12 @@ body {
   transform: scale(0.97);
 }
 
-/* Loading: still bold and readable, with a breathing glow; not clickable */
+/* Loading: still bold and readable, with a ring (see Motion polish); not clickable */
 .minimal-start-btn:disabled {
   opacity: 0.9;
   cursor: progress;
   transform: none;
   box-shadow: 0 4px 16px rgba(59, 130, 246, 0.2);
-}
-
-.minimal-start-btn:disabled::before {
-  animation: startGlow 1.6s infinite ease-in-out;
-}
-
-.minimal-start-btn.listening::before {
-  box-shadow: 0 0 34px 2px rgba(239, 68, 68, 0.55);
-  animation: startGlow 2.4s infinite ease-in-out;
-}
-
-@keyframes startGlow {
-  0%, 100% { opacity: 0.15; }
-  50% { opacity: 1; }
 }
 
 .minimal-btn-dot {
@@ -1190,7 +1145,7 @@ body {
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 0 8px rgba(255, 255, 255, 0.8);
-  transition: background 0.2s ease, box-shadow 0.2s ease;
+
 }
 
 .minimal-start-btn.listening {
@@ -1214,7 +1169,6 @@ body {
 .minimal-start-btn.listening .minimal-btn-dot {
   background: #fff;
   box-shadow: 0 0 10px rgba(255, 255, 255, 0.9);
-  animation: pulse 1.2s infinite ease-in-out;
 }
 
 .minimal-status {
@@ -1320,7 +1274,7 @@ body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
+  transition: transform 0.1s ease;
 }
 
 .settings-close-x:hover {
@@ -1370,7 +1324,7 @@ body {
   background: var(--fill-subtle);
   border: 1px solid var(--line);
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
+
 }
 
 .settings-switch::before {
@@ -1430,7 +1384,7 @@ body {
   font-weight: 500;
   padding: 10px 36px 10px 12px;
   cursor: pointer;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+
   outline: none;
 }
 
@@ -1589,7 +1543,7 @@ body {
   justify-content: center;
   font-size: 13px;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  transition: transform 0.1s ease;
 }
 
 .sidebar-action-btn:hover {
@@ -1624,7 +1578,7 @@ body {
   border-radius: 12px;
   background: var(--fill-subtle);
   border: 1px solid var(--line);
-  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  transition: transform 0.1s ease;
 }
 
 .chat-item:hover {
@@ -1707,7 +1661,7 @@ body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+
 }
 
 .chat-item-menu-btn:hover {
@@ -1752,7 +1706,7 @@ body {
   font-weight: 500;
   cursor: pointer;
   text-align: left;
-  transition: background 0.12s ease, color 0.12s ease;
+
 }
 
 .chat-menu-action:hover {
@@ -1901,17 +1855,9 @@ body {
 
 /* Controls waiting for the models pulse until they're ready */
 .loading-blocked {
-  animation: loading-blocked-pulse 1.2s ease-in-out infinite alternate;
+  opacity: 0.45;
 }
 
-@keyframes loading-blocked-pulse {
-  from {
-    opacity: 0.3;
-  }
-  to {
-    opacity: 0.7;
-  }
-}
 
 /* Example phrases under the chat until the user first speaks */
 .chat-examples {
@@ -1973,7 +1919,7 @@ body {
   font: inherit;
   font-size: 13px;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  transition: transform 0.1s ease;
 }
 
 .chat-example:hover {
@@ -2131,7 +2077,7 @@ body {
      input follows them up. With a flex-grow under 1 the panels take only that share of the
      free space, and the rest goes below the input. */
   .chat-workspace {
-    transition: flex-grow 0.25s ease, grid-template-rows 0.25s ease;
+
   }
 
   .minimal-stage:has(.chat-input-field:focus) {
@@ -2206,7 +2152,7 @@ body {
   border-radius: 999px;
   background: linear-gradient(90deg, #38bdf8, #6366f1);
   box-shadow: 0 0 8px rgba(56, 189, 248, 0.4);
-  transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s ease;
+
 }
 
 .context-meter-fill.warning {
@@ -2218,7 +2164,6 @@ body {
   background: linear-gradient(90deg, #f59e0b, #ef4444);
   box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
 }
-
 
 
 /* App/status notes inside the conversation panels (welcome, interrupted, earlier summary) */
@@ -2243,23 +2188,10 @@ body {
     rgba(99, 102, 241, 0.15) 6px 12px
   );
   background-size: 17px 100%;
-  animation: context-meter-barber 0.6s linear infinite;
   pointer-events: none;
   z-index: 2;
 }
 
-@keyframes context-meter-barber {
-  to {
-    background-position: 17px 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .context-meter-bar.busy::after,
-  .loading-blocked {
-    animation-duration: 3s;
-  }
-}
 
 .context-meter-threshold {
   position: absolute;
@@ -2468,7 +2400,7 @@ body {
 
 /* Buttons: lift on hover, press down on click */
 .btn {
-  transition: opacity 0.15s ease, background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+  transition: opacity 0.15s ease, transform 0.12s ease;
 }
 
 .btn:active:not(:disabled) {
@@ -2481,7 +2413,7 @@ body {
 }
 
 .chat-send-btn {
-  transition: transform 0.15s var(--ease-spring), background 0.15s ease, opacity 0.15s ease;
+  transition: transform 0.15s var(--ease-spring), opacity 0.15s ease;
 }
 
 .chat-send-btn svg {
@@ -2505,7 +2437,7 @@ body {
 .minimal-corner-btn .btn-emoji,
 .sidebar-action-btn svg,
 .settings-close-x {
-  transition: transform 0.3s var(--ease-spring), background 0.15s ease, color 0.15s ease;
+  transition: transform 0.3s var(--ease-spring);
 }
 
 .minimal-corner-btn.btn-settings:hover:not(:disabled) .btn-emoji {
@@ -2557,10 +2489,88 @@ body {
 }
 
 .chat-input-field {
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+
 }
 
-/* Start/Stop: Stop pops in when it takes over; the glow breathes (see .minimal-start-btn::before) */
+/* ----- Start/Stop: a static gradient ring and glow per state -----
+   Loading: cool aurora ring. Listening (mic on): warm ring and glow. Speaking: mint button,
+   ring and glow. Other Stop states (thinking, a program running): violet ring, no glow.
+   Nothing loops: the ring springs in once each time the state changes. */
+.minimal-btn-group {
+  position: relative;
+  isolation: isolate;
+  border-radius: 999px;
+}
+
+.minimal-btn-group::before,
+.minimal-btn-group::after {
+  content: '';
+  position: absolute;
+  border-radius: 999px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease, transform 0.45s var(--ease-spring);
+}
+
+/* Ring: 3px of gradient around the button */
+.minimal-btn-group::before {
+  inset: -3px;
+  z-index: -1;
+  transform: scale(0.94);
+  background: conic-gradient(from 200deg, #22d3ee, #a855f7, #f472b6, #22d3ee);
+}
+
+/* Glow: a fixed soft shadow that only fades in and out */
+.minimal-btn-group::after {
+  inset: 0;
+  z-index: -2;
+  box-shadow: 0 0 34px 6px rgba(99, 102, 241, 0.5);
+}
+
+.minimal-btn-group:has(> .minimal-start-btn:disabled:not([hidden]))::before,
+.minimal-btn-group:has(> .minimal-start-btn.listening:not([hidden]))::before {
+  opacity: 1;
+  transform: none;
+}
+
+.minimal-btn-group:has(> .minimal-start-btn:disabled:not([hidden]))::after {
+  opacity: 0.8;
+}
+
+.minimal-btn-group:has(> .minimal-start-btn.listening)::before {
+  background: conic-gradient(from 200deg, #a855f7, #ec4899, #6366f1, #a855f7);
+}
+
+/* Mic on: warm */
+.minimal-stage:has(#minimal-mascot-container.listening) .minimal-btn-group:has(> .minimal-start-btn.listening)::before {
+  background: conic-gradient(from 200deg, #f97316, #ef4444, #ec4899, #fb923c, #f97316);
+  animation: ring-in-warm 0.5s var(--ease-spring);
+}
+
+.minimal-stage:has(#minimal-mascot-container.listening) .minimal-btn-group:has(> .minimal-start-btn.listening)::after {
+  opacity: 1;
+  box-shadow: 0 0 36px 6px rgba(239, 68, 68, 0.45);
+}
+
+/* Speaking: mint */
+.minimal-stage:has(#minimal-mascot-container.speaking) .minimal-start-btn.listening {
+  border-color: rgba(52, 211, 153, 0.8);
+  background: linear-gradient(135deg, #10b981, #0891b2);
+  box-shadow: 0 0 30px rgba(16, 185, 129, 0.45);
+  animation: start-btn-pop-mint 0.35s var(--ease-spring);
+}
+
+.minimal-stage:has(#minimal-mascot-container.speaking) .minimal-btn-group:has(> .minimal-start-btn.listening)::before {
+  background: conic-gradient(from 200deg, #34d399, #22d3ee, #a3e635, #34d399);
+  animation: ring-in-mint 0.5s var(--ease-spring);
+}
+
+.minimal-stage:has(#minimal-mascot-container.speaking) .minimal-btn-group:has(> .minimal-start-btn.listening)::after {
+  opacity: 1;
+  box-shadow: 0 0 36px 6px rgba(16, 185, 129, 0.45);
+}
+
+/* Stop pops in when it takes over */
 .minimal-start-btn.listening {
   animation: start-btn-pop 0.35s var(--ease-spring);
 }
@@ -2569,19 +2579,76 @@ body {
   from { transform: scale(0.94); }
 }
 
-.minimal-btn-dot {
-  transition: background 0.2s ease, box-shadow 0.2s ease, transform 0.2s var(--ease-spring);
+@keyframes start-btn-pop-mint {
+  from { transform: scale(0.94); }
 }
 
-/* Mascot: grows while listening or speaking (the image itself is busy floating), and
-   tilts toward the pointer on hover */
+/* Same motion under two names, so it plays again when the state (and so the name) changes */
+@keyframes ring-in-warm {
+  from { opacity: 0; transform: scale(0.9); }
+}
+
+@keyframes ring-in-mint {
+  from { opacity: 0; transform: scale(0.9); }
+}
+
+.minimal-btn-dot {
+  transition: transform 0.2s var(--ease-spring);
+}
+
+.minimal-start-btn.listening .minimal-btn-dot {
+  transform: scale(1.2);
+}
+
+/* ----- Mascot: a colored halo and a hop when it starts listening or speaking ----- */
 .minimal-mascot-container {
+  position: relative;
   transition: transform 0.4s var(--ease-spring);
 }
 
-.minimal-mascot-container.listening,
+.minimal-mascot-container::before {
+  content: '';
+  position: absolute;
+  inset: -12px -18px;
+  z-index: -1;
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(closest-side, var(--mascot-halo, rgba(56, 189, 248, 0.4)), transparent);
+  opacity: 0;
+  transform: scale(0.6);
+  transition: opacity 0.35s ease, transform 0.45s var(--ease-spring);
+}
+
+.minimal-mascot-container.listening {
+  --mascot-halo: rgba(239, 68, 68, 0.45);
+}
+
 .minimal-mascot-container.speaking {
-  transform: scale(1.08);
+  --mascot-halo: rgba(16, 185, 129, 0.5);
+}
+
+.minimal-mascot-container.listening::before,
+.minimal-mascot-container.speaking::before {
+  opacity: 1;
+  transform: none;
+}
+
+.minimal-mascot-container.listening .minimal-mascot-img {
+  animation: mascot-hop-listen 0.55s var(--ease-spring);
+}
+
+.minimal-mascot-container.speaking .minimal-mascot-img {
+  animation: mascot-hop-speak 0.55s var(--ease-spring);
+}
+
+@keyframes mascot-hop-listen {
+  from { transform: scale(1); }
+  40% { transform: translateY(-8px) scale(1.12) rotate(-4deg); }
+}
+
+@keyframes mascot-hop-speak {
+  from { transform: scale(1); }
+  40% { transform: translateY(-8px) scale(1.12) rotate(4deg); }
 }
 
 @media (hover: hover) {
@@ -2589,8 +2656,130 @@ body {
     transform: scale(1.06) rotate(-4deg);
   }
 
-  .minimal-mascot-container:hover .minimal-mascot-img {
-    filter: drop-shadow(0 8px 20px rgba(56, 189, 248, 0.4));
+  .minimal-mascot-container:hover::before {
+    opacity: 0.8;
+    transform: none;
+  }
+}
+
+/* ----- Ambient: two soft static color pools behind the app (no animation, no extra layer) ----- */
+body {
+  background:
+    radial-gradient(60% 45% at 12% -5%, light-dark(rgba(59, 130, 246, 0.1), rgba(59, 130, 246, 0.16)), transparent 70%),
+    radial-gradient(55% 45% at 95% 105%, light-dark(rgba(168, 85, 247, 0.08), rgba(139, 92, 246, 0.14)), transparent 70%),
+    var(--bg-app);
+}
+
+/* ----- Hover sheen: a light band sweeps once across the button ----- */
+.minimal-corner-btn,
+.btn-primary {
+  position: relative;
+  overflow: hidden;
+}
+
+.minimal-corner-btn::after,
+.btn-primary::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(105deg, transparent 30%, var(--sheen) 50%, transparent 70%);
+  transform: translateX(-110%);
+}
+
+.minimal-corner-btn {
+  --sheen: light-dark(rgba(37, 99, 235, 0.16), rgba(255, 255, 255, 0.16));
+}
+
+.btn-primary {
+  --sheen: rgba(255, 255, 255, 0.35);
+}
+
+@media (hover: hover) {
+  .minimal-corner-btn:hover:not(:disabled)::after,
+  .btn-primary:hover:not(:disabled)::after {
+    transform: translateX(110%);
+    transition: transform 0.65s ease;
+  }
+}
+
+/* ----- Bubbles: gradient user bubbles, assistant bubbles with a soft colored edge ----- */
+.chat-row.user .chat-bubble {
+  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 50%, #8b5cf6));
+  box-shadow: 0 6px 16px -6px light-dark(rgba(37, 99, 235, 0.5), rgba(59, 130, 246, 0.55));
+}
+
+.chat-row.assistant .chat-bubble {
+  box-shadow:
+    inset 0 0 0 1px light-dark(rgba(37, 99, 235, 0.12), rgba(96, 165, 250, 0.16)),
+    0 6px 20px -10px light-dark(rgba(37, 99, 235, 0.4), rgba(56, 189, 248, 0.45));
+}
+
+.chat-row.assistant .chat-bubble:has(> .system-note:only-child) {
+  box-shadow: none;
+}
+
+/* ----- Suggestion chips: gradient borders and a glow on hover ----- */
+.chat-example {
+  position: relative;
+  --chip-bg: light-dark(#ffffff, #141c2d);
+  border: 1px solid transparent;
+  background:
+    linear-gradient(var(--chip-bg), var(--chip-bg)) padding-box,
+    linear-gradient(120deg, light-dark(rgba(37, 99, 235, 0.35), rgba(96, 165, 250, 0.45)), light-dark(rgba(168, 85, 247, 0.35), rgba(192, 132, 252, 0.45))) border-box;
+}
+
+.chat-example::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 16px 1px light-dark(rgba(37, 99, 235, 0.3), rgba(96, 165, 250, 0.4));
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.chat-example:hover:not(:disabled) {
+  --chip-bg: light-dark(#f5f8ff, #1a2440);
+  border-color: transparent;
+  background:
+    linear-gradient(var(--chip-bg), var(--chip-bg)) padding-box,
+    linear-gradient(120deg, light-dark(#3b82f6, #60a5fa), light-dark(#a855f7, #c084fc)) border-box;
+}
+
+.chat-example:hover:not(:disabled)::after {
+  opacity: 1;
+}
+
+/* ----- Chats sidebar: items slide on hover; the open chat gets a gradient bar ----- */
+.chat-item {
+  transition: transform 0.2s var(--ease-out-soft);
+}
+
+.chat-item::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 22%;
+  bottom: 22%;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: linear-gradient(var(--accent), #a855f7);
+  pointer-events: none;
+  opacity: 0;
+  transform: scaleY(0);
+  transition: opacity 0.2s ease, transform 0.35s var(--ease-spring);
+}
+
+.chat-item.active::before {
+  opacity: 1;
+  transform: none;
+}
+
+@media (hover: hover) {
+  .chat-item:hover {
+    transform: translateX(3px);
   }
 }
 
@@ -2607,7 +2796,62 @@ body {
   animation: menu-in 0.16s var(--ease-out-soft);
 }
 
-/* Settings and debug dialogs: rise and scale in over a fading backdrop */
+/* ----- Visual card: a gradient border and glow, rising in when the card first shows -----
+   The card is drawn in the runner iframe; the page draws its shadow (the div before it). */
+.js-iframe-container > div::before,
+.js-iframe-container > div::after {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+}
+
+.js-iframe-container > div::before {
+  inset: -2px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #38bdf8, #6366f1, #a855f7, #ec4899);
+}
+
+.js-iframe-container > div::after {
+  inset: -2px;
+  border-radius: 6px;
+  box-shadow: 0 0 40px 2px light-dark(rgba(99, 102, 241, 0.3), rgba(99, 102, 241, 0.45));
+}
+
+.js-iframe-container > div:not([hidden]),
+.js-iframe-container > div:not([hidden]) + iframe {
+  animation: card-in 0.5s var(--ease-out-soft);
+}
+
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+}
+
+/* ----- Dialogs: gradient top edge and a soft glow behind the logo; rise and scale in ----- */
+.settings-dialog::before,
+.modal-dialog::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #38bdf8, #6366f1, #a855f7, #ec4899);
+  pointer-events: none;
+}
+
+.settings-dialog::after {
+  content: '';
+  position: absolute;
+  top: -90px;
+  left: 50%;
+  width: 360px;
+  height: 220px;
+  margin-left: -180px;
+  z-index: -1;
+  background: radial-gradient(closest-side, light-dark(rgba(99, 102, 241, 0.14), rgba(99, 102, 241, 0.28)), transparent);
+  pointer-events: none;
+}
+
 .settings-dialog[open],
 .modal-dialog[open] {
   animation: dialog-in 0.3s var(--ease-out-soft);
@@ -2640,36 +2884,13 @@ body {
   }
 }
 
-/* Reduced motion: no movement; state changes are instant and the Start/Stop glow holds still */
+/* Reduced motion: nothing moves; every state change is instant */
 @media (prefers-reduced-motion: reduce) {
-  .chat-row.entering > .chat-bubble,
-  .system-note.entering,
-  .run-status:not([hidden]),
-  .chat-examples:not([hidden]) .chat-examples-title,
-  .chat-example:not(.loading-blocked),
-  .minimal-start-btn.listening,
-  .chat-item-menu:not([hidden]),
-  .settings-dialog[open],
-  .modal-dialog[open],
-  .settings-dialog[open]::backdrop,
-  .modal-dialog[open]::backdrop,
-  .settings-dialog[open] .settings-brand-logo,
-  .minimal-mascot-img,
-  .empty-mascot-img,
-  .pulse-dot,
-  .minimal-start-btn.listening .minimal-btn-dot {
-    animation: none;
-  }
-
-  .minimal-start-btn:disabled::before,
-  .minimal-start-btn.listening::before {
-    animation: none;
-    opacity: 0.6;
-  }
-
   *,
   *::before,
-  *::after {
+  *::after,
+  ::backdrop {
+    animation: none !important;
     transition-duration: 0.01ms !important;
   }
 }

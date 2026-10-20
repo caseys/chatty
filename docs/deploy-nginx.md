@@ -1,18 +1,18 @@
 # Deploying Chatty on Nginx
 
-Plan for setting up Chatty as static files behind Nginx. Written to be handed to an agent on the server.
+How to serve Chatty as static files behind Nginx. The examples use `chatty.example.com` and the default `/chatty/` path; replace both.
 
 ## What Chatty is (deploy-relevant facts)
 
 - Fully client-side app. `npm run build` produces `dist/` (~32 MB: `index.html`, `debug.html`, `assets/*.js|css|wasm`, `sw.js`, manifests, icons). No server-side code, no Node at runtime.
-- AI models are **not** in `dist/`. Each browser downloads them on first use from `huggingface.co` (~3 GB chat model) and `cdn.jsdelivr.net`, then caches them in OPFS. The server only hosts the app.
+- AI models are **not** in `dist/`. Each browser downloads them on first use from `huggingface.co` (a few hundred MB to several GB, depending on the model) and runtime code from `cdn.jsdelivr.net`, then caches them in OPFS / Cache Storage. The server only hosts the app.
 - Hard requirements on the server:
   1. **HTTPS** — WebGPU, microphone, service worker, and OPFS only work in a secure context.
   2. **Cross-origin isolation headers** on every response (needed for SharedArrayBuffer / multithreaded WASM):
      - `Cross-Origin-Opener-Policy: same-origin`
      - `Cross-Origin-Embedder-Policy: credentialless`
   3. **Correct MIME types**: `.wasm` → `application/wasm`, `.js`/`.mjs` → `text/javascript`.
-  4. **Served at the site root** (`https://chatty.example.com/`). `sw.js`, the manifests (`start_url`/`scope`), and Vite's asset paths assume `/`. A subpath like `/chatty/` needs code changes (see the end).
+  4. **Served at Vite's `base` path.** `vite.config.ts` sets `base: '/chatty/'`, so the build expects to live at `https://chatty.example.com/chatty/`. The service worker, its scope and the manifests are relative to that path, so to serve from somewhere else (e.g. the site root) change `base` and rebuild; nothing else needs editing.
 
 ## Steps
 
@@ -30,14 +30,14 @@ Confirm `dist/index.html` and `dist/assets/*.wasm` exist.
 ### 2. Copy files
 
 ```bash
-sudo mkdir -p /var/www/chatty
-sudo rsync -a --delete dist/ /var/www/chatty/
-sudo chown -R www-data:www-data /var/www/chatty   # or the nginx user on this distro (e.g. nginx)
+sudo mkdir -p /var/www/site/chatty
+sudo rsync -a --delete dist/ /var/www/site/chatty/
+sudo chown -R www-data:www-data /var/www/site   # or the nginx user on this distro (e.g. nginx)
 ```
 
 ### 3. Nginx site config
 
-Create `/etc/nginx/sites-available/chatty` (or `/etc/nginx/conf.d/chatty.conf` on RHEL-style distros). Replace `chatty.example.com`.
+Create `/etc/nginx/sites-available/chatty` (or `/etc/nginx/conf.d/chatty.conf` on RHEL-style distros).
 
 > Nginx gotcha: `add_header` directives are **not inherited** by a `location` block that has its own `add_header`. That's why the isolation headers are in a snippet included in every location.
 
@@ -67,7 +67,8 @@ server {
     # ssl_certificate     /etc/letsencrypt/live/chatty.example.com/fullchain.pem;
     # ssl_certificate_key /etc/letsencrypt/live/chatty.example.com/privkey.pem;
 
-    root /var/www/chatty;
+    # dist/ is copied to /var/www/site/chatty/, so it is served at /chatty/
+    root /var/www/site;
     index index.html;
 
     # MIME types: ensure wasm and mjs are known (older mime.types lack them)
@@ -81,29 +82,29 @@ server {
     gzip_types text/css text/javascript application/javascript application/json application/wasm application/manifest+json image/svg+xml;
 
     # Hashed build output: cache forever
-    location /assets/ {
+    location /chatty/assets/ {
         include snippets/chatty-isolation.conf;
         add_header Cache-Control "public, max-age=31536000, immutable" always;
         try_files $uri =404;
     }
 
     # Service worker and manifests must never be stale
-    location = /sw.js {
+    location = /chatty/sw.js {
         include snippets/chatty-isolation.conf;
         add_header Cache-Control "no-cache" always;
         try_files $uri =404;
     }
-    location ~ ^/manifest\.(json|webmanifest)$ {
+    location ~ ^/chatty/manifest\.(json|webmanifest)$ {
         include snippets/chatty-isolation.conf;
         add_header Cache-Control "no-cache" always;
         try_files $uri =404;
     }
 
-    # HTML and everything else
-    location / {
+    # HTML and everything else in the app
+    location /chatty/ {
         include snippets/chatty-isolation.conf;
         add_header Cache-Control "no-cache" always;
-        try_files $uri $uri/ /index.html;
+        try_files $uri $uri/ /chatty/index.html;
     }
 }
 ```
@@ -131,24 +132,25 @@ Re-check after certbot edits the file: `sudo nginx -t && sudo systemctl reload n
 From any machine:
 
 ```bash
-curl -sI https://chatty.example.com/ | grep -iE 'cross-origin|content-type|cache-control'
-curl -sI https://chatty.example.com/sw.js | grep -iE 'cross-origin|cache-control'
-curl -sI "https://chatty.example.com/assets/$(curl -s https://chatty.example.com/ | grep -o 'assets/[^"]*\.js' | head -1 | cut -d/ -f2)" | grep -iE 'cross-origin|content-type|cache-control'
+BASE=https://chatty.example.com/chatty
+curl -sI $BASE/ | grep -iE 'cross-origin|content-type|cache-control'
+curl -sI $BASE/sw.js | grep -iE 'cross-origin|cache-control'
+curl -sI "$BASE/assets/$(curl -s $BASE/ | grep -o 'assets/[^"]*\.js' | head -1 | cut -d/ -f2)" | grep -iE 'cross-origin|content-type|cache-control'
 ```
 
-Expected: both `Cross-Origin-*` headers on every response, `text/javascript` for JS, `application/wasm` for `.wasm`, `immutable` cache on `/assets/`.
+Expected: both `Cross-Origin-*` headers on every response, `text/javascript` for JS, `application/wasm` for `.wasm`, `immutable` cache on `assets/`.
 
 In a desktop Chrome/Edge browser on the site, open DevTools console:
 
 - `crossOriginIsolated` → `true`
 - `!!navigator.gpu` → `true` (WebGPU available)
-- Reload: the app should start pulling the model (progress bar shows "Pulling Assets") with no CORS/COEP errors in the console.
+- Reload: the app should start pulling the model (progress shown in the status line) with no CORS/COEP errors in the console.
 
 ### 6. Updating later
 
 ```bash
 npm ci && npm run build
-sudo rsync -a --delete dist/ /var/www/chatty/
+sudo rsync -a --delete dist/ /var/www/site/chatty/
 ```
 
 No Nginx reload needed. The service worker picks up the new `sw.js` (served `no-cache`); users may need one extra reload.
@@ -161,9 +163,5 @@ No Nginx reload needed. The service worker picks up the new `sw.js` (served `no-
 | Model/TTS loads fail with COEP errors in console | Same as above, or a proxy/CDN in front (e.g. Cloudflare) stripping headers. |
 | `.wasm` fails with "Incorrect response MIME type" | `application/wasm` mapping missing. |
 | Mic/WebGPU unavailable | Site not on HTTPS. |
-| Blank page, 404s for `/assets/...` | Deployed under a subpath, or `root` points at the wrong folder. |
+| Blank page, 404s for `assets/...` | Served from a path other than Vite's `base`, or `root` points at the wrong folder. |
 | Old version keeps showing | Service worker cache; hard-reload or DevTools → Application → Service Workers → Unregister. |
-
-## If it must live under a subpath (e.g. `/chatty/`)
-
-Not supported as-is. Needs code changes before building: set `base: '/chatty/'` in `vite.config.ts`, make the precache paths in `public/sw.js` relative to the SW scope, set `start_url`/`scope` in both manifests to `/chatty/`, and register the service worker with the right scope. Prefer a dedicated subdomain instead.
