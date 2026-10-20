@@ -28,6 +28,18 @@ export interface ResolvedTurnContext {
   estimatedTokens: number;
 }
 
+/**
+ * What every prompt carries besides the conversation, so the budgets below leave room for it.
+ * The defaults are the old, tiny estimate for a bare prompt; the orchestrator sets the real
+ * sizes (its system prompt is about 1,500 tokens, and phones have a 4,096-token window).
+ */
+export interface PromptReserve {
+  /** The system prompt and the format turns, which go out with every request */
+  fixedTokens: number;
+  /** Room for the reply: WebLLM keeps maxOutputTokens free inside the window */
+  outputTokens: number;
+}
+
 export class ConversationMemoryStore {
   private messages: ConversationMessage[] = [];
   private summary: ConversationSummary | null = null;
@@ -35,11 +47,29 @@ export class ConversationMemoryStore {
   private pendingProposals = new Map<string, CandidateMemoryProposal>();
 
   private readonly maxVerbatimTurns: number;
+  private readonly compactionSlack: number;
   private readonly defaultTokenBudget: number;
+  private promptReserve: PromptReserve = { fixedTokens: 150, outputTokens: 0 };
 
-  constructor(options?: { maxVerbatimTurns?: number; defaultTokenBudget?: number }) {
+  constructor(options?: { maxVerbatimTurns?: number; compactionSlack?: number; defaultTokenBudget?: number }) {
     this.maxVerbatimTurns = options?.maxVerbatimTurns ?? 8; // 8 messages = 4 user/assistant pairs
+    // Messages that may pile up beyond maxVerbatimTurns before the oldest are summarized away.
+    // 0 trims on every message, which shifts the start of the prompt each turn; a few extra
+    // messages let the prompt grow at its end only, so the desktop model's cache of it holds.
+    this.compactionSlack = options?.compactionSlack ?? 0;
     this.defaultTokenBudget = options?.defaultTokenBudget ?? 2048;
+  }
+
+  setPromptReserve(reserve: PromptReserve): void {
+    this.promptReserve = { fixedTokens: Math.max(0, reserve.fixedTokens), outputTokens: Math.max(0, reserve.outputTokens) };
+  }
+
+  /**
+   * Tokens of a context window the prompt may use: all of it, less the room kept for the reply
+   * (never more than half the window, so a tiny window still has a prompt).
+   */
+  usablePromptTokens(contextLimit: number): number {
+    return contextLimit - Math.min(this.promptReserve.outputTokens, Math.floor(contextLimit / 2));
   }
 
   // --------------------------------------------------------------------------
@@ -109,7 +139,8 @@ export class ConversationMemoryStore {
    */
   compactIfNecessary(customMaxTurns?: number): ConversationSummary | null {
     const limit = customMaxTurns ?? this.maxVerbatimTurns;
-    if (this.messages.length <= limit) {
+    // An explicit limit (a forced compaction) trims exactly; the automatic one waits for the slack
+    if (this.messages.length <= limit + (customMaxTurns === undefined ? this.compactionSlack : 0)) {
       return this.summary;
     }
 
@@ -356,7 +387,7 @@ export class ConversationMemoryStore {
     const resolvedReferencesNote = this.resolveAnaphoraAndOptions(userQuery);
 
     // 3. Respect token budget when selecting verbatim working messages
-    let usedTokens = this.estimateTokens(userQuery) + 120; // System prompt + overhead
+    let usedTokens = this.estimateTokens(userQuery) + this.promptReserve.fixedTokens; // System prompt + overhead
     if (this.summary) {
       usedTokens += this.estimateTokens(this.summary.summaryText);
     }
@@ -365,11 +396,13 @@ export class ConversationMemoryStore {
     }
 
     const selectedMessages: ConversationMessage[] = [];
+    const fixTurns = this.fixTurnIds();
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const msg = this.messages[i];
       const textToEstimate =
         msg.role === 'assistant' ? compactAssistantContent(msg) : msg.canonicalContent;
-      const msgTokens = this.estimateTokens(textToEstimate);
+      // Fix turns are left out of prompts, so they take no room in them
+      const msgTokens = fixTurns.has(msg.turnId) ? 0 : this.estimateTokens(textToEstimate);
       if (usedTokens + msgTokens > tokenBudget && selectedMessages.length >= 2) {
         break;
       }
@@ -432,6 +465,11 @@ export class ConversationMemoryStore {
     return null;
   }
 
+  /** Turns of Chatty's own "fix this error" requests (the user message and the reply to it) */
+  private fixTurnIds(): Set<string> {
+    return new Set(this.messages.filter((m) => m.role === 'user' && m.autoFix).map((m) => m.turnId));
+  }
+
   estimateTokens(text: string): number {
     if (!text) return 0;
     return Math.ceil(text.length / 4);
@@ -443,14 +481,16 @@ export class ConversationMemoryStore {
     if (!hasContent && !incomingQuery) {
       return 0;
     }
-    let tokens = 150; // System prompt baseline overhead when conversation is active
+    let tokens = this.promptReserve.fixedTokens; // System prompt and format turns, once a conversation is active
     if (this.summary?.summaryText) {
       tokens += this.estimateTokens(this.summary.summaryText);
     }
     for (const mem of this.getAllMemories()) {
       tokens += this.estimateTokens(`${mem.key}: ${mem.value}`);
     }
+    const fixTurns = this.fixTurnIds();
     for (const msg of this.messages) {
+      if (fixTurns.has(msg.turnId)) continue;
       const textToEstimate =
         msg.role === 'assistant' ? compactAssistantContent(msg) : msg.canonicalContent;
       tokens += this.estimateTokens(textToEstimate);
@@ -463,7 +503,11 @@ export class ConversationMemoryStore {
 
   isContextCompactionNeeded(contextLimit: number, incomingQuery = '', thresholdRatio = 0.85): boolean {
     if (this.messages.length === 0) return false;
+    const window = this.usablePromptTokens(contextLimit);
+    // When the fixed prompt alone fills the window, summarizing the history can't make room:
+    // compacting would only repeat on every turn
+    if (this.promptReserve.fixedTokens + this.estimateTokens(incomingQuery) >= window) return false;
     const tokens = this.getCurrentContextTokens(incomingQuery);
-    return tokens >= Math.floor(contextLimit * thresholdRatio);
+    return tokens >= Math.floor(window * thresholdRatio);
   }
 }

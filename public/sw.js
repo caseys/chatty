@@ -2,6 +2,13 @@
 // Chatty PWA Service Worker
 // Offline Caching for App Shell (HTML, CSS, JS, Icons, Manifest)
 // Model weights and OPFS binaries bypass the SW to prevent memory bloat/stalls.
+//
+// Caching strategy (every path is relative to the worker's own URL, so it works under /chatty/):
+//   - Page navigations: network-first, cached copy only when offline. A new deploy's index.html
+//     is therefore picked up on the next load and can't be shadowed by an old cached build.
+//   - <base>/assets/* (content-hashed by Vite): cache-first; a new build uses new file names.
+//   - Other same-origin shell files (icons, manifests): stale-while-revalidate.
+//   - Version-pinned jsdelivr runtime code: cache-first. Everything else cross-origin: untouched.
 // ============================================================================
 
 const CACHE_NAME_APP = 'chatty-app-v3';
@@ -34,11 +41,19 @@ const APP_SHELL_URLS = [
 self.addEventListener('install', (event) => {
   self.skipWaiting();
   event.waitUntil(
-    caches.open(CACHE_NAME_APP).then((cache) => {
-      return cache.addAll(APP_SHELL_URLS).catch((err) => {
-        console.warn('[Chatty SW] Pre-caching partial failure (safe to continue):', err);
-      });
-    })
+    caches.open(CACHE_NAME_APP).then((cache) =>
+      // One URL at a time (addAll caches nothing if any one fails), straight from the network so
+      // a new install never stores an old index.html out of the browser's HTTP cache
+      Promise.all(
+        APP_SHELL_URLS.map((url) =>
+          fetch(url, { cache: 'reload' })
+            .then((response) => (response.ok ? cache.put(url, response) : undefined))
+            .catch((err) => {
+              console.warn('[Chatty SW] Pre-caching failed for', url, err);
+            })
+        )
+      )
+    )
   );
 });
 
@@ -127,7 +142,10 @@ self.addEventListener('fetch', (event) => {
 
         try {
           const response = await fetch(request);
-          if (response && response.status === 200) {
+          // Not an HTML page: a server that answers a missing chunk with index.html must not get
+          // that page cached forever under the chunk's name
+          const isHtml = (response.headers.get('content-type') || '').includes('text/html');
+          if (response && response.status === 200 && !isHtml) {
             void cache.put(request, response.clone());
           }
           return response;

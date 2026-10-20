@@ -36,14 +36,14 @@ import {
 import {
   type ChattySettings,
   DEFAULT_SETTINGS,
-  DEFAULT_PHONE_CHAT_MODEL_ID,
   findLocalChatModel,
   SUPPORTED_CHAT_MODELS,
   type ModelOptionItem,
   loadSettingsFromStorage,
   saveSettingsToStorage,
   loadSpeechChoice,
-  isPhoneChatModel,
+  loadChatModelChoice,
+  resolvePhoneChatModelId,
 } from './settings.ts';
 import type {
   BrowserCapabilities,
@@ -487,9 +487,9 @@ export class VoiceAssistantEngine {
     // router + chat + coder phone pipeline for comparison.
     const splitPipeline =
       isConstrained && typeof location !== 'undefined' && new URLSearchParams(location.search).get('pipeline') === 'split';
-    if (isConstrained && !isPhoneChatModel(this.chatModelId)) {
-      this.chatModelId = DEFAULT_PHONE_CHAT_MODEL_ID;
-    }
+    // A phone that never chose a model gets the phone default, not the desktop recommendation
+    // (Gemma 4 E2B is phone-capable but only for a user who picked it); desktop keeps its own.
+    if (isConstrained) this.chatModelId = resolvePhoneChatModelId(loadChatModelChoice());
 
     // Crash-loop guard: the marker is set while the LLM loads and cleared once it settles. If it
     // is still present, the tab died mid-load (out of memory), so retry with the smaller model
@@ -1582,7 +1582,7 @@ export class VoiceAssistantEngine {
   async detectDevice(): Promise<void> {
     const caps = await this.modelManager.detectCapabilities();
     this.isPhone = caps.deviceProfile === 'constrained_mobile';
-    if (this.isPhone && !isPhoneChatModel(this.chatModelId)) this.chatModelId = DEFAULT_PHONE_CHAT_MODEL_ID;
+    if (this.isPhone) this.chatModelId = resolvePhoneChatModelId(loadChatModelChoice());
     // Speech starts off on phones (less memory); Settings can turn it on
     if (this.isPhone && loadSpeechChoice() === null) this.speechEnabled = false;
   }
@@ -1595,7 +1595,8 @@ export class VoiceAssistantEngine {
       if (settings.voiceId) this.voiceId = settings.voiceId;
       if (typeof settings.speechEnabled === 'boolean') this.speechEnabled = settings.speechEnabled;
       saveSettingsToStorage({
-        chatModelId: this.chatModelId,
+        // Only a model passed in is the user's choice; the one held in memory may be a default
+        ...(settings.chatModelId ? { chatModelId: this.chatModelId } : {}),
         codingModelId: this.codingModelId,
         voiceId: this.voiceId,
         speechEnabled: this.speechEnabled,

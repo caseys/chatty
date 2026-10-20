@@ -323,10 +323,9 @@ export class MinimalVoiceApp {
     // Tapping an example sends it as if typed (the tap also unlocks audio for the reply)
     this.chatExamplesEl?.addEventListener('click', (e) => {
       const example = (e.target as HTMLElement).closest('.chat-example');
-      if (!example || !this.chatInput) return;
+      if (!example || !this.chatInput || this.chatInput.disabled) return;
       this.chatInput.value = (example.textContent ?? '').replace(/[“”]/g, '').trim();
-      if (this.chatSendBtn?.disabled) this.chatInput.focus(); // still loading: send it when ready
-      else this.chatInputForm?.requestSubmit();
+      this.chatInputForm?.requestSubmit();
     });
 
     this.chatInputForm?.addEventListener('submit', (e) => {
@@ -896,7 +895,18 @@ export class MinimalVoiceApp {
             ? 'Continue'
             : 'Start';
     }
+    // Until the models are ready, everything but Settings is grayed out and can't be used
     if (this.chatSendBtn) this.chatSendBtn.disabled = isModelLoading;
+    if (this.chatInput) this.chatInput.disabled = isModelLoading;
+    if (this.toggleSidebarBtn) this.toggleSidebarBtn.disabled = isModelLoading;
+    if (this.clearScreenBtn) this.clearScreenBtn.disabled = isModelLoading;
+    const chips = this.chatExamplesEl?.querySelectorAll<HTMLButtonElement>('.chat-example') ?? [];
+    chips.forEach((chip) => {
+      chip.disabled = isModelLoading;
+    });
+    for (const el of [this.chatInput, this.chatSendBtn, this.toggleSidebarBtn, this.newBtn, this.clearScreenBtn, ...chips]) {
+      el?.classList.toggle('loading-blocked', isModelLoading);
+    }
 
     if (this.newBtn) {
       this.newBtn.hidden = false;
@@ -1309,7 +1319,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     } else {
       const registerSw = () => {
         navigator.serviceWorker
-          .register('/sw.js', { scope: '/' })
+          // The app lives under Vite's base ('/chatty/'), so the worker and its scope do too
+          .register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL })
           .then((reg) => {
             console.debug('[Chatty PWA] Service Worker registered:', reg.scope);
           })

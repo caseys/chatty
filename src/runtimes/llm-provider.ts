@@ -235,6 +235,16 @@ async function ensurePreinitializedWebGpuDevice(wasmModule: any): Promise<void> 
  */
 const GEMMA_SAMPLER = { type: 2 as const, k: 64, p: 0.95, temperature: 1.0 };
 
+/**
+ * What the conversation cache check compares in the message history: roles and contents, without
+ * the whitespace around each. A past program comes back in the history trimmed, while the cached
+ * conversation holds the reply as the model wrote it, newline and all; that difference changes
+ * nothing for the model, and compared byte for byte it threw the cache away.
+ */
+function historyKey(messages: ReadonlyArray<{ role: string; content: string }>): string {
+  return JSON.stringify(messages.map((m) => [m.role, m.content.trim()]));
+}
+
 export class LiteRtLlmProvider implements LlmRuntimeProvider {
   readonly id = 'litert-lm';
   readonly modelId: string;
@@ -557,20 +567,24 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
       }));
       const latestUserMessage =
         options.messages[options.messages.length - 1]?.content ?? '';
-      const priorMessagesJson = JSON.stringify(priorMessages);
+      const priorMessagesKey = historyKey(priorMessages);
 
       // Google's recommended Gemma sampling, whatever the caller asks for
       const targetTemperature = GEMMA_SAMPLER.temperature;
       const targetMaxOutputTokens = options.maxOutputTokens ?? this.maxOutputTokens;
 
       // Reuse the existing WebGPU Conversation & KV cache if the system prompt, prior turns,
-      // and session config (temperature, maxOutputTokens) match; otherwise recreate with updated preface.
+      // and session config (temperature, maxOutputTokens) match; otherwise recreate with updated
+      // preface, which processes the whole prompt (the ~1,500-token system prompt included) again.
+      // So a follow-up turn must repeat the last call's system prompt and messages, plus the
+      // reply it got, before its new message: the orchestrator keeps what it sends append-only
+      // for this (a fixed system prompt, per-request notes inside the request).
       let conversation = this.persistentConversation;
       const canReuse =
         Boolean(conversation) &&
         !conversation.isBusy &&
         this.cachedSystemPrompt === options.systemPrompt &&
-        this.cachedMessagesJson === priorMessagesJson &&
+        this.cachedMessagesJson === priorMessagesKey &&
         this.cachedTemperature === targetTemperature &&
         this.cachedMaxOutputTokens === targetMaxOutputTokens;
 
@@ -666,7 +680,7 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
           await this.clearPersistentConversation();
         } else {
           this.cachedSystemPrompt = options.systemPrompt;
-          this.cachedMessagesJson = JSON.stringify([
+          this.cachedMessagesJson = historyKey([
             ...priorMessages,
             { role: 'user', content: latestUserMessage },
             { role: 'model', content: fullText },

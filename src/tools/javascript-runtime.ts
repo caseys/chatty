@@ -1321,12 +1321,32 @@ export class JavascriptRuntime {
     document.getElementById = (id) => {
       const found = findElementById(id);
       if (found || typeof id !== 'string' || !id) return found;
-      const made = document.createElement('div');
+      // An id that sounds like a canvas gets a real one, or getContext('2d') would fail on a div
+      const isCanvas = /canvas/i.test(id);
+      const made = document.createElement(isCanvas ? 'canvas' : 'div');
+      if (isCanvas) {
+        made.setAttribute('width', '400');
+        made.setAttribute('height', '300');
+      }
       made.id = id;
       document.body.appendChild(made);
       placeholders.set(id, made);
       return made;
     };
+
+    // querySelector('#id') has the same problem: null here would throw before anything draws. A plain
+    // id selector (nothing else in it) gets the same stand-in; every other selector is left alone.
+    // A loose element not on the page still answers null, since it isn't looking at the page.
+    const SIMPLE_ID_SELECTOR = /^#(-?[A-Za-z_][\\w-]*)$/;
+    for (const proto of [Document.prototype, Element.prototype]) {
+      const findBySelector = proto.querySelector;
+      proto.querySelector = function (selector) {
+        const found = findBySelector.call(this, selector);
+        if (found || typeof selector !== 'string' || !SIMPLE_ID_SELECTOR.test(selector.trim())) return found;
+        if (this.nodeType === 1 && !this.isConnected) return found;
+        return document.getElementById(selector.trim().slice(1));
+      };
+    }
 
     // Small models wire elements up before writing the markup that creates them, or rewrite the
     // markup after wiring it. When an element with an id appears and an earlier element with that

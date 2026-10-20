@@ -48,7 +48,9 @@ const local = (
   sizeBytes: downloadMb * 1_000_000,
   // Phones: a 4,096-token context keeps the model's working memory small
   contextLimit: phone ? 4096 : 8192,
-  maxOutputTokens: 1536,
+  // Room kept for the reply (a whole program; the longest seen are ~700 tokens). Less on phones
+  // leaves more of the small context for the conversation.
+  maxOutputTokens: phone ? 1280 : 1536,
   phone,
 });
 
@@ -84,6 +86,15 @@ export const SMALLEST_PHONE_CHAT_MODEL_ID = 'llama-3.2-1b';
 /** Whether phones offer (and keep) this chat model. */
 export function isPhoneChatModel(id: string): boolean {
   return SUPPORTED_CHAT_MODELS.some((m) => m.id === id && m.phone);
+}
+
+/**
+ * The chat model a phone runs: the one the user picked (see loadChatModelChoice) if phones can run
+ * it, otherwise the phone default. Phones don't follow the desktop default or recommendation:
+ * Gemma 4 E2B is phone-capable, but a phone only gets it when the user chose it.
+ */
+export function resolvePhoneChatModelId(chosen: string | null): string {
+  return chosen && isPhoneChatModel(chosen) ? chosen : DEFAULT_PHONE_CHAT_MODEL_ID;
 }
 
 export function findLocalChatModel(id: string): LocalChatModel | undefined {
@@ -188,7 +199,39 @@ export function loadSpeechChoice(): boolean | null {
   }
 }
 
+// Kept apart from the other settings for the same reason: the settings blob always holds a model
+// (any save of another setting writes the default one into it), so its presence says nothing about
+// whether the user picked a model
+const CHAT_MODEL_CHOICE_KEY = 'chatty_chat_model';
+
+/** The chat model the user picked and saved, or null if they never chose one. */
+export function loadChatModelChoice(): string | null {
+  try {
+    const chosen = localStorage.getItem(CHAT_MODEL_CHOICE_KEY);
+    if (chosen && SUPPORTED_CHAT_MODELS.some((m) => m.id === chosen)) return chosen;
+    // Settings saved before the choice was recorded: a model other than the untouched default
+    // can only have been picked by the user
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (raw) {
+      const stored = (JSON.parse(raw) as Partial<ChattySettings>).chatModelId;
+      if (stored && stored !== DEFAULT_SETTINGS.chatModelId && SUPPORTED_CHAT_MODELS.some((m) => m.id === stored)) {
+        return stored;
+      }
+    }
+  } catch {
+    // Storage unavailable or unreadable: nothing was chosen
+  }
+  return null;
+}
+
 export function saveSettingsToStorage(settings: Partial<ChattySettings>): ChattySettings {
+  if (typeof settings.chatModelId === 'string') {
+    try {
+      localStorage.setItem(CHAT_MODEL_CHOICE_KEY, settings.chatModelId);
+    } catch {
+      // Ignore storage errors in private browsing
+    }
+  }
   if (typeof settings.speechEnabled === 'boolean') {
     try {
       localStorage.setItem(SPEECH_CHOICE_KEY, settings.speechEnabled ? 'on' : 'off');

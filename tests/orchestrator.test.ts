@@ -115,10 +115,8 @@ class TestStubLlmProvider implements LlmRuntimeProvider {
     } else if (lower.includes('12 * 8')) {
       response = '12 multiplied by 8 equals 96.';
     } else if (lower.includes('response style')) {
-      const sys = [
-        options.systemPrompt,
-        ...options.messages.filter((m) => m.role === 'system').map((m) => m.content),
-      ].join('\n');
+      // Approved memories come with the request (notes), not in the system prompt
+      const sys = [options.systemPrompt, ...options.messages.map((m) => m.content)].join('\n');
       const match = sys.match(/response_style:\s*([^\n]+)/i);
       response = match
         ? `You prefer ${match[1].trim()} for your response style.`

@@ -1913,6 +1913,27 @@ body {
   cursor: progress;
 }
 
+/* Models still loading: the message box and the examples can't be used */
+.chat-input-field:disabled,
+.chat-example:disabled {
+  cursor: progress;
+  pointer-events: none;
+}
+
+/* Controls waiting for the models pulse until they're ready */
+.loading-blocked {
+  animation: loading-blocked-pulse 1.2s ease-in-out infinite alternate;
+}
+
+@keyframes loading-blocked-pulse {
+  from {
+    opacity: 0.3;
+  }
+  to {
+    opacity: 0.7;
+  }
+}
+
 /* Example phrases under the chat until the user first speaks */
 .chat-examples {
   flex-shrink: 0;
@@ -2243,7 +2264,8 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .context-meter-bar.busy::after {
+  .context-meter-bar.busy::after,
+  .loading-blocked {
     animation-duration: 3s;
   }
 }

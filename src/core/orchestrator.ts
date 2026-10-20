@@ -46,6 +46,17 @@ function errorText(message: string, line?: number): string {
   return line ? `Error at line ${line}: ${message}` : `Error: ${message}`;
 }
 
+/** The text of a `speak("…");` program that inspectExecutableCode made from a prose reply, or null */
+function proseOfSpeakCode(code: string): string | null {
+  const match = code.match(/^speak\(("(?:[^"\\]|\\.)*")\);$/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]) as string;
+  } catch {
+    return null;
+  }
+}
+
 /** How a reply's code went: ran, failed, still running (a song, a timer), or there was none */
 export interface RunStatus {
   kind: 'ok' | 'running' | 'error' | 'none';
@@ -313,11 +324,15 @@ export class ConversationOrchestrator {
   private lastRun: {
     turnId: string;
     code: string;
+    /** What the user asked for, so a fix request can lead with it (see fixRequest) */
+    task: string;
     isAutoFix: boolean;
     fixRequested: boolean;
     error: string | null;
     errorLine?: number;
   } | null = null;
+  // User messages that went out with notes added (see buildModelPrompt), by message id
+  private sentRequests = new Map<string, string>();
   // Phone pipeline (small models): router picks a tool / code / chat each turn
   private phonePipeline: {
     router: TurnRouter;
@@ -361,6 +376,9 @@ export class ConversationOrchestrator {
         this.tools.set(tool.name, tool);
       }
     }
+
+    // So the context meter and the budgets count the system prompt from the start
+    this.syncPromptReserve();
 
     const maxTtsQueueSize = options.maxTtsQueueSize ?? 256;
     this.ttsSynthesisQueue = new BoundedQueue<PhraseSegment>({
@@ -584,7 +602,9 @@ export class ConversationOrchestrator {
     const conversationId = this.getConversationId?.();
     this.activeTurnStartTime = performance.now();
 
-    // Context Compaction Check: When context exceeds threshold (>= 85%), compact before continuing
+    // Context Compaction Check: When context exceeds threshold (>= 85% of what the prompt may
+    // use: the window less the room for the reply), compact before continuing
+    this.syncPromptReserve();
     if (
       this.memoryStore.isContextCompactionNeeded(
         this.llmProvider.contextLimit,
@@ -617,8 +637,11 @@ export class ConversationOrchestrator {
     // Stage 2: Resolve context BEFORE adding current message so history is clean
     const resolvedContext = this.memoryStore.resolveContextForQuery(
       normalized,
-      Math.floor(this.llmProvider.contextLimit * 0.75)
+      Math.floor(this.memoryStore.usablePromptTokens(this.llmProvider.contextLimit) * this.compactionThreshold)
     );
+
+    // Chatty's own fix request is no reference to an earlier answer ("Your last program …")
+    if (options?.autoFix) resolvedContext.resolvedReferencesNote = null;
 
     // Commit user message to working memory
     this.memoryStore.addMessage(userMsg);
@@ -626,9 +649,11 @@ export class ConversationOrchestrator {
 
     // Stage 4: Choose a response mode (direct, clarification, verification, tool_execution)
     // Phone pipeline routes with Needle instead of keyword-matched tool execution
-    const responseMode = this.phonePipeline
-      ? 'direct'
-      : this.selectResponseMode(normalized, resolvedContext.workingMessages);
+    // (A fix request quotes the user's words, which must not pick a tool or a clarifying question)
+    const responseMode =
+      this.phonePipeline || options?.autoFix
+        ? 'direct'
+        : this.selectResponseMode(normalized, resolvedContext.workingMessages);
 
     // Stage 3: Build the prompt respecting model context budget
     // Editing the last program ("make it bigger")? Then the model needs that program's code;
@@ -643,6 +668,11 @@ export class ConversationOrchestrator {
       responseMode,
       programBeingEdited
     );
+    // Notes added to the request go out with it again in every later prompt (see buildModelPrompt)
+    const sentRequest = promptMessages[promptMessages.length - 1]?.content;
+    if (!this.phonePipeline && sentRequest && sentRequest !== normalized) {
+      this.rememberSentRequest(userMsg.id, sentRequest);
+    }
 
     // Prepare assistant message placeholder
     const turnMetrics: TurnMetrics = {
@@ -843,6 +873,13 @@ export class ConversationOrchestrator {
         // Phone chat model replies in prose only; only the coder's output is run as code
         const forceProse = !!this.phonePipeline && generationProvider !== this.phonePipeline.coder;
         let streamMode: 'unknown' | 'code' | 'prose' = forceProse ? 'prose' : 'unknown';
+        // Prose shows in the chat as it streams but is voiced once the reply is complete and known
+        // not to be a program ("Here's the code: …" is read aloud otherwise, before the code
+        // arrives). The phone chat model only ever writes prose, so there is nothing to wait for.
+        const voiceProseWhileStreaming = forceProse;
+        // A fix's reply stays out of the chat and the speakers until it has run: when it comes
+        // back as chat instead of the program, it is dropped (see lostProgram)
+        const quietReply = !!options?.autoFix;
         // Small models can fall into repeating one line forever: stop generating when they do
         const generationAbort = new AbortController();
         const abortGeneration = () => generationAbort.abort();
@@ -868,7 +905,7 @@ export class ConversationOrchestrator {
               if (cut >= 0) {
                 stoppedRepeating = true;
                 rawAccumulatedTokens = rawAccumulatedTokens.slice(0, cut);
-                if (streamMode === 'prose') {
+                if (streamMode === 'prose' && !quietReply) {
                   assistantMsg.canonicalContent = rawAccumulatedTokens;
                   this.events.onMessageUpdated?.({ ...assistantMsg });
                 }
@@ -890,12 +927,16 @@ export class ConversationOrchestrator {
                 (currentFull.length >= 10 && !/^\s*(?:speak|const|let|var|func|root|doc|win|import|\/\/|\/\*|`|<)/i.test(currentFull))
               ) {
                 streamMode = 'prose';
-                // Flush buffered prefix to canonicalContent
-                assistantMsg.canonicalContent = currentFull;
-                this.events.onTokenStream?.(turnId, currentFull, assistantMsg.canonicalContent);
-                this.events.onMessageUpdated?.({ ...assistantMsg });
-                for (const phrase of segmenter.push(currentFull)) {
-                  enqueuePhraseForSpeech(phrase);
+                if (!quietReply) {
+                  // Flush buffered prefix to canonicalContent
+                  assistantMsg.canonicalContent = currentFull;
+                  this.events.onTokenStream?.(turnId, currentFull, assistantMsg.canonicalContent);
+                  this.events.onMessageUpdated?.({ ...assistantMsg });
+                  if (voiceProseWhileStreaming) {
+                    for (const phrase of segmenter.push(currentFull)) {
+                      enqueuePhraseForSpeech(phrase);
+                    }
+                  }
                 }
                 return;
               }
@@ -906,18 +947,21 @@ export class ConversationOrchestrator {
               (currentFull.includes('```') || STREAM_CODE_LINE.test(currentFull) || STREAM_MARKUP.test(currentFull))
             ) {
               // Explanation followed by code (fenced or not, or markup): the code runs once the
-              // reply is complete; stop showing and voicing here so it isn't read aloud
+              // reply is complete; stop showing here (the explanation was never voiced)
               streamMode = 'code';
             }
             if (streamMode === 'prose') {
-              assistantMsg.canonicalContent += chunk;
-              this.events.onTokenStream?.(turnId, chunk, assistantMsg.canonicalContent);
-              this.events.onMessageUpdated?.({ ...assistantMsg });
-              const readyPhrases = segmenter.push(chunk);
-              for (const phrase of readyPhrases) {
-                enqueuePhraseForSpeech(phrase);
+              if (!quietReply) {
+                assistantMsg.canonicalContent += chunk;
+                this.events.onTokenStream?.(turnId, chunk, assistantMsg.canonicalContent);
+                this.events.onMessageUpdated?.({ ...assistantMsg });
+                if (voiceProseWhileStreaming) {
+                  for (const phrase of segmenter.push(chunk)) {
+                    enqueuePhraseForSpeech(phrase);
+                  }
+                }
               }
-            } else if (streamMode === 'code') {
+            } else if (streamMode === 'code' && !quietReply) {
               // Extract completed plain string arguments inside speak(...) calls.
               // Template literals with ${...} are left to the runtime onSpeak (real values).
               const speakMatches = Array.from(currentFull.matchAll(/speak\(\s*(["'`])([\s\S]*?)\1\s*\)/g));
@@ -1216,8 +1260,36 @@ export class ConversationOrchestrator {
           assistantMsg.rawCode = executableCode;
           assistantMsg.rawLlmOutput = rawContent;
 
-          if (isProse) {
+          // A fix that came back as chat or a bare speak(), or that no longer draws what the program
+          // drew, has lost the program. Nothing runs and nothing is said or shown; the original
+          // stays the current program (lastRun, lastAction) and the status says why.
+          const originalCode = options?.autoFix;
+          const lostProgram =
+            !!originalCode && (isTalkOnly(executableCode) || (programDraws(originalCode) && !programDraws(executableCode)));
+
+          if (lostProgram) {
+            const failed = this.lastRun;
+            this.events.onRunStatus?.(turnId, {
+              kind: 'error',
+              text: `The fix lost the program, so it was not run. ${failed?.error ? errorText(failed.error, failed.errorLine) : 'The program failed.'}`,
+            });
+          } else if (isProse) {
             this.events.onRunStatus?.(turnId, { kind: 'none', text: 'No code to run in this reply' });
+            // The reply is known not to be a program, so voice it now (not while it streamed, when
+            // it might still have turned into code). Nothing was voiced yet unless it is the phone
+            // chat model's, which is voiced as it streams.
+            const proseText = (assistantMsg.canonicalContent || proseOfSpeakCode(executableCode) || rawContent).trim();
+            if (rawContent.trim() && proseText && (assistantMsg.phrases?.length ?? 0) === 0) {
+              if (!assistantMsg.canonicalContent) {
+                // A short reply never left 'unknown' mode, so the chat has not shown it yet
+                assistantMsg.canonicalContent = proseText;
+                this.events.onTokenStream?.(turnId, proseText, proseText);
+                this.events.onMessageUpdated?.({ ...assistantMsg });
+              }
+              for (const phrase of segmenter.push(proseText + ' ')) {
+                enqueuePhraseForSpeech(phrase);
+              }
+            }
           } else {
             // Execute the generated output through the Universal Programmatic Agent Harness
             // Set once the run returns: later speak() calls come from timers/handlers the code left
@@ -1256,6 +1328,7 @@ export class ConversationOrchestrator {
             this.lastRun = {
               turnId,
               code: executableCode,
+              task: codeTask,
               isAutoFix: !!options?.autoFix,
               fixRequested: false,
               error: execResult.error ?? null,
@@ -1434,7 +1507,10 @@ export class ConversationOrchestrator {
     if (existingSummary?.summaryText) {
       lines.push(`[Prior Summary]: ${existingSummary.summaryText}`);
     }
+    // Chatty's own fix requests, and the replies to them, aren't part of the conversation
+    const fixTurnIds = new Set(messages.filter((m) => m.role === 'user' && m.autoFix).map((m) => m.turnId));
     for (const msg of messages) {
+      if (fixTurnIds.has(msg.turnId)) continue;
       const text = msg.canonicalContent.replace(/\s*\[Interrupted\]\s*$/, '').trim();
       if (!text || text.startsWith('[Error') || text === '[Response interrupted]') continue;
       const role = msg.role === 'user' ? 'User' : 'Assistant';
@@ -1480,7 +1556,7 @@ export class ConversationOrchestrator {
       kind: 'error',
       text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
-    const request = fixRequest(run.code, run.errorLine, run.error);
+    const request = fixRequest(run.task, run.code, run.errorLine, run.error);
     // A short pause before the model runs again, unless the user moves on meanwhile
     void settle(AFTER_HEAVY_MS).then(() => {
       if (this.scheduler.getActiveTurnId()) return;
@@ -1809,32 +1885,18 @@ export class ConversationOrchestrator {
     return 'direct';
   }
 
-  private buildModelPrompt(
-    userMessage: string,
-    context: ReturnType<ConversationMemoryStore['resolveContextForQuery']>,
-    mode: ResponseMode,
-    programBeingEdited: string | null = null
-  ): {
-    systemPrompt: string;
-    promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
-  } {
-    const systemParts: string[] = this.phonePipeline
+  /**
+   * The system prompt's parts that stay the same from turn to turn. The desktop model keeps its
+   * processed prompt (the KV cache) between turns only while the system prompt and the earlier
+   * messages are sent again exactly as before, so anything that varies with a request
+   * (memories, notes) goes into that request's message instead (see buildModelPrompt).
+   */
+  private staticPromptParts(): { head: string[]; tools: string[]; tail: string[] } {
+    const head = this.phonePipeline
       ? [`${this.phonePipeline.chatSystemPrompt} Current date and time: ${new Date().toLocaleString()}.`]
       : [CONCISE_VOICE_SYSTEM_PROMPT, EXAMPLES_PROMPT];
 
-    if (context.relevantMemories.length > 0) {
-      const memStr = context.relevantMemories.map((m) => `${m.key}: ${m.value}`).join('; ');
-      systemParts.push(`User approved memory: ${memStr}.`);
-    }
-
-    if (context.conversationSummary) {
-      systemParts.push(`Earlier conversation summary: ${context.conversationSummary.summaryText}`);
-    }
-
-    if (context.resolvedReferencesNote) {
-      systemParts.push(context.resolvedReferencesNote);
-    }
-
+    const tools: string[] = [];
     if (this.tools.size > 0) {
       const toolList = Array.from(this.tools.values())
         .map((t) => {
@@ -1844,20 +1906,89 @@ export class ConversationOrchestrator {
           return `- ${t.name}(${argsSignature}): ${t.description}`;
         })
         .join('\n');
-      systemParts.push(
+      tools.push(
         `Available Tools:\n${toolList}\nTo use a tool, output a single tool_call block:\n<|tool_call>call:<tool_name>{"<param>": "<value>"}<tool_call|>\nNever leave "arguments" empty.`
       );
     }
 
-    if (mode === 'clarification') {
-      systemParts.push(
-        'The user request is ambiguous and lacks prior context. Ask a brief, polite clarifying question.'
-      );
-    } else if (mode === 'verification') {
-      systemParts.push(
-        'Double-check factual accuracy and state exact verified figures concisely.'
-      );
+    // The format, restated after the examples and everything else
+    const tail = this.phonePipeline
+      ? []
+      : ['Reply with perfect JavaScript syntax ONLY. ALL messages to the user go through speak().'];
+    return { head, tools, tail };
+  }
+
+  /** Estimated tokens of what every prompt carries: the system prompt and the format turns */
+  private fixedPromptTokens(): number {
+    const { head, tools, tail } = this.staticPromptParts();
+    let tokens = this.memoryStore.estimateTokens([...head, ...tools, ...tail].join('\n'));
+    if (!this.phonePipeline) {
+      // A few tokens per message for the chat template's role markers
+      for (const turn of FORMAT_TURNS) tokens += this.memoryStore.estimateTokens(turn.content) + 4;
     }
+    return tokens;
+  }
+
+  /**
+   * Tells the memory store what each prompt carries besides the conversation, and the room the
+   * reply needs (WebLLM keeps maxOutputTokens free inside the window), so compaction and
+   * trimming start before the window overflows.
+   */
+  private syncPromptReserve(): void {
+    this.memoryStore.setPromptReserve({
+      fixedTokens: this.fixedPromptTokens(),
+      outputTokens: this.llmProvider.maxOutputTokens ?? 0,
+    });
+  }
+
+  /** Remember what a user message looked like when it was sent, so later prompts repeat it exactly */
+  private rememberSentRequest(messageId: string, content: string): void {
+    this.sentRequests.delete(messageId);
+    this.sentRequests.set(messageId, content);
+    // Only messages still in the history matter, and that is a handful
+    for (const oldest of this.sentRequests.keys()) {
+      if (this.sentRequests.size <= 32) break;
+      this.sentRequests.delete(oldest);
+    }
+  }
+
+  private buildModelPrompt(
+    userMessage: string,
+    context: ReturnType<ConversationMemoryStore['resolveContextForQuery']>,
+    mode: ResponseMode,
+    programBeingEdited: string | null = null
+  ): {
+    systemPrompt: string;
+    promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+  } {
+    const { head, tools, tail } = this.staticPromptParts();
+    const systemParts: string[] = [...head];
+
+    // What applies to this request only: memories picked for it, a reference it makes, how to
+    // answer it. In the system prompt these would change it on most turns, and the model would
+    // have to process the whole prompt again; with the request they stay with it.
+    const notes: string[] = [];
+    if (context.relevantMemories.length > 0) {
+      const memStr = context.relevantMemories.map((m) => `${m.key}: ${m.value}`).join('; ');
+      notes.push(`User approved memory: ${memStr}.`);
+    }
+    if (context.resolvedReferencesNote) {
+      notes.push(context.resolvedReferencesNote);
+    }
+    if (mode === 'clarification') {
+      notes.push('The user request is ambiguous and lacks prior context. Ask a brief, polite clarifying question.');
+    } else if (mode === 'verification') {
+      notes.push('Double-check factual accuracy and state exact verified figures concisely.');
+    }
+    // The phone chat model's prompt keeps them in the system prompt (it has no prompt cache to protect)
+    if (this.phonePipeline) systemParts.push(...notes);
+
+    // The summary changes only when older messages leave the history, which changes the start
+    // of the messages too
+    if (context.conversationSummary) {
+      systemParts.push(`Earlier conversation summary: ${context.conversationSummary.summaryText}`);
+    }
+    systemParts.push(...tools);
 
     const promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> =
       this.phonePipeline ? [] : FORMAT_TURNS.map((t) => ({ ...t }));
@@ -1865,8 +1996,16 @@ export class ConversationOrchestrator {
     // Assistant messages before the user's first one are the app's own (the welcome greeting).
     // Sent, they'd merge into the format turn's reply (consecutive turns are joined): left out.
     let userHasSpoken = false;
+    // Chatty's own "fix this error" turns and the replies to them stay out of later prompts: the
+    // chat hides them, and a model that sees them answers the next request the same way
+    const fixTurnIds = new Set(
+      context.workingMessages.filter((m) => m.role === 'user' && m.autoFix).map((m) => m.turnId)
+    );
+    // The request text of the last user message kept, as the user wrote it (for describePastProgram)
+    let lastAsk = '';
 
     for (const msg of context.workingMessages) {
+      if (fixTurnIds.has(msg.turnId)) continue;
       if (msg.role === 'user') userHasSpoken = true;
       else if (msg.role === 'assistant' && !userHasSpoken) continue;
       if (msg.role === 'assistant') {
@@ -1875,7 +2014,7 @@ export class ConversationOrchestrator {
         // Phone chat model (split pipeline) sees only what was said.
         if (!this.phonePipeline && !(programBeingEdited && msg.rawCode === programBeingEdited)) {
           const prev = promptMessages[promptMessages.length - 1];
-          const described = describePastProgram(msg, prev?.role === 'user' ? prev.content : '');
+          const described = describePastProgram(msg, prev?.role === 'user' ? lastAsk : '');
           if (described) {
             if (prev?.role === 'user') promptMessages.pop();
             pastPrograms.push(described);
@@ -1905,9 +2044,11 @@ export class ConversationOrchestrator {
         if (!cleaned || cleaned === '[Response interrupted]' || cleaned.startsWith('[Error')) {
           continue;
         }
+        lastAsk = cleaned;
         promptMessages.push({
           role: msg.role,
-          content: cleaned,
+          // As it was sent: with the notes it carried, so the earlier prompt is repeated exactly
+          content: this.sentRequests.get(msg.id) ?? cleaned,
         });
       }
     }
@@ -1920,18 +2061,19 @@ export class ConversationOrchestrator {
 
     promptMessages.push({
       role: 'user',
-      content: userMessage,
+      content:
+        notes.length > 0 && !this.phonePipeline
+          ? `Notes (not part of the request):\n${notes.map((n) => `- ${n}`).join('\n')}\n\nRequest: ${userMessage}`
+          : userMessage,
     });
 
+    // Changes only when a program leaves the messages (which changes their start as well)
     if (pastPrograms.length > 0) {
       systemParts.push(
         `Programs you ran earlier in this conversation (write a complete new program for each request):\n${pastPrograms.slice(-8).join('\n')}`
       );
     }
-    // The format, restated after the examples and everything else
-    if (!this.phonePipeline) {
-      systemParts.push('Reply with perfect JavaScript syntax ONLY. ALL messages to the user go through speak().');
-    }
+    systemParts.push(...tail);
     const systemPrompt = systemParts.join('\n');
     return { systemPrompt, promptMessages };
   }
