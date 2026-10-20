@@ -504,6 +504,12 @@ export class MinimalVoiceApp {
 
       this.settingsDialog?.close();
 
+      // Saving settings before anything was asked is also Start (voice on): the same tap that
+      // starts the audio starts listening
+      const noInputYet = !(this.engine.getActiveConversation()?.messages ?? []).some((m) => m.role === 'user');
+      const micOff = this.engine.stateCoordinator.getSnapshot().microphone !== 'listening';
+      const startListening = newSpeechEnabled && noInputYet && micOff;
+
       const hasChanges =
         newChatModelId !== current.chatModelId ||
         newCodingModelId !== current.codingModelId ||
@@ -521,6 +527,10 @@ export class MinimalVoiceApp {
           speechEnabled: newSpeechEnabled,
         });
         await this.settingsApplying;
+        this.updateUiState();
+      }
+      if (startListening && this.engine.stateCoordinator.getSnapshot().microphone !== 'listening') {
+        await this.engine.toggleMicrophone();
         this.updateUiState();
       }
     });
