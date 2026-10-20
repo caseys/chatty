@@ -97,12 +97,15 @@ export class MinimalVoiceApp {
   private wakeLockSentinel: WakeLockSentinelLike | null = null;
   private keepAwakeRetryTimer = 0;
   private screenVisualLayer = document.getElementById('screen-visual-layer') as HTMLElement | null;
-  private clearScreenBtn = document.getElementById('btn-clear-screen') as HTMLButtonElement | null;
   // A program still making sound or with timers pending (a loop, a countdown): the bottom button shows as Stop
   private programSounding = false;
   private programRunning = false;
   // Set by updateUiState: the bottom button stops the program (nothing else to stop)
   private stopButtonStopsProgram = false;
+  /** Something is drawn in the card (the combined button offers Clear when nothing else applies) */
+  private screenHasContent = false;
+  /** What the combined bottom button does now: Stop has priority, Clear is the last resort */
+  private mainButtonClears = false;
 
   private jsIframeContainer = document.getElementById('js-runtime-iframe-container');
 
@@ -389,6 +392,12 @@ export class MinimalVoiceApp {
       } catch {
         // ignore haptic errors
       }
+      // Clear: the last resort, when nothing runs and voice is off
+      if (this.mainButtonClears) {
+        this.resetVisualScreen();
+        this.updateUiState();
+        return;
+      }
       // Stop with only a program running (a music loop): stops the program
       if (this.stopButtonStopsProgram) {
         this.resetVisualScreen();
@@ -424,10 +433,6 @@ export class MinimalVoiceApp {
       if (window.innerWidth <= 640) {
         this.toggleSidebar(false);
       }
-    });
-
-    this.clearScreenBtn?.addEventListener('click', () => {
-      this.resetVisualScreen();
     });
 
     this.toggleSidebarBtn?.addEventListener('click', () => {
@@ -950,12 +955,17 @@ export class MinimalVoiceApp {
     const programActive = this.programSounding || this.programRunning;
     this.stopButtonStopsProgram = programActive && !isActive;
 
-    // Speech off: no Start (chat is typed) and no waveforms; the button only appears as Stop
+    // One button, by priority: Stop (busy, listening, a program running) > Start/Continue (voice
+    // on) > Clear (something on screen, nothing else to do) > hidden
     const speechOn = this.engine.isSpeechEnabled();
+    const stopping = isActive || programActive;
+    this.mainButtonClears = !isModelLoading && !stopping && !speechOn && this.screenHasContent;
     if (this.micBtn) {
       this.micBtn.disabled = isModelLoading;
-      this.micBtn.classList.toggle('listening', isActive || programActive);
-      this.micBtn.hidden = !speechOn && !canInterrupt && !programActive;
+      this.micBtn.classList.toggle('listening', stopping);
+      this.micBtn.classList.toggle('clearing', this.mainButtonClears);
+      this.micBtn.hidden = !speechOn && !stopping && !this.mainButtonClears;
+      this.micBtn.setAttribute('aria-label', this.mainButtonClears ? 'Clear the screen' : 'Start or stop voice');
     }
     const waves = document.querySelector<HTMLElement>('.chat-waveforms');
     if (waves) waves.hidden = !speechOn;
@@ -965,22 +975,23 @@ export class MinimalVoiceApp {
     if (this.micLabel) {
       this.micLabel.textContent = isModelLoading
         ? 'Loading…'
-        : isActive || programActive
+        : stopping
           ? 'Stop'
-          : hasHistory
-            ? 'Continue'
-            : 'Start';
+          : this.mainButtonClears
+            ? 'Clear'
+            : hasHistory
+              ? 'Continue'
+              : 'Start';
     }
     // Until the models are ready, everything but Settings is grayed out and can't be used
     if (this.chatSendBtn) this.chatSendBtn.disabled = isModelLoading;
     if (this.chatInput) this.chatInput.disabled = isModelLoading;
     if (this.toggleSidebarBtn) this.toggleSidebarBtn.disabled = isModelLoading;
-    if (this.clearScreenBtn) this.clearScreenBtn.disabled = isModelLoading;
     const chips = this.chatExamplesEl?.querySelectorAll<HTMLButtonElement>('.chat-example') ?? [];
     chips.forEach((chip) => {
       chip.disabled = isModelLoading;
     });
-    for (const el of [this.chatInput, this.chatSendBtn, this.toggleSidebarBtn, this.newBtn, this.clearScreenBtn, ...chips]) {
+    for (const el of [this.chatInput, this.chatSendBtn, this.toggleSidebarBtn, this.newBtn, ...chips]) {
       el?.classList.toggle('loading-blocked', isModelLoading);
     }
 
@@ -1355,10 +1366,13 @@ export class MinimalVoiceApp {
   }
 
   /** Fully resets the agent's visual screen (iframe document, timers, audio) and click capture. */
-  /** Shows the drawing layer, and the Clear button only while something is drawn on it. */
+  /** Shows the drawing layer; the combined button offers Clear while something is drawn on it. */
   private showScreenContent(hasContent: boolean): void {
     if (hasContent && this.screenVisualLayer) this.screenVisualLayer.hidden = false;
-    if (this.clearScreenBtn) this.clearScreenBtn.hidden = !hasContent;
+    if (this.screenHasContent !== hasContent) {
+      this.screenHasContent = hasContent;
+      this.updateUiState();
+    }
   }
 
   private resetVisualScreen(): void {
@@ -1418,17 +1432,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     }
   }
 
-  // Handle PWA installation prompt
+  // Install: only where the browser offers its own install prompt (Chrome, Edge, Android)
   let deferredInstallPrompt: any = null;
   const installBtn = document.getElementById('btn-install-app') as HTMLButtonElement | null;
-  const iosDialog = document.getElementById('dialog-ios-install') as HTMLDialogElement | null;
-  const closeIosDialogBtn = document.getElementById('btn-close-ios-dialog') as HTMLButtonElement | null;
-
   const isStandalone =
     window.matchMedia('(display-mode: standalone)').matches ||
     (navigator as any).standalone === true;
-
-  const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
 
   // iPhone: a quality warning in place of installing (the models that fit Safari are the smallest)
   // The memory the browser reports (Chrome's navigator.deviceMemory), which picks the phone model
@@ -1440,56 +1449,27 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   }
 
   const installField = document.getElementById('settings-install-field');
-  const iphoneWarning = isAppleMobile() && !!installField;
-  if (iphoneWarning && installField) {
+  if (isAppleMobile() && installField) {
     installField.innerHTML = '<p class="settings-safari-warning" role="note">⚠️ Quality degraded on iPhone Safari</p>';
+    installField.hidden = false;
   }
-  const isMacSafari =
-    /^((?!chrome|android).)*safari/i.test(navigator.userAgent) &&
-    !/chrome|chromium|edg/i.test(navigator.userAgent);
 
-  if (!isStandalone && !iphoneWarning) {
-    if (installBtn) {
-      installBtn.hidden = false;
-    }
-    // 1. Chrome / Edge / Android native prompt
+  if (!isStandalone) {
     window.addEventListener('beforeinstallprompt', (e) => {
       e.preventDefault();
       deferredInstallPrompt = e;
-      if (installBtn) {
-        installBtn.hidden = false;
-      }
+      if (installBtn) installBtn.hidden = false;
     });
-  } else {
-    if (installBtn) {
-      installBtn.hidden = true;
-    }
   }
 
   installBtn?.addEventListener('click', async () => {
-    const settingsDialog = document.getElementById('settings-dialog') as HTMLDialogElement | null;
-    if (settingsDialog && settingsDialog.open) {
-      settingsDialog.close();
-    }
-    if (deferredInstallPrompt) {
-      await deferredInstallPrompt.prompt();
-      const choice = await deferredInstallPrompt.userChoice;
-      if (choice.outcome === 'accepted') {
-        deferredInstallPrompt = null;
-        if (installBtn) installBtn.hidden = true;
-      }
-    } else {
-      iosDialog?.showModal();
-    }
-  });
-
-  closeIosDialogBtn?.addEventListener('click', () => {
-    iosDialog?.close();
-  });
-
-  iosDialog?.addEventListener('click', (e) => {
-    if (e.target === iosDialog) {
-      iosDialog.close();
+    if (!deferredInstallPrompt) return;
+    (document.getElementById('settings-dialog') as HTMLDialogElement | null)?.close();
+    await deferredInstallPrompt.prompt();
+    const choice = await deferredInstallPrompt.userChoice;
+    if (choice.outcome === 'accepted') {
+      deferredInstallPrompt = null;
+      installBtn.hidden = true;
     }
   });
 
@@ -1497,4 +1477,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     deferredInstallPrompt = null;
     if (installBtn) installBtn.hidden = true;
   });
+
+  // Share: the system share sheet, where the browser has one
+  const shareBtn = document.getElementById('btn-share-app') as HTMLButtonElement | null;
+  const shareData = { title: 'Chatty', url: location.origin + location.pathname };
+  if (shareBtn && typeof navigator.share === 'function' && (!navigator.canShare || navigator.canShare(shareData))) {
+    shareBtn.hidden = false;
+    shareBtn.addEventListener('click', () => {
+      navigator.share(shareData).catch(() => {
+        // Dismissed, or not allowed here
+      });
+    });
+  }
 }

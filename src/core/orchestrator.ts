@@ -243,6 +243,9 @@ const ACTION_REQUEST =
 /** Goes with the retry only (not into history) */
 const TALK_RETRY_NOTE = '\n(Write the JavaScript program that does this, then one speak() sentence about it.)';
 
+/** How many times the model may try to fix one request's program */
+const MAX_FIX_ATTEMPTS = 3;
+
 /** Markup in a streaming reply */
 const STREAM_MARKUP = /<(?:script|canvas|html|!doctype)\b/i;
 
@@ -276,6 +279,10 @@ export class ConversationOrchestrator {
     errorLine?: number;
     /** Slips already corrected without the model in this program (see runCorrected) */
     corrections?: number;
+    /** Which model fix this program came from (0: the reply to the request itself) */
+    fixAttempt?: number;
+    /** The request's own turn, which every fix of it stands for */
+    originalTurnId?: string;
   } | null = null;
   /** The system prompt last written to the run log, so it is logged only when it changes */
   private loggedSystemPrompt: { chat: string; text: string } | null = null;
@@ -518,8 +525,10 @@ export class ConversationOrchestrator {
       sttFinalizationLatencyMs?: number;
       /** The program that failed: this turn asks the model to fix it (see maybeAutoFix) */
       autoFix?: string;
-      /** A second fix, for the whole function around the failing line (see escalateFix) */
-      fixBlock?: { start: number; end: number };
+      /** A fix for the whole function around the failing line (see escalateFix) */
+      fixBlock?: { start: number; end: number; name?: string };
+      /** Which fix attempt this turn is (1 to MAX_FIX_ATTEMPTS) */
+      fixAttempt?: number;
     }
   ): Promise<ConversationMessage | null> {
     // Stage 1: Capture and normalize input
@@ -607,7 +616,7 @@ export class ConversationOrchestrator {
     // A fix turn is its own job: a short prompt about fixing and only the fix request (the
     // rules, examples and history are for writing programs, and small models rewrote the
     // program they saw there, bug and all). The turn whose program it fixes:
-    const fixedTurnId = options?.autoFix ? this.lastRun?.turnId : undefined;
+    const fixedTurnId = options?.autoFix ? (this.lastRun?.originalTurnId ?? this.lastRun?.turnId) : undefined;
     // The line the fix request marked, where the corrected line goes back
     const fixLine = options?.autoFix ? (options.fixBlock?.start ?? this.lastRun?.errorLine) : undefined;
     if (options?.autoFix) {
@@ -964,7 +973,8 @@ export class ConversationOrchestrator {
           const inspected = inspectExecutableCode(fixedProgram);
           // Comments go before it runs (and before it enters the history); a fix's program
           // already came without them
-          let executableCode = options?.autoFix ? inspected.code : stripComments(inspected.code);
+          // Trimmed like the runtime trims it, so error lines match the program kept here
+          let executableCode = (options?.autoFix ? inspected.code : stripComments(inspected.code)).trim();
           // Members its objects don't have (ctx.fillstyle, style.backgroundColour): a sure slip is
           // corrected now; anything else is reported after the run as its error (property-check.ts)
           const unknown = inspected.isProse ? [] : unknownMembers(executableCode);
@@ -990,8 +1000,12 @@ export class ConversationOrchestrator {
           // drew, has lost the program. Nothing runs and nothing is said or shown; the original
           // stays the current program (lastRun, lastAction) and the status says why.
           const originalCode = options?.autoFix;
+          // …or, asked for a whole function, sent back something that no longer declares it
+          const functionDropped =
+            !!options?.fixBlock?.name && !new RegExp(`\\bfunction\\s+${options.fixBlock.name}\\b`).test(executableCode);
           const lostProgram =
-            !!originalCode && (isTalkOnly(executableCode) || (programDraws(originalCode) && !programDraws(executableCode)));
+            !!originalCode &&
+            (isTalkOnly(executableCode) || (programDraws(originalCode) && !programDraws(executableCode)) || functionDropped);
           // Edits that matched nothing leave the same failing program: running it again would
           // only repeat the error (and its sounds and words)
           const unchangedProgram =
@@ -1015,9 +1029,12 @@ export class ConversationOrchestrator {
               kind: 'error',
               text: `${why}, so it was not run. ${failed?.error ? errorText(failed.error, failed.errorLine) : 'The program failed.'}`,
             });
-            // The same line back means the bug isn't on that line alone: once, ask for the whole
-            // function around it
-            if (unchangedProgram && !options?.fixBlock && failed?.error) this.escalateFix(failed);
+            // Another attempt, while there are any: the whole function around the failing line,
+            // with what went wrong with this reply
+            const attempt = options?.fixAttempt ?? 1;
+            if (failed?.error && attempt < MAX_FIX_ATTEMPTS) {
+              this.escalateFix(failed, attempt + 1, options?.fixBlock ? `Your last reply was not a working corrected function (${why.toLowerCase()}).` : undefined);
+            }
           } else if (isProse) {
             if (options?.autoFix) {
               this.finishFixLog('lost');
@@ -1102,6 +1119,8 @@ export class ConversationOrchestrator {
               fixRequested: false,
               error: execResult.error ?? null,
               errorLine: execResult.errorLine,
+              fixAttempt: options?.fixAttempt ?? 0,
+              originalTurnId: fixedTurnId ?? turnId,
             };
             this.events.onRunStatus?.(
               turnId,
@@ -1384,7 +1403,9 @@ export class ConversationOrchestrator {
       void this.runCorrected(run, hint.correction);
       return;
     }
-    if (run.isAutoFix) return;
+    // A fix's own program can fail too: the model gets up to MAX_FIX_ATTEMPTS tries per request
+    const attempt = (run.fixAttempt ?? 0) + 1;
+    if (attempt > MAX_FIX_ATTEMPTS) return;
     run.fixRequested = true;
     this.events.onRunStatus?.(turnId, {
       kind: 'error',
@@ -1397,12 +1418,16 @@ export class ConversationOrchestrator {
     this.startFixLog(run);
     appendRunLog(
       'retry',
-      `the program failed (${errorText(run.error, run.errorLine)}): asking the model to fix ${block ? `lines ${block.start}-${block.end}, which don't parse` : 'the marked line'}`
+      `the program failed (${errorText(run.error, run.errorLine)}): asking the model to fix ${block ? `lines ${block.start}-${block.end}, which don't parse` : 'the marked line'} (attempt ${attempt} of ${MAX_FIX_ATTEMPTS})`
     );
     // A short pause before the model runs again, unless the user moves on meanwhile
     void settle(AFTER_HEAVY_MS).then(() => {
       if (this.scheduler.getActiveTurnId()) return;
-      return this.submitUserInput(request, { autoFix: run.code, ...(block ? { fixBlock: { start: block.start, end: block.end } } : {}) });
+      return this.submitUserInput(request, {
+        autoFix: run.code,
+        fixAttempt: attempt,
+        ...(block ? { fixBlock: { start: block.start, end: block.end } } : {}),
+      });
     });
   }
 
@@ -1410,16 +1435,24 @@ export class ConversationOrchestrator {
    * A second fix, after one that changed nothing: the whole function around the failing line is
    * marked and asked for (line-fix.ts), and the reply replaces that function. Once per program.
    */
-  private escalateFix(run: NonNullable<typeof this.lastRun>): void {
+  private escalateFix(run: NonNullable<typeof this.lastRun>, attempt: number, note?: string): void {
     const block = enclosingFunction(run.code, run.errorLine);
     if (!block || !run.error) return;
     const hint = errorHint(run.code, run.error, run.errorLine, { ids: this.javascriptRuntime.pageIds?.() ?? [] });
-    const request = fixRequest(run.task, run.code, run.errorLine, run.error, hint?.text, block);
-    appendRunLog('retry', `the fix changed nothing: asking for the whole function${block.name ? ` ${block.name}()` : ''} (lines ${block.start}-${block.end})`);
+    const facts = [note, hint?.text].filter(Boolean).join(' ') || undefined;
+    const request = fixRequest(run.task, run.code, run.errorLine, run.error, facts, block);
+    appendRunLog(
+      'retry',
+      `the fix was not used: asking for the whole function${block.name ? ` ${block.name}()` : ''} (lines ${block.start}-${block.end}, attempt ${attempt} of ${MAX_FIX_ATTEMPTS})`
+    );
     this.startFixLog(run);
     void settle(AFTER_HEAVY_MS).then(() => {
       if (this.scheduler.getActiveTurnId()) return;
-      return this.submitUserInput(request, { autoFix: run.code, fixBlock: { start: block.start, end: block.end } });
+      return this.submitUserInput(request, {
+        autoFix: run.code,
+        fixAttempt: attempt,
+        fixBlock: { start: block.start, end: block.end, name: block.name || undefined },
+      });
     });
   }
 

@@ -900,7 +900,11 @@ export class JavascriptRuntime {
    * recreating the iframe document. Pending runs are settled with an error.
    */
   resetVisual(): Promise<void> {
-    return withActivity('clearing the screen', () => this.resetVisualNow());
+    return withActivity('clearing the screen', async () => {
+      await this.resetVisualNow();
+      // The screen is empty now (the page's buttons follow it)
+      this.onVisualChange?.(false, this.activeIframe);
+    });
   }
 
   /**

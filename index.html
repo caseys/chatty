@@ -39,10 +39,6 @@
           <img src="/mascott.png" alt="Chatty Mascot" class="minimal-mascot-img" width="120" height="112" />
         </div>
         <div class="minimal-top-right">
-          <button id="btn-clear-screen" class="minimal-corner-btn btn-clear-screen" type="button" aria-label="Clear the screen" title="Clear the screen" hidden>
-            <span class="btn-emoji" aria-hidden="true">🧹</span>
-            <span>Clear</span>
-          </button>
           <button id="btn-settings" class="minimal-corner-btn btn-settings corner-right" type="button" aria-label="Settings" title="Settings">
             <span class="btn-emoji" aria-hidden="true">⚙️</span>
           </button>
@@ -131,19 +127,6 @@
               </button>
             </div>
 
-            <dialog id="dialog-ios-install" class="ios-install-dialog">
-              <div class="ios-install-content">
-                <h3>Install Chatty</h3>
-                <p id="ios-install-instructions">
-                  In Safari, tap the <strong>Share</strong> button
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
-                  at the bottom, then choose <strong>"Add to Home Screen"</strong>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" width="18" height="18" rx="4"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>.
-                </p>
-                <button id="btn-close-ios-dialog" type="button" class="btn btn-secondary btn-sm">Got it</button>
-              </div>
-            </dialog>
-
             <!-- Settings Modal (Native <dialog>) -->
             <dialog id="settings-dialog" class="settings-dialog" aria-label="Settings">
               <div class="settings-dialog-content">
@@ -205,19 +188,14 @@
                     <button id="btn-clear-model-cache" class="btn btn-secondary" type="button">Clear model cache</button>
                   </div>
 
-                  <!-- App Installation -->
-                  <div id="settings-install-field" class="settings-field settings-install-field">
-                    <label class="settings-label">
-                      <span class="settings-label-title">App Installation</span>
-                      <span class="settings-label-desc">Install Chatty on your device for fast offline access</span>
-                    </label>
-                    <button id="btn-install-app" class="btn btn-secondary btn-settings-install" type="button" aria-label="Install Chatty App">
-                      <span class="btn-emoji" aria-hidden="true">📲</span>
-                      <span>Install Chatty App</span>
-                    </button>
-                  </div>
+                  <!-- iPhone: a quality note -->
+                  <div id="settings-install-field" class="settings-field settings-install-field" hidden></div>
 
                   <div class="settings-actions">
+                    <div class="settings-actions-start">
+                      <button id="btn-install-app" class="btn btn-secondary btn-icon-only" type="button" title="Install Chatty as an app" aria-label="Install Chatty as an app" hidden><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M5 21h14"/></svg></button>
+                      <button id="btn-share-app" class="btn btn-secondary btn-icon-only" type="button" title="Share Chatty" aria-label="Share Chatty" hidden><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg></button>
+                    </div>
                     <button id="btn-cancel-settings" type="button" class="btn btn-secondary">Cancel</button>
                     <button id="btn-save-settings" type="submit" class="btn btn-primary">Save Settings</button>
                   </div>

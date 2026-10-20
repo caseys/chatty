@@ -663,3 +663,46 @@ describe('a fix that changes nothing', () => {
     expect(executed[1]).toBe(`${fixedFunction}\nplayAll();\nspeak("Playing.");`);
   });
 });
+
+describe('more than one fix attempt', () => {
+  it("fixes a fix's own failing program, up to three attempts in all", async () => {
+    const program = 'function draw() {\n  boom();\n}\ndraw();\nspeak("Drawn.");';
+    const llm = new QueueLlm([
+      program,
+      '// Cause: boom is not defined\n  bang();',
+      '// Cause: bang is not defined\n  zap();',
+      '// Cause: zap is not defined\n  ok();',
+      '// Cause: never asked\n  done();',
+    ]);
+    const { executed, runtime } = fakeRuntime([
+      { error: 'boom is not defined', errorLine: 2 },
+      { error: 'bang is not defined', errorLine: 2 },
+      { error: 'zap is not defined', errorLine: 2 },
+      { error: 'ok is not defined', errorLine: 2 },
+    ]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Draw it');
+    await vi.waitFor(() => expect(executed.length).toBe(4), { timeout: 10000 });
+    await new Promise((r) => setTimeout(r, 1500));
+    // The request, then three fixes; the fourth error gets no fourth fix
+    expect(llm.turns.length).toBe(4);
+    expect(executed[3]).toContain('ok();');
+  });
+
+  it('does not run a function fix that drops the function, and asks again', async () => {
+    const program = 'function compile(gl) {\n  gl.make();\n  gl.bad();\n}\ncompile(x);\nspeak("Done.");';
+    const llm = new QueueLlm([
+      program,
+      '// Cause: same line\n  gl.make();',
+      '// Cause: dropped the function\nconst shader = 1;',
+      '// Cause: bad is wrong\nfunction compile(gl) {\n  gl.make();\n  gl.good();\n}',
+    ]);
+    const { executed, runtime } = fakeRuntime([{ error: 'gl.bad is not a function', errorLine: 2 }, {}]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Compile it');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    expect(llm.turns.length).toBe(4);
+    expect(executed[1]).toContain('gl.good();');
+    expect(executed[1]).toContain('function compile(gl)');
+  });
+});
