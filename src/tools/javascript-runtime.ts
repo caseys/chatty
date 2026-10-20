@@ -221,6 +221,76 @@ export async function syntaxErrorLine(code: string): Promise<number | undefined>
   }
 }
 
+/** Where the bracket that `close` closes opens (scanning back), or -1 */
+function matchingOpen(text: string, close: number, open: string, shut: string): number {
+  let depth = 0;
+  for (let i = close; i >= 0; i--) {
+    if (text[i] === shut) depth++;
+    else if (text[i] === open && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/**
+ * Where the innermost function around `pos` starts (where "async " goes): a function
+ * declaration or expression, an arrow function, or a method. Blocks of if/for/while and the like
+ * are skipped. -1 when there is none.
+ */
+function enclosingFunctionStart(src: string, pos: number): number {
+  let depth = 0;
+  for (let i = pos - 1; i >= 0; i--) {
+    if (src[i] === '}') depth++;
+    if (src[i] !== '{') continue;
+    if (depth > 0) {
+      depth--;
+      continue;
+    }
+    const head = src.slice(0, i).replace(/\s+$/, '');
+    if (head.endsWith('=>')) {
+      const params = head.slice(0, -2).replace(/\s+$/, '');
+      if (params.endsWith(')')) return matchingOpen(params, params.length - 1, '(', ')');
+      const name = params.match(/[\w$]+$/);
+      return name ? params.length - name[0].length : -1;
+    }
+    if (!head.endsWith(')')) continue; // else, try, an object literal…
+    const open = matchingOpen(head, head.length - 1, '(', ')');
+    if (open < 0) continue;
+    const before = head.slice(0, open);
+    const fn = before.match(/\bfunction\s*\*?\s*[\w$]*\s*$/);
+    if (fn) return before.length - fn[0].length;
+    const name = before.match(/([\w$]+)\s*$/);
+    if (name && !/^(?:if|for|while|switch|catch|with|return)$/.test(name[1])) return before.length - name[0].length;
+  }
+  return -1;
+}
+
+/**
+ * Small models use `await` (usually `(await navigator.requestMIDIAccess())`, copied from the music
+ * rule) inside a function that isn't async: a syntax error before anything runs. Such functions
+ * are made async. Only "async " is added, so line numbers stay the same.
+ */
+export async function makeAwaitingFunctionsAsync(code: string): Promise<string> {
+  if (!/\bawait\b/.test(code)) return code;
+  const { parse } = await import('acorn');
+  let src = code;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      parse(src, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true });
+      return src;
+    } catch (err) {
+      const pos = (err as { pos?: number }).pos;
+      if (typeof pos !== 'number') return src;
+      // The parser stops at the word after "await" (read as a plain name) or at "await" itself
+      const atAwait = /\bawait\s*$/.test(src.slice(0, pos)) || /^await\b/.test(src.slice(pos));
+      if (!atAwait) return src;
+      const at = enclosingFunctionStart(src, pos);
+      if (at < 0) return src;
+      src = `${src.slice(0, at)}async ${src.slice(at)}`;
+    }
+  }
+  return src;
+}
+
 /**
  * Inline handlers in a program's HTML (onclick="calc()") look names up globally, but programs run
  * as function bodies, where their functions stay local: those functions are made global too.
@@ -775,7 +845,7 @@ export class JavascriptRuntime {
     execOptions?: ExecutionContextOptions,
     modeOverride?: JavascriptExecutionMode
   ): Promise<JavascriptExecutionResult> {
-    const trimmedCode = code.trim();
+    const trimmedCode = (await makeAwaitingFunctionsAsync(code)).trim();
     const options = execOptions ?? this.defaultOptions;
     const runMode = modeOverride ?? this.mode;
     let result: JavascriptExecutionResult;

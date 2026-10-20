@@ -203,3 +203,29 @@ describe('repairing a broken model download', () => {
     expect([...store.keys()].map((k) => k.split('/').pop())).toEqual(['tensor-cache.json', 'params_shard_0.bin']);
   });
 });
+
+describe('await inside a function that is not async', () => {
+  it('makes that function async, keeping every line where it was', async () => {
+    const { makeAwaitingFunctionsAsync } = await import('../src/tools/javascript-runtime.ts');
+    const fix = makeAwaitingFunctionsAsync;
+    expect(await fix('function play() {\n  const out = (await navigator.requestMIDIAccess()).outputs.values().next().value;\n}\nplay();')).toBe(
+      'async function play() {\n  const out = (await navigator.requestMIDIAccess()).outputs.values().next().value;\n}\nplay();'
+    );
+    expect(await fix('setTimeout(() => {\n  const r = await fetch("x");\n}, 10);')).toBe('setTimeout(async () => {\n  const r = await fetch("x");\n}, 10);');
+    expect(await fix('items.forEach(item => {\n  await save(item);\n});')).toBe('items.forEach(async item => {\n  await save(item);\n});');
+    expect(await fix('function loop() {\n  for (let i = 0; i < 3; i++) {\n    if (i) {\n      await wait(1);\n    }\n  }\n}')).toBe(
+      'async function loop() {\n  for (let i = 0; i < 3; i++) {\n    if (i) {\n      await wait(1);\n    }\n  }\n}'
+    );
+    expect(await fix('const o = {\n  go() {\n    await x();\n  },\n};')).toBe('const o = {\n  async go() {\n    await x();\n  },\n};');
+    // Two functions, both fixed
+    expect(await fix('function a() { await x(); }\nfunction b() { await y(); }')).toBe('async function a() { await x(); }\nasync function b() { await y(); }');
+  });
+
+  it('leaves code that already parses alone, including top-level await', async () => {
+    const { makeAwaitingFunctionsAsync } = await import('../src/tools/javascript-runtime.ts');
+    const ok = 'const out = (await navigator.requestMIDIAccess()).outputs.values().next().value;\nasync function f() { await g(); }';
+    expect(await makeAwaitingFunctionsAsync(ok)).toBe(ok);
+    const broken = 'const a = ;';
+    expect(await makeAwaitingFunctionsAsync(broken)).toBe(broken);
+  });
+});
