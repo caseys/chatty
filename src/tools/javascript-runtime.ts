@@ -881,6 +881,16 @@ export class JavascriptRuntime {
   }
 
   /** True when a previous run left something on the visual screen (root or body-level elements). */
+  /** The element ids on the program's page now (for error hints: an id lookup that found nothing) */
+  pageIds(): string[] {
+    try {
+      const doc = this.activeIframe?.contentDocument;
+      return doc ? [...doc.querySelectorAll('[id]')].map((el) => el.id).filter((id) => id && id !== 'root') : [];
+    } catch {
+      return [];
+    }
+  }
+
   hasVisualContent(): boolean {
     try {
       const doc = this.activeIframe?.contentDocument;
@@ -1668,9 +1678,32 @@ export class JavascriptRuntime {
     const findElementById = document.getElementById.bind(document);
     // Stand-ins made for ids the page doesn't have yet (see carryWiring)
     const placeholders = new Map();
+    // An id one slip from an id on the page ('startbutton' for 'startButton', 'start_btn' for
+    // 'start-btn') means that element, not a new empty one
+    function sameIdLetters(id) { return id.replace(/[-_]/g, '').toLowerCase(); }
+    function oneEditApart(a, b) {
+      if (Math.abs(a.length - b.length) > 1) return false;
+      let i = 0;
+      while (i < a.length && i < b.length && a[i] === b[i]) i++;
+      return a.slice(i + 1) === b.slice(i + 1) || a.slice(i) === b.slice(i + 1) || a.slice(i + 1) === b.slice(i) ||
+        (a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2));
+    }
+    function slipOfId(id) {
+      const ids = [...document.querySelectorAll('[id]')].map((el) => el.id).filter((other) => other && other !== 'root' && !placeholders.has(other));
+      const same = ids.filter((other) => sameIdLetters(other) === sameIdLetters(id));
+      if (same.length === 1) return same[0];
+      if (id.length < 5) return null;
+      const close = ids.filter((other) => oneEditApart(other.toLowerCase(), id.toLowerCase()));
+      return close.length === 1 ? close[0] : null;
+    }
     document.getElementById = (id) => {
       const found = findElementById(id);
       if (found || typeof id !== 'string' || !id) return found;
+      const slip = slipOfId(id);
+      if (slip) {
+        imagined("getElementById('" + id + "') → '" + slip + "'");
+        return findElementById(slip);
+      }
       // An id that sounds like a canvas gets a real one, or getContext('2d') would fail on a div
       const isCanvas = /canvas/i.test(id);
       const made = document.createElement(isCanvas ? 'canvas' : 'div');

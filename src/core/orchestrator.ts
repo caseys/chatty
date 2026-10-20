@@ -38,6 +38,7 @@ import {
 } from '../tools/javascript-runtime.ts';
 import { appendRunLog } from './run-log.ts';
 import { applyFixReply, FIX_SYSTEM_PROMPT, fixRequest } from './line-fix.ts';
+import { errorHint } from './error-hints.ts';
 import { AFTER_HEAVY_MS, settle } from './settle.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 
@@ -269,7 +270,11 @@ export class ConversationOrchestrator {
     fixRequested: boolean;
     error: string | null;
     errorLine?: number;
+    /** Slips already corrected without the model in this program (see runCorrected) */
+    corrections?: number;
   } | null = null;
+  /** Programs whose slips were corrected and re-run, by turn: they stand for the turn's program in later prompts */
+  private correctedPrograms = new Map<string, string>();
   // User messages that went out with notes added (see buildModelPrompt), by message id
   private sentRequests = new Map<string, string>();
   // Phone pipeline (small models): router picks a tool / code / chat each turn
@@ -1248,20 +1253,73 @@ export class ConversationOrchestrator {
   }
 
   /**
+   * Runs the program again with a slipped method name corrected (ctx.fillrect → ctx.fillRect),
+   * without asking the model. What the program already said isn't said again. A new error goes
+   * through maybeAutoFix like any other.
+   */
+  private async runCorrected(run: NonNullable<typeof this.lastRun>, correction: { code: string; note: string }): Promise<void> {
+    const code = correction.code;
+    const named = correction.note;
+    appendRunLog('imagined', `${named}: corrected and run again`);
+    this.events.onRunStatus?.(run.turnId, { kind: 'running', text: `Corrected ${named}; running it again` });
+    this.events.onRawOutput?.(run.turnId, code);
+    if (this.javascriptRuntime.hasRunningProgram?.()) {
+      await this.javascriptRuntime.resetVisual();
+      await settle(AFTER_HEAVY_MS);
+    }
+    if (this.scheduler.getActiveTurnId()) return; // the user has moved on
+    const said = this.memoryStore.getMessages().find((m) => m.id === `msg_assistant_${run.turnId}`)?.canonicalContent ?? '';
+    const result = await this.javascriptRuntime.execute(code, undefined, {
+      onSpeak: (phrase) => {
+        if (phrase.trim() && !said.includes(phrase.trim())) void this.speakOutOfTurn(phrase);
+      },
+      audioContextAccessor: this.audioContextAccessor,
+    });
+    if (result.error && result.errorLine === undefined) result.errorLine = await syntaxErrorLine(code);
+    this.correctedPrograms.set(run.turnId, code);
+    if (this.lastAction?.kind === 'code' && this.lastAction.code === run.code) this.lastAction = { ...this.lastAction, code };
+    this.lastRun = {
+      ...run,
+      code,
+      error: result.error ?? null,
+      errorLine: result.errorLine,
+      fixRequested: false,
+      corrections: (run.corrections ?? 0) + 1,
+    };
+    this.events.onRunStatus?.(
+      run.turnId,
+      result.error
+        ? { kind: 'error', text: errorText(result.error, result.errorLine) }
+        : { kind: 'ok', text: `Ran in ${Math.max(1, Math.round(result.executionTimeMs))} ms (corrected ${named})` }
+    );
+    if (result.error) this.maybeAutoFix(run.turnId);
+  }
+
+  /**
    * One automatic fix per request: the error goes back to the model, shown the lines around it,
    * and it rewrites the program (see line-fix.ts).
    */
   private maybeAutoFix(turnId: string): void {
     const run = this.lastRun;
     if (!this.autoFixErrors) return;
-    if (!run || run.turnId !== turnId || !run.error || run.isAutoFix || run.fixRequested) return;
+    if (!run || run.turnId !== turnId || !run.error || run.fixRequested) return;
     if (this.scheduler.getActiveTurnId()) return; // the user has already moved on
+    // A sure slip (a method's wrong case, a typo of a declared name, an element id one slip
+    // from an id on the page) is corrected and run again without the model, even in a fix's
+    // program; anything else goes to the model with the facts it was missing (error-hints.ts)
+    const hint = errorHint(run.code, run.error, run.errorLine, { ids: this.javascriptRuntime.pageIds?.() ?? [] });
+    if (hint?.correction && hint.correction.code !== run.code && (run.corrections ?? 0) < 3) {
+      run.fixRequested = true;
+      void this.runCorrected(run, hint.correction);
+      return;
+    }
+    if (run.isAutoFix) return;
     run.fixRequested = true;
     this.events.onRunStatus?.(turnId, {
       kind: 'error',
       text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
-    const request = fixRequest(run.task, run.code, run.errorLine, run.error);
+    const request = fixRequest(run.task, run.code, run.errorLine, run.error, hint?.text);
     this.startFixLog(run);
     appendRunLog('retry', `the program failed (${errorText(run.error, run.errorLine)}): asking the model to fix the marked line`);
     // A short pause before the model runs again, unless the user moves on meanwhile
@@ -1652,8 +1710,12 @@ export class ConversationOrchestrator {
     // A working fix's program stands for the broken one it fixed (the broken message isn't edited)
     const fixedCode = new Map<string, string>();
     for (const m of context.workingMessages) {
-      if (m.role === 'assistant' && m.fixesTurnId && m.rawCode) fixedCode.set(m.fixesTurnId, m.rawCode);
+      if (m.role === 'assistant' && m.fixesTurnId && m.rawCode) {
+        fixedCode.set(m.fixesTurnId, this.correctedPrograms.get(m.turnId) ?? m.rawCode);
+      }
     }
+    // …and so does a program whose slips were corrected
+    for (const [turnId, code] of this.correctedPrograms) if (!fixedCode.has(turnId)) fixedCode.set(turnId, code);
 
     for (const stored of context.workingMessages) {
       if (fixTurnIds.has(stored.turnId)) continue;

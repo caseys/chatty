@@ -602,3 +602,27 @@ describe('the fix log', () => {
     }
   });
 });
+
+describe('missing methods', () => {
+  it('corrects a slipped method name and runs the program again, without the model', async () => {
+    const program = 'document.body.innerHTML = "<p></p>";\nconst box = document.getElementById("b");\nbox.querySelectorall("p");\nspeak("Done.");';
+    const llm = new QueueLlm([program]);
+    const { executed, runtime } = fakeRuntime([{ error: 'box.querySelectorall is not a function', errorLine: 3 }]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Make a box');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 5000 });
+    expect(executed[1]).toContain('box.querySelectorAll("p");');
+    // No fix turn: the model was asked once, for the program
+    expect(llm.turns.length).toBe(1);
+  });
+
+  it('gives the fix request the real methods of the object when the name is not a slip', async () => {
+    const program = 'const box = document.getElementById("b");\nbox.vanish();\nspeak("Gone.");';
+    const llm = new QueueLlm([program, 'box.remove();']);
+    const { runtime } = fakeRuntime([{ error: 'box.vanish is not a function', errorLine: 2 }]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Make the box vanish');
+    await vi.waitFor(() => expect(llm.turns.length).toBe(2), { timeout: 5000 });
+    expect(llm.turns[1].messages.at(-1)!.content).toMatch(/box is a HTMLElement, which has no vanish\(\)\. Its closest methods: /);
+  });
+});

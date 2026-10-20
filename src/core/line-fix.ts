@@ -22,7 +22,7 @@ const MARKER_LINE = /^\s*\/\/\s*(?:>>>|<<<)\s*ERROR\b.*$/;
 const INSTRUCTION_LINE =
   /^\s*(?:(?:Reply with|First write|Then write|Second write)\b.*(?:Cause|corrected|program)|(?:Marked line|Corrected line):?\s*$)/i;
 
-export function fixRequest(request: string, code: string, line: number | undefined, error: string): string {
+export function fixRequest(request: string, code: string, line: number | undefined, error: string, hint?: string): string {
   const task = request.replace(/\s+/g, ' ').trim().replace(/[.!?:,;\s]+$/, '').slice(0, 200);
   const problem = error.trim().replace(/\.+$/, '');
   const lines = code.split('\n');
@@ -36,6 +36,8 @@ export function fixRequest(request: string, code: string, line: number | undefin
   return [
     ...(task ? [`This program was written for: ${task}`] : []),
     at ? `It failed at the marked line: ${problem}` : `It failed: ${problem}`,
+    // What the object really has, when the error is a missing method (see method-hints.ts)
+    ...(hint ? [hint] : []),
     at
       ? 'Reply with one comment line saying what caused the error (// Cause: ...), then only the corrected marked line, without the ERROR comments.'
       : 'Reply with one comment line saying what caused the error (// Cause: ...), then the complete program with it fixed.',
