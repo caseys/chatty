@@ -1938,6 +1938,11 @@ body {
   margin-top: auto;
   margin-bottom: auto;
   text-align: center;
+  /* Taller than the panel (phones, 16px chips): it scrolls instead of being cut off */
+  flex-shrink: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .chat-panel .chat-examples:not([hidden]) .chat-examples-list {
