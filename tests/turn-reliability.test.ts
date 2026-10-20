@@ -594,8 +594,10 @@ describe('the fix log', () => {
       await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
       const log = JSON.parse(store.chatty_fix_log);
       expect(log.length).toBe(50);
-      expect(log.at(-1)).toMatchObject({ modelId: 'queue', error: 'boom is not defined', line: 3, outcome: 'lost' });
-      expect(log.at(-1).markedLine).toBe('root.appendChild(canvas);');
+      // The lost fix is followed by another attempt, with its own entry
+      const lost = log.find((e: { outcome?: string }) => e.outcome === 'lost');
+      expect(lost).toMatchObject({ modelId: 'queue', error: 'boom is not defined', line: 3 });
+      expect(lost.markedLine).toBe('root.appendChild(canvas);');
     } finally {
       vi.unstubAllGlobals();
     }
@@ -665,6 +667,22 @@ describe('a fix that changes nothing', () => {
 });
 
 describe('more than one fix attempt', () => {
+  it('asks again for a top-level line whose fix did not parse', async () => {
+    const program = 'const a = 1;\nboom();\nconst canvas = 2;\nspeak("Done.");';
+    const llm = new QueueLlm([
+      program,
+      '// Cause: remove it\nconst canvas = 2;',
+      '// Cause: remove it\nconsole.log(a);',
+    ]);
+    const { executed, runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 2 }, {}]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Do it');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    expect(llm.turns.length).toBe(3);
+    expect(llm.turns[2].messages.at(-1)!.content).toContain('not a working corrected line');
+    expect(executed[1]).toContain('console.log(a);');
+  });
+
   it("fixes a fix's own failing program, up to five attempts, each sampled differently and told earlier errors", async () => {
     const program = 'function draw() {\n  boom();\n}\ndraw();\nspeak("Drawn.");';
     const fixes = ['bang', 'bang2', 'zap', 'ok', 'fin', 'never'].map((name) => `// Cause: try ${name}\n  ${name}();`);

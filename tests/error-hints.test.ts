@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { errorHint } from '../src/core/error-hints.ts';
+import { dropUnusedPackages, errorHint } from '../src/core/error-hints.ts';
 
 describe('"x is not defined"', () => {
   it('says where a name is really declared when it is used outside that function', () => {
@@ -118,5 +118,32 @@ describe("a program's own copy of a helper", () => {
     const code = 'speak("Hi.");\nfunction speak(text) {\n  console.log(text);\n}\nspeak("Hi.");';
     expect(dropHelperCopies(code)).toEqual({ code: 'speak("Hi.");\nspeak("Hi.");', dropped: ['speak'] });
     expect(dropHelperCopies('const total = 1;\nspeak(total);').dropped).toEqual([]);
+  });
+});
+
+describe('packages the browser does not have', () => {
+  it('takes out a require whose names nothing uses', () => {
+    const code = "speak('Hi');\nconst { getBody } = require('shelljs');\nconst canvas = document.createElement('canvas');\n";
+    const { code: out, dropped } = dropUnusedPackages(code);
+    expect(dropped).toEqual(['shelljs']);
+    expect(out).toBe("speak('Hi');\nconst canvas = document.createElement('canvas');\n");
+  });
+
+  it('takes out unused import lines and bare requires', () => {
+    const code = "import _ from 'lodash';\nimport { a as b } from \"x\";\nrequire('dotenv').config();\nspeak('ok');";
+    const { code: out, dropped } = dropUnusedPackages(code);
+    expect(dropped).toEqual(['lodash', 'x', 'dotenv']);
+    expect(out).toBe("speak('ok');");
+  });
+
+  it('keeps a package the program uses, and tells the model what to do instead', () => {
+    const code = "const _ = require('lodash');\nspeak(_.sum([1, 2]));";
+    expect(dropUnusedPackages(code).dropped).toEqual([]);
+    expect(errorHint(code, "Can't find variable: require", 1)?.text).toMatch(/browser features/);
+  });
+
+  it('lists each variable once', () => {
+    const code = "const { getBody } = foo();\nconst c = 1;\nzap();";
+    expect(errorHint(code, 'zap is not defined', 3)?.text).toContain('Its variables: getBody, c.');
   });
 });

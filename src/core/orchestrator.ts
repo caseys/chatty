@@ -38,7 +38,7 @@ import {
 } from '../tools/javascript-runtime.ts';
 import { appendRunLog } from './run-log.ts';
 import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest } from './line-fix.ts';
-import { dropHelperCopies, errorHint } from './error-hints.ts';
+import { dropHelperCopies, dropUnusedPackages, errorHint } from './error-hints.ts';
 import { renameMembers, unknownMemberError, unknownMembers } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle } from './settle.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
@@ -1026,6 +1026,12 @@ export class ConversationOrchestrator {
               executableCode = copies.code;
               for (const name of copies.dropped) appendRunLog('imagined', `its own ${name} → the ready-made one: corrected before running`);
             }
+            // Packages the browser doesn't have, loaded and never used: taken out
+            const packages = dropUnusedPackages(executableCode);
+            if (packages.dropped.length > 0) {
+              executableCode = packages.code;
+              for (const from of packages.dropped) appendRunLog('imagined', `unused package '${from}' → removed: corrected before running`);
+            }
           }
           const isProse = inspected.isProse || forceProse;
           assistantMsg.rawCode = executableCode;
@@ -1068,7 +1074,7 @@ export class ConversationOrchestrator {
             // with what went wrong with this reply
             const attempt = options?.fixAttempt ?? 1;
             if (failed?.error && attempt < MAX_FIX_ATTEMPTS) {
-              this.escalateFix(failed, attempt + 1, options?.fixBlock ? `Your last reply was not a working corrected function (${why.toLowerCase()}).` : undefined);
+              this.escalateFix(failed, attempt + 1, `Your last reply was not a working corrected ${options?.fixBlock ? 'function' : 'line'} (${why.toLowerCase()}).`);
             }
           } else if (isProse) {
             if (options?.autoFix) {
@@ -1470,18 +1476,22 @@ export class ConversationOrchestrator {
   }
 
   /**
-   * A second fix, after one that changed nothing: the whole function around the failing line is
-   * marked and asked for (line-fix.ts), and the reply replaces that function. Once per program.
+   * Another fix, after one that was not used (lost, unchanged or not parsing): the whole function
+   * around the failing line is marked and asked for (line-fix.ts), and the reply replaces that
+   * function; outside any function, the marked line is asked for again.
    */
   private escalateFix(run: NonNullable<typeof this.lastRun>, attempt: number, note?: string): void {
+    if (!run.error) return;
+    // Outside any function, the marked line is asked for again (sampled differently, see fixSampling)
     const block = enclosingFunction(run.code, run.errorLine);
-    if (!block || !run.error) return;
     const hint = errorHint(run.code, run.error, run.errorLine, { ids: this.javascriptRuntime.pageIds?.() ?? [] });
     const facts = [note, earlierErrors(run.errorHistory, run.error), hint?.text].filter(Boolean).join(' ') || undefined;
-    const request = fixRequest(run.task, run.code, run.errorLine, run.error, facts, block);
+    const request = fixRequest(run.task, run.code, run.errorLine, run.error, facts, block ?? undefined);
     appendRunLog(
       'retry',
-      `the fix was not used: asking for the whole function${block.name ? ` ${block.name}()` : ''} (lines ${block.start}-${block.end}, attempt ${attempt} of ${MAX_FIX_ATTEMPTS})`
+      block
+        ? `the fix was not used: asking for the whole function${block.name ? ` ${block.name}()` : ''} (lines ${block.start}-${block.end}, attempt ${attempt} of ${MAX_FIX_ATTEMPTS})`
+        : `the fix was not used: asking for the marked line again (attempt ${attempt} of ${MAX_FIX_ATTEMPTS})`
     );
     this.startFixLog(run);
     void settle(AFTER_HEAVY_MS).then(() => {
@@ -1490,7 +1500,7 @@ export class ConversationOrchestrator {
         autoFix: run.code,
         fixAttempt: attempt,
         errorHistory: withError(run),
-        fixBlock: { start: block.start, end: block.end, name: block.name || undefined },
+        ...(block ? { fixBlock: { start: block.start, end: block.end, name: block.name || undefined } } : {}),
       });
     });
   }

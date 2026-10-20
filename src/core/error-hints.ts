@@ -122,7 +122,7 @@ function renameIdentifier(code: string, ast: AnyNode, from: string, to: string):
   return out;
 }
 
-const list = (names: string[], max = 10) => names.slice(0, max).join(', ') + (names.length > max ? ', …' : '');
+const list = (all: string[], max = 10, names = [...new Set(all)]) => names.slice(0, max).join(', ') + (names.length > max ? ', …' : '');
 
 /** 1. "x is not defined" */
 function notDefined(code: string, error: string, errorLine?: number): ErrorHint | null {
@@ -138,6 +138,9 @@ function notDefined(code: string, error: string, errorLine?: number): ErrorHint 
     return {
       text: `${name} is ${d.kind === 'parameter' ? 'a parameter' : 'declared'} ${where}${errorLine ? `, but line ${errorLine} is outside it` : ', but it is used outside it'}.`,
     };
+  }
+  if (name === 'require') {
+    return { text: "require() loads Node packages, which the browser doesn't have: do what the package did with browser features and the ready-made helpers." };
   }
   const topLevel = declared.filter((d) => !d.inside || d.kind === 'function');
   // A slip of a declared name, or of a browser global (requestAnimationFrme)
@@ -325,6 +328,83 @@ export function dropHelperCopies(code: string): { code: string; dropped: string[
     out = out.slice(0, start) + out.slice(end + after);
   }
   return { code: out, dropped: spans.map((s) => s.name).reverse() };
+}
+
+/** Names a declaration binds (`x`, `{ a, b: c }` → a, c, `[d, ...e]`) */
+function boundNames(pattern: AnyNode | null | undefined): string[] {
+  if (!pattern) return [];
+  if (pattern.type === 'Identifier') return [pattern.name as string];
+  if (pattern.type === 'ObjectPattern') return (pattern.properties as AnyNode[]).flatMap((p) => boundNames((p.value ?? p.argument) as AnyNode));
+  if (pattern.type === 'ArrayPattern') return (pattern.elements as AnyNode[]).flatMap((e) => boundNames(e));
+  if (pattern.type === 'RestElement') return boundNames(pattern.argument as AnyNode);
+  if (pattern.type === 'AssignmentPattern') return boundNames(pattern.left as AnyNode);
+  return [];
+}
+
+/** require('x'), or a member or call of one (require('x').y, require('x')()) */
+function isRequire(node: AnyNode | null | undefined): boolean {
+  if (!node) return false;
+  if (node.type === 'CallExpression') {
+    const callee = node.callee as AnyNode;
+    return (callee.type === 'Identifier' && callee.name === 'require') || isRequire(callee);
+  }
+  if (node.type === 'MemberExpression') return isRequire(node.object as AnyNode);
+  return false;
+}
+
+/**
+ * Packages a program loads that the browser doesn't have (`const { x } = require('shelljs')`,
+ * `import x from 'lodash'`): a top-level statement whose names nothing else uses is taken out,
+ * since it can only fail. One whose names are used stays, and its error goes to the model.
+ */
+export function dropUnusedPackages(code: string): { code: string; dropped: string[] } {
+  const dropped: string[] = [];
+  const unused = (rest: string, names: string[]) => {
+    const ast = tryParse(rest);
+    const used = new Set<string>();
+    if (ast) walk(ast, (n) => n.type === 'Identifier' && used.add(n.name as string));
+    return names.every((name) => (ast ? !used.has(name) : !new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}(?![\\w$])`).test(rest)));
+  };
+  // import lines (a script can't parse them, so they are found by their shape)
+  let out = code.replace(/^[ \t]*import\s+(?:([\w$\s{},*]+?)\s+from\s+)?(['"])([^'"\n]+)\2[ \t]*;?[ \t]*(?:\n|$)/gm, (line, clause: string | undefined, _q, from: string, offset: number, all: string) => {
+    const names = (clause ?? '')
+      .replace(/[{}]/g, ' ')
+      .split(',')
+      .map((part) => part.trim().split(/\s+as\s+/).pop()!.replace(/^\*\s*/, '').trim())
+      .filter(Boolean);
+    const rest = all.slice(0, offset) + all.slice(offset + line.length);
+    if (!unused(rest, names)) return line;
+    dropped.push(from);
+    return '';
+  });
+  const ast = tryParse(out);
+  if (!ast) return { code: out, dropped };
+  const spans: Array<{ start: number; end: number; from: string }> = [];
+  for (const statement of ast.body as AnyNode[]) {
+    let names: string[] | null = null;
+    let call: AnyNode | undefined;
+    if (statement.type === 'VariableDeclaration') {
+      const declarations = statement.declarations as AnyNode[];
+      if (declarations.every((d) => isRequire(d.init as AnyNode))) {
+        names = declarations.flatMap((d) => boundNames(d.id as AnyNode));
+        call = declarations[0].init as AnyNode;
+      }
+    } else if (statement.type === 'ExpressionStatement' && isRequire(statement.expression as AnyNode)) {
+      names = [];
+      call = statement.expression as AnyNode;
+    }
+    if (!names) continue;
+    if (!unused(out.slice(0, statement.start) + out.slice(statement.end), names)) continue;
+    let inner = call;
+    while (inner && !(inner.type === 'CallExpression' && (inner.callee as AnyNode).type === 'Identifier')) inner = (inner.callee ?? inner.object) as AnyNode;
+    const arg = (inner?.arguments as AnyNode[] | undefined)?.[0];
+    spans.push({ start: statement.start, end: statement.end, from: typeof arg?.value === 'string' ? (arg.value as string) : 'a package' });
+  }
+  for (const { start, end } of [...spans].reverse()) {
+    const after = out.slice(end).match(/^[ \t]*\n?/)?.[0].length ?? 0;
+    out = out.slice(0, start) + out.slice(end + after);
+  }
+  return { code: out, dropped: [...dropped, ...spans.map((s) => s.from)] };
 }
 
 /**
