@@ -4,6 +4,7 @@
 // Web Worker (headless background compute), and Direct Eval ((0, eval) strict).
 // ============================================================================
 
+import { parse } from 'acorn';
 import type { LlmRuntimeProvider, ToolDefinition } from '../types/index.ts';
 import { loopProtect } from './loop-protect.ts';
 import { playNotesHelper } from './music-tool.ts';
@@ -199,11 +200,37 @@ export function callUncalledFunctions(code: string): string {
     ...Array.from(code.matchAll(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(\s*\)\s*=>/gm), (m) => m[1]),
   ];
   if (declared.length === 0) return code;
-  const refs = (name: string) => code.match(new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}(?![\\w$])`, 'g'))?.length ?? 0;
-  const roots = declared.filter((name) => refs(name) === 1);
+  // A function's own body doesn't count: one that only calls itself (a loop, a timer) still needs
+  // its first call. Without a parse, every mention counts, so only the declaration may name it.
+  const own = topLevelFunctionRanges(code);
+  const refs = (name: string) => {
+    const range = own.get(name);
+    const text = range ? code.slice(0, range[0]) + code.slice(range[1]) : code;
+    return text.match(new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}(?![\\w$])`, 'g'))?.length ?? 0;
+  };
+  const roots = declared.filter((name) => refs(name) === (own.has(name) ? 0 : 1));
   let toCall = roots.filter((name) => /^(?:main|init|start|run|setup|draw|play|render|animate|create|build|show|make)/i.test(name));
   if (toCall.length === 0 && roots.length === declared.length) toCall = [declared[declared.length - 1]];
   return toCall.length ? `${code}\n${toCall.map((name) => `await ${name}();`).join('\n')}` : code;
+}
+
+/** Each top-level function's own source (its declaration), by name; empty when the code doesn't parse */
+function topLevelFunctionRanges(code: string): Map<string, [number, number]> {
+  const ranges = new Map<string, [number, number]>();
+  let program: ReturnType<typeof parse>;
+  try {
+    program = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true });
+  } catch {
+    return ranges;
+  }
+  for (const node of program.body) {
+    if (node.type === 'FunctionDeclaration' && node.id) ranges.set(node.id.name, [node.start, node.end]);
+    if (node.type !== 'VariableDeclaration') continue;
+    for (const d of node.declarations) {
+      if (d.id.type === 'Identifier' && /FunctionExpression$/.test(d.init?.type ?? '')) ranges.set(d.id.name, [d.start, d.end]);
+    }
+  }
+  return ranges;
 }
 
 /**

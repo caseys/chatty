@@ -56,6 +56,16 @@ describe('running code the model wrapped or forgot to call', () => {
     expect(callUncalledFunctions('const start = () => speak("x");')).toBe('const start = () => speak("x");\nawait start();');
   });
 
+  it('calls a function that only refers to itself (a loop or timer it never starts)', () => {
+    const code = 'function playLoop() {\n  out.send(["piano", "C4", 80, 500]);\n  setTimeout(playLoop, 500);\n}';
+    expect(callUncalledFunctions(code)).toBe(`${code}\nawait playLoop();`);
+    const arrow = 'const tick = () => { requestAnimationFrame(tick); };';
+    expect(callUncalledFunctions(arrow)).toBe(`${arrow}\nawait tick();`);
+    // Started from outside its body: left alone
+    const started = 'function playLoop() {\n  setTimeout(playLoop, 500);\n}\nplayLoop();';
+    expect(callUncalledFunctions(started)).toBe(started);
+  });
+
   it('still treats chat as prose', () => {
     expect(inspectExecutableCode('Sure, thanks').isProse).toBe(true);
     expect(inspectExecutableCode('I am doing well today, thanks for asking!').isProse).toBe(true);
