@@ -241,9 +241,9 @@ function normalizeFences(text: string): string {
 export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
   let cleaned = normalizeFences((rawText || '').trim());
 
-  // A whole HTML page (small models write one for "an app"): its markup goes on screen and its
-  // scripts run, as with an ```html block
-  if (/^(<!doctype html|<html[\s>])/i.test(cleaned)) {
+  // HTML instead of JavaScript (a whole page for "an app", or bare <canvas> + <script>): its
+  // markup goes on screen and its scripts run, as with an ```html block. Never spoken as prose.
+  if (/^<(?:!doctype\b|!--|[a-z][\w-]*[\s>/])/i.test(cleaned)) {
     return { code: callUncalledFunctions(htmlToCode(cleaned)), isProse: false };
   }
 

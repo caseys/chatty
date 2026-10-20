@@ -20,6 +20,13 @@ describe('running code the model wrapped or forgot to call', () => {
     expect(out.code).toContain('document.getElementById("b").onclick');
   });
 
+  it('runs bare HTML with a script instead of speaking it', () => {
+    const out = inspectExecutableCode('<canvas id="c" width="80" height="60"></canvas>\n\n<script>\nconst ctx = document.getElementById("c").getContext("2d");\nctx.fillRect(0, 0, 10, 10);\n</script>');
+    expect(out.isProse).toBe(false);
+    expect(out.code).toContain('<canvas id=\\"c\\"');
+    expect(out.code).toContain('ctx.fillRect(0, 0, 10, 10);');
+  });
+
   it('runs unfenced code between explanations', () => {
     const out = inspectExecutableCode('I will draw it now.\nconst c = document.createElement("canvas");\nroot.appendChild(c);\nThis creates a canvas.');
     expect(out.isProse).toBe(false);
