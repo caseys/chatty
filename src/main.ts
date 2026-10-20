@@ -329,10 +329,15 @@ export class MinimalVoiceApp {
 
   private bindEvents(): void {
     // Tapping the run status switches the raw panel between the code and the run log
-    this.runStatusEl?.addEventListener('click', () => {
+    this.runStatusEl?.addEventListener('click', (event) => {
+      const copy = (event.target as HTMLElement).closest('.run-copy');
+      if (copy) {
+        void this.copyRawPanel(copy as HTMLElement);
+        return;
+      }
       this.showingRunLog = !this.showingRunLog;
       this.setRawOutput(this.lastRawOutput);
-      const hint = this.runStatusEl?.querySelector('.run-log-toggle');
+      const hint = this.runStatusEl?.querySelector('.run-log-toggle:not(.run-copy)');
       if (hint) hint.textContent = this.showingRunLog ? 'code' : 'log';
     });
     // Tapping an example sends it as if typed (the tap also unlocks audio for the reply)
@@ -845,6 +850,33 @@ export class MinimalVoiceApp {
     this.rawOutputEl.scrollTop = this.rawOutputEl.scrollHeight;
   }
 
+  /** Copies what the code panel shows (the run log, or the code) and says so on the link */
+  private async copyRawPanel(link: HTMLElement): Promise<void> {
+    const text = this.showingRunLog ? this.engine.getRunLog() : (this.rawOutputEl?.textContent ?? '');
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch {
+      // No clipboard access (older Safari): copy through a hidden text area
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.style.cssText = 'position:fixed;opacity:0;';
+      document.body.append(area);
+      area.select();
+      try {
+        copied = document.execCommand('copy');
+      } catch {
+        copied = false;
+      }
+      area.remove();
+    }
+    link.textContent = copied ? 'copied' : 'copy failed';
+    setTimeout(() => {
+      if (link.isConnected) link.textContent = 'copy';
+    }, 1500);
+  }
+
   private setRunStatus(status: RunStatus | null): void {
     const el = this.runStatusEl;
     if (!el) return;
@@ -854,7 +886,11 @@ export class MinimalVoiceApp {
       const hint = document.createElement('span');
       hint.className = 'run-log-toggle';
       hint.textContent = this.showingRunLog ? 'code' : 'log';
-      el.append(hint);
+      // Copies what the panel shows: the run log, or the code
+      const copy = document.createElement('span');
+      copy.className = 'run-log-toggle run-copy';
+      copy.textContent = 'copy';
+      el.append(hint, copy);
     }
     // The run log grows with each run: keep it current while it's shown
     if (this.showingRunLog) this.setRawOutput(this.lastRawOutput);

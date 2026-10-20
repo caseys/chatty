@@ -2052,6 +2052,7 @@ body {
 /* Tap the run status for the run log (every program, speak() and clear()) */
 .run-log-toggle {
   float: right;
+  margin-left: 12px;
   text-decoration: underline;
   opacity: 0.7;
 }
