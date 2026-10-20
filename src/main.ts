@@ -25,6 +25,22 @@ type WakeLockSentinelLike = {
 };
 
 const SETTINGS_SEEN_KEY = 'chatty_settings_seen';
+const PRELOAD_RELOAD_KEY = 'chatty_preload_reload_at';
+
+// A tab opened before a deploy can lazily import a chunk the deploy deleted: reload once to pick up
+// the new build (at most once a minute, so a genuinely missing chunk can't loop).
+window.addEventListener('vite:preloadError', (event) => {
+  try {
+    const last = Number(sessionStorage.getItem(PRELOAD_RELOAD_KEY) ?? 0);
+    if (Date.now() - last < 60_000) return;
+    sessionStorage.setItem(PRELOAD_RELOAD_KEY, String(Date.now()));
+  } catch {
+    return;
+  }
+  event.preventDefault();
+  window.location.reload();
+});
+
 /** Matches the CSS breakpoint where the chat and code panels stack */
 const NARROW_LAYOUT = '(max-width: 760px)';
 
@@ -72,6 +88,8 @@ export class MinimalVoiceApp {
   private bubbles = new Map<string, HTMLElement>();
   private turnBubbles = new Map<string, HTMLElement>();
   private interimUserBubble: HTMLElement | null = null;
+  /** True while a saved chat is redrawn, so its messages appear without the entering animation */
+  private restoringChat = false;
   private downloadRate = { label: '', bytes: 0, time: 0, rate: 0 };
   private inputCanvas = document.getElementById('input-waveform') as HTMLCanvasElement | null;
   private outputCanvas = document.getElementById('output-waveform') as HTMLCanvasElement | null;
@@ -762,7 +780,7 @@ export class MinimalVoiceApp {
   /** App/status text inside the conversation panels, styled apart from what was said. */
   private createSystemNote(text: string): HTMLElement {
     const note = document.createElement('div');
-    note.className = 'system-note';
+    note.className = this.restoringChat ? 'system-note' : 'system-note entering';
     note.setAttribute('role', 'note');
     note.textContent = text;
     return note;
@@ -789,12 +807,14 @@ export class MinimalVoiceApp {
     summary: { summaryText: string } | null | undefined
   ): void {
     this.clearChatLog();
+    this.restoringChat = true;
     if (summary?.summaryText) this.showSummaryNote(summary.summaryText);
     for (const m of messages) {
       if (m.autoFix && m.fixNotice) this.addFixNotice(m);
       else if (m.role === 'user' && m.canonicalContent && !m.autoFix) this.addUserBubble(m);
       else if (m.role === 'assistant' && (m.canonicalContent || m.toolCall)) this.renderAssistantMessage(m);
     }
+    this.restoringChat = false;
     const lastReply = [...messages].reverse().find((m) => m.role === 'assistant');
     this.setRawOutput(lastReply?.rawLlmOutput || lastReply?.rawCode || '');
     this.scrollChatToBottom();
@@ -802,7 +822,7 @@ export class MinimalVoiceApp {
 
   private createBubble(role: 'user' | 'assistant'): HTMLElement {
     const row = document.createElement('div');
-    row.className = `chat-row ${role}`;
+    row.className = this.restoringChat ? `chat-row ${role}` : `chat-row ${role} entering`;
     const bubble = document.createElement('div');
     bubble.className = 'chat-bubble';
     row.appendChild(bubble);

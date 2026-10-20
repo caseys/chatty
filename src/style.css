@@ -1133,6 +1133,23 @@ body {
   transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
   -webkit-tap-highlight-color: transparent;
   user-select: none;
+  /* The glow layer (::before) sits behind the button's own background */
+  position: relative;
+  isolation: isolate;
+}
+
+/* Glow for the loading and Stop states: a fixed shadow whose opacity breathes, so the
+   animation stays on the compositor instead of repainting a box-shadow every frame */
+.minimal-start-btn::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  box-shadow: 0 6px 30px rgba(59, 130, 246, 0.6);
+  transition: opacity 0.25s ease;
 }
 
 .minimal-start-btn:hover:not(:disabled) {
@@ -1150,12 +1167,21 @@ body {
   opacity: 0.9;
   cursor: progress;
   transform: none;
-  animation: loadingGlow 1.6s infinite ease-in-out;
+  box-shadow: 0 4px 16px rgba(59, 130, 246, 0.2);
 }
 
-@keyframes loadingGlow {
-  0%, 100% { box-shadow: 0 4px 16px rgba(59, 130, 246, 0.2); }
-  50% { box-shadow: 0 6px 30px rgba(59, 130, 246, 0.6); }
+.minimal-start-btn:disabled::before {
+  animation: startGlow 1.6s infinite ease-in-out;
+}
+
+.minimal-start-btn.listening::before {
+  box-shadow: 0 0 34px 2px rgba(239, 68, 68, 0.55);
+  animation: startGlow 2.4s infinite ease-in-out;
+}
+
+@keyframes startGlow {
+  0%, 100% { opacity: 0.15; }
+  50% { opacity: 1; }
 }
 
 .minimal-btn-dot {
@@ -2358,4 +2384,292 @@ body {
   left: 18px;
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+/* ===== Motion polish =====
+   Only transform and opacity animate (filter on small elements); entrances run once.
+   Everything here is switched off or reduced under prefers-reduced-motion (end of section). */
+:root {
+  --ease-out-soft: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --focus-ring: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--accent);
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+}
+
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(6px); }
+}
+
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.96); }
+}
+
+@keyframes note-in {
+  from { opacity: 0; transform: translateX(-6px); }
+}
+
+@keyframes menu-in {
+  from { opacity: 0; transform: translateY(-4px) scale(0.96); }
+}
+
+/* New chat bubbles grow from their tail corner (main.ts marks new rows .entering; a restored
+   chat draws without it). The bubble animates, not the row, so an assistant reply that starts
+   empty (hidden) still animates when its first words appear. */
+.chat-row.entering > .chat-bubble {
+  animation: pop-in 0.32s var(--ease-out-soft) backwards;
+}
+
+.chat-row.user > .chat-bubble {
+  transform-origin: 100% 100%;
+  transition: opacity 0.2s ease;
+}
+
+.chat-row.assistant > .chat-bubble {
+  transform-origin: 0 100%;
+}
+
+/* "Trying to fix: …", "Interrupted" and other notes slide in from their rule */
+.system-note.entering {
+  animation: note-in 0.3s var(--ease-out-soft) backwards;
+}
+
+/* Run status line under the code panel */
+.run-status:not([hidden]) {
+  animation: rise-in 0.25s var(--ease-out-soft);
+}
+
+/* Suggestion chips: a short stagger whenever they appear, including when loading ends */
+.chat-examples:not([hidden]) .chat-examples-title {
+  animation: fade-in 0.3s ease;
+}
+
+.chat-example:not(.loading-blocked) {
+  animation: rise-in 0.34s var(--ease-out-soft) backwards;
+}
+
+.chat-examples-list li:nth-child(2) .chat-example { animation-delay: 30ms; }
+.chat-examples-list li:nth-child(3) .chat-example { animation-delay: 60ms; }
+.chat-examples-list li:nth-child(4) .chat-example { animation-delay: 90ms; }
+.chat-examples-list li:nth-child(5) .chat-example { animation-delay: 120ms; }
+.chat-examples-list li:nth-child(6) .chat-example { animation-delay: 150ms; }
+.chat-examples-list li:nth-child(n + 7) .chat-example { animation-delay: 180ms; }
+
+.chat-example:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  transform: translateY(-1px);
+}
+
+.chat-example:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+/* Buttons: lift on hover, press down on click */
+.btn {
+  transition: opacity 0.15s ease, background 0.15s ease, border-color 0.15s ease, transform 0.12s ease;
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: var(--fill-hover);
+}
+
+.chat-send-btn {
+  transition: transform 0.15s var(--ease-spring), background 0.15s ease, opacity 0.15s ease;
+}
+
+.chat-send-btn svg {
+  transition: transform 0.2s var(--ease-spring);
+}
+
+.chat-send-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+  transform: scale(1.06);
+}
+
+.chat-send-btn:hover:not(:disabled) svg {
+  transform: translate(1px, -1px);
+}
+
+.chat-send-btn:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+/* Icon nudges: the gear turns, the plus turns, the close cross turns */
+.minimal-corner-btn .btn-emoji,
+.sidebar-action-btn svg,
+.settings-close-x {
+  transition: transform 0.3s var(--ease-spring), background 0.15s ease, color 0.15s ease;
+}
+
+.minimal-corner-btn.btn-settings:hover:not(:disabled) .btn-emoji {
+  transform: rotate(60deg);
+}
+
+.minimal-corner-btn.btn-new-chat:hover:not(:disabled) .btn-emoji,
+#btn-sidebar-new-chat:hover svg {
+  transform: rotate(90deg);
+}
+
+.minimal-corner-btn:hover:not(:disabled) .sidebar-box-icon {
+  transform: scale(1.08);
+}
+
+.settings-close-x:hover {
+  transform: rotate(90deg);
+}
+
+.settings-close-x:active {
+  transform: rotate(90deg) scale(0.92);
+}
+
+#btn-clear-all-chats:hover svg {
+  transform: rotate(-8deg);
+}
+
+.chat-item:active {
+  transform: scale(0.99);
+}
+
+/* Keyboard focus: one consistent ring */
+.minimal-corner-btn:focus-visible,
+.minimal-start-btn:focus-visible,
+.sidebar-action-btn:focus-visible,
+.chat-send-btn:focus-visible,
+.chat-example:focus-visible,
+.chat-item-select-btn:focus-visible,
+.chat-item-menu-btn:focus-visible,
+.chat-menu-action:focus-visible,
+.settings-close-x:focus-visible,
+.btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-input-field:focus {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.chat-input-field {
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* Start/Stop: Stop pops in when it takes over; the glow breathes (see .minimal-start-btn::before) */
+.minimal-start-btn.listening {
+  animation: start-btn-pop 0.35s var(--ease-spring);
+}
+
+@keyframes start-btn-pop {
+  from { transform: scale(0.94); }
+}
+
+.minimal-btn-dot {
+  transition: background 0.2s ease, box-shadow 0.2s ease, transform 0.2s var(--ease-spring);
+}
+
+/* Mascot: grows while listening or speaking (the image itself is busy floating), and
+   tilts toward the pointer on hover */
+.minimal-mascot-container {
+  transition: transform 0.4s var(--ease-spring);
+}
+
+.minimal-mascot-container.listening,
+.minimal-mascot-container.speaking {
+  transform: scale(1.08);
+}
+
+@media (hover: hover) {
+  .minimal-mascot-container:hover {
+    transform: scale(1.06) rotate(-4deg);
+  }
+
+  .minimal-mascot-container:hover .minimal-mascot-img {
+    filter: drop-shadow(0 8px 20px rgba(56, 189, 248, 0.4));
+  }
+}
+
+/* Chats sidebar: the backdrop fades in (it was display:none until shown) */
+@starting-style {
+  .sidebar-backdrop:not([hidden]) {
+    opacity: 0;
+  }
+}
+
+/* Chat item menu drops down from its button */
+.chat-item-menu:not([hidden]) {
+  transform-origin: 100% 0;
+  animation: menu-in 0.16s var(--ease-out-soft);
+}
+
+/* Settings and debug dialogs: rise and scale in over a fading backdrop */
+.settings-dialog[open],
+.modal-dialog[open] {
+  animation: dialog-in 0.3s var(--ease-out-soft);
+}
+
+.settings-dialog[open]::backdrop,
+.modal-dialog[open]::backdrop {
+  animation: fade-in 0.25s ease;
+}
+
+@keyframes dialog-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+}
+
+.settings-brand-logo {
+  transition: transform 0.4s var(--ease-spring);
+}
+
+.settings-dialog[open] .settings-brand-logo {
+  animation: logo-in 0.5s var(--ease-spring) 0.05s both;
+}
+
+@keyframes logo-in {
+  from { opacity: 0; transform: scale(0.7) rotate(-10deg); }
+}
+
+@media (hover: hover) {
+  .settings-brand-logo:hover {
+    transform: scale(1.06) rotate(4deg);
+  }
+}
+
+/* Reduced motion: no movement; state changes are instant and the Start/Stop glow holds still */
+@media (prefers-reduced-motion: reduce) {
+  .chat-row.entering > .chat-bubble,
+  .system-note.entering,
+  .run-status:not([hidden]),
+  .chat-examples:not([hidden]) .chat-examples-title,
+  .chat-example:not(.loading-blocked),
+  .minimal-start-btn.listening,
+  .chat-item-menu:not([hidden]),
+  .settings-dialog[open],
+  .modal-dialog[open],
+  .settings-dialog[open]::backdrop,
+  .modal-dialog[open]::backdrop,
+  .settings-dialog[open] .settings-brand-logo,
+  .minimal-mascot-img,
+  .empty-mascot-img,
+  .pulse-dot,
+  .minimal-start-btn.listening .minimal-btn-dot {
+    animation: none;
+  }
+
+  .minimal-start-btn:disabled::before,
+  .minimal-start-btn.listening::before {
+    animation: none;
+    opacity: 0.6;
+  }
+
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+  }
 }

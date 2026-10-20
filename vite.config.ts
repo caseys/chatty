@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 
 // The commit being built: a new one opens Settings on its first load (see main.ts)
 function appVersion(): string {
@@ -9,6 +10,28 @@ function appVersion(): string {
   } catch {
     return 'dev';
   }
+}
+
+// Writes the build's assets/ file names into dist/sw.js (replacing its empty BUILD_ASSETS list),
+// so the worker can precache the current chunks and prune old ones. It also makes sw.js differ
+// on every build, which is what makes browsers install the new worker after a deploy.
+function swBuildAssets(): Plugin {
+  let outDir = 'dist';
+  return {
+    name: 'chatty-sw-build-assets',
+    apply: 'build',
+    configResolved(config) {
+      outDir = resolve(config.root, config.build.outDir);
+    },
+    closeBundle() {
+      const swPath = resolve(outDir, 'sw.js');
+      const assets = readdirSync(resolve(outDir, 'assets')).sort();
+      const sw = readFileSync(swPath, 'utf8');
+      const marker = '/*__BUILD_ASSETS__*/ []';
+      if (!sw.includes(marker)) throw new Error('sw.js has no BUILD_ASSETS marker');
+      writeFileSync(swPath, sw.replace(marker, JSON.stringify(assets)));
+    },
+  };
 }
 
 export default defineConfig({
@@ -25,6 +48,7 @@ export default defineConfig({
       },
     },
   },
+  plugins: [swBuildAssets()],
   worker: {
     format: 'es',
   },

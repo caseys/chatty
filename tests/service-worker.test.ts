@@ -11,7 +11,7 @@ const BASE = '/chatty/';
 type Handler = (event: Record<string, unknown>) => void;
 
 /** Runs public/sw.js against fake `self`, `caches` and `fetch`, served from /chatty/sw.js. */
-function loadWorker(network: (url: string) => Response | Promise<Response>) {
+function loadWorker(network: (url: string) => Response | Promise<Response>, source = SW_SOURCE) {
   const handlers: Record<string, Handler> = {};
   const stores = new Map<string, Map<string, Response>>();
   const fetched: string[] = [];
@@ -24,6 +24,8 @@ function loadWorker(network: (url: string) => Response | Promise<Response>) {
       put: async (r: string | { url: string }, res: Response) => {
         store.set(new URL(keyOf(r), ORIGIN).href, res);
       },
+      keys: async () => [...store.keys()].map((url) => ({ url })),
+      delete: async (r: string | { url: string }) => store.delete(new URL(keyOf(r), ORIGIN).href),
     };
   };
   const self = {
@@ -44,7 +46,7 @@ function loadWorker(network: (url: string) => Response | Promise<Response>) {
     fetched.push(url);
     return network(url);
   };
-  vm.runInNewContext(SW_SOURCE, { self, caches, fetch: fakeFetch, URL, Response, console });
+  vm.runInNewContext(source, { self, caches, fetch: fakeFetch, URL, Response, console, setTimeout });
 
   const run = async (type: string, event: Record<string, unknown>) => {
     let pending: Promise<unknown> | undefined;
@@ -83,6 +85,22 @@ describe('service worker under /chatty/', () => {
   beforeEach(() => {
     online = true;
     indexBody = 'build-1';
+  });
+
+  it("precaches the build's JS/CSS chunks (not wasm) and prunes old builds' assets, keeping model caches", async () => {
+    const built = SW_SOURCE.replace('/*__BUILD_ASSETS__*/ []', JSON.stringify(['app-new.js', 'style-new.css', 'big.wasm']));
+    const sw = loadWorker(network, built);
+    const app = await sw.cache('chatty-app-v3');
+    await app.put(`${BASE}assets/app-old.js`, js('old'));
+    await (await sw.cache('webllm/model')).put('https://huggingface.co/m/resolve/main/w.bin', js('weights'));
+    await sw.run('install', {});
+    expect(sw.fetched).toContain(`${ORIGIN}${BASE}assets/app-new.js`);
+    expect(sw.fetched).toContain(`${ORIGIN}${BASE}assets/style-new.css`);
+    expect(sw.fetched.some((u) => u.endsWith('.wasm'))).toBe(false);
+    await sw.run('activate', {});
+    expect(await app.match(`${BASE}assets/app-old.js`)).toBeUndefined();
+    expect(await app.match(`${BASE}assets/app-new.js`)).toBeDefined();
+    expect(sw.stores.has('webllm/model')).toBe(true);
   });
 
   it('precaches only paths inside the /chatty/ scope', async () => {

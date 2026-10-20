@@ -191,6 +191,8 @@ export class VoiceAssistantEngine {
   readonly jsRuntime: JavascriptRuntime;
 
   private isListening = false;
+  /** Set once dispose() has run, so a page restored from the back/forward cache knows to reload */
+  private pageDisposed = false;
   private selectedLanguage: SupportedLanguage = 'en';
   private currentInputRms = 0;
   private currentOutputRms = 0;
@@ -671,12 +673,17 @@ export class VoiceAssistantEngine {
     }
 
     if (typeof window !== 'undefined') {
-      window.addEventListener('pagehide', () => {
+      window.addEventListener('pagehide', (event) => {
         // A normal close/reload mid-load (or mid-reply) isn't an out-of-memory crash
         clearLlmLoadMarker();
         clearLoadStage();
         clearActivity();
-        void this.dispose();
+        // A page entering the back/forward cache keeps its models for when it's restored
+        if (!event.persisted) void this.dispose();
+      });
+      window.addEventListener('pageshow', (event) => {
+        // Restored from the back/forward cache after dispose (e.g. evicted models): start fresh
+        if (event.persisted && this.pageDisposed) window.location.reload();
       });
     }
   }
@@ -1711,6 +1718,7 @@ export class VoiceAssistantEngine {
   }
 
   async dispose(): Promise<void> {
+    this.pageDisposed = true;
     void this.persistState(true);
     this.audioSubsystem.stopMicrophoneCapture();
     this.audioSubsystem.stopAllPlaybackImmediately();
