@@ -111,7 +111,7 @@ const AsyncFunctionCtor = Object.getPrototypeOf(async function () {}).constructo
 
 function parsesAsJs(code: string): boolean {
   try {
-    new AsyncFunctionCtor('speak', 'playNotes', 'searchWikipedia', 'root', `"use strict";\n${code}`);
+    new AsyncFunctionCtor('speak', 'playNotes', 'searchWikipedia', 'root', code);
     return true;
   } catch {
     return false;
@@ -207,7 +207,7 @@ export async function syntaxErrorLine(code: string): Promise<number | undefined>
 
 /**
  * Inline handlers in a program's HTML (onclick="calc()") look names up globally, but programs run
- * in strict mode, where their functions stay local: those functions are made global too.
+ * as function bodies, where their functions stay local: those functions are made global too.
  */
 export function exposeFunctionsToInlineHandlers(code: string): string {
   if (!/\son[a-z]+\s*=\s*\\?["']/i.test(code)) return code;
@@ -275,7 +275,7 @@ export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
   let isValidJs = parsesAsJs(cleaned);
   if (!isValidJs) {
     try {
-      new AsyncFunctionCtor('speak', 'playNotes', 'searchWikipedia', 'root', `"use strict"; return (${cleaned.replace(/;\s*$/, '')});`);
+      new AsyncFunctionCtor('speak', 'playNotes', 'searchWikipedia', 'root', `return (${cleaned.replace(/;\s*$/, '')});`);
       isValidJs = true;
     } catch {
       isValidJs = false;
@@ -1187,9 +1187,9 @@ export class JavascriptRuntime {
       const probe = async (mode, run) => {
         try { await run(); } catch (e) { const l = stackLine(e); if (l !== null) lineOffsets[mode] = l - 1; }
       };
-      await probe('eval', () => (0, eval)('"use strict";\\nnull.probe' + SOURCE_TAG));
-      await probe('fn', () => new ProgramFunction('speak', 'playNotes', 'searchWikipedia', 'root', '"use strict";\\nnull.probe' + SOURCE_TAG)());
-      await probe('expr', () => new ProgramFunction('speak', 'playNotes', 'searchWikipedia', 'root', '"use strict"; return (null.probe);' + SOURCE_TAG)());
+      await probe('eval', () => (0, eval)('null.probe' + SOURCE_TAG));
+      await probe('fn', () => new ProgramFunction('speak', 'playNotes', 'searchWikipedia', 'root', 'null.probe' + SOURCE_TAG)());
+      await probe('expr', () => new ProgramFunction('speak', 'playNotes', 'searchWikipedia', 'root', 'return (null.probe);' + SOURCE_TAG)());
     })();
 
     // Small models often fill an element they never made (getElementById('app').innerHTML = ...):
@@ -1327,11 +1327,11 @@ export class JavascriptRuntime {
         let compiledFn;
         let isExpression = false;
         try {
-          compiledFn = new AsyncFunction('speak', 'playNotes', 'searchWikipedia', 'root', '"use strict"; return (' + code.replace(/;\\s*$/, '') + ');' + SOURCE_TAG);
+          compiledFn = new AsyncFunction('speak', 'playNotes', 'searchWikipedia', 'root', 'return (' + code.replace(/;\\s*$/, '') + ');' + SOURCE_TAG);
           isExpression = true;
         } catch {
           try {
-            compiledFn = new AsyncFunction('speak', 'playNotes', 'searchWikipedia', 'root', '"use strict";\\n' + code + SOURCE_TAG);
+            compiledFn = new AsyncFunction('speak', 'playNotes', 'searchWikipedia', 'root', code + SOURCE_TAG);
           } catch (compileErr) {
             throw compileErr;
           }
@@ -1343,13 +1343,10 @@ export class JavascriptRuntime {
           res = await compiledFn(window.speak, window.playNotes, window.searchWikipedia, window.root);
         } else {
           runMode = 'eval';
-          res = (0, eval)('"use strict";\\n' + code + SOURCE_TAG);
+          res = (0, eval)(code + SOURCE_TAG);
         }
         if (res instanceof Promise) {
           res = await res;
-        }
-        if (res === 'use strict') {
-          res = undefined;
         }
 
         // Detect if DOM has rendered visual elements (canvas, svg, div, table, etc.)
