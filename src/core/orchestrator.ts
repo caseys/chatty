@@ -38,8 +38,8 @@ import {
 } from '../tools/javascript-runtime.ts';
 import { appendRunLog } from './run-log.ts';
 import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest } from './line-fix.ts';
-import { dropHelperCopies, dropUnusedPackages, errorHint } from './error-hints.ts';
-import { renameMembers, unknownMemberError, unknownMembers } from './property-check.ts';
+import { dropHelperCopies, dropUnusedPackages, errorHint, fixCaseSlips } from './error-hints.ts';
+import { applyAssignmentFixes, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle } from './settle.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 
@@ -257,6 +257,12 @@ export function fixSampling(attempt: number): { temperature: number; topP: numbe
 }
 
 type FixError = { attempt: number; error: string; line?: number };
+
+/** What Chatty says when the last fix attempt failed too */
+function gaveUpText(error: string): string {
+  const short = error.length > 80 ? `${error.slice(0, 77)}…` : error;
+  return `I couldn't get this working after ${MAX_FIX_ATTEMPTS} tries (the last error: ${short}). You could ask again in other words, or choose a larger model in Settings.`;
+}
 
 /** A run's error history with its own error added */
 function withError(run: { errorHistory?: FixError[]; error: string | null; errorLine?: number; fixAttempt?: number }): FixError[] {
@@ -618,7 +624,9 @@ export class ConversationOrchestrator {
       role: 'user',
       canonicalContent: normalized,
       rawTranscript: options?.isVoiceTranscript ? rawTranscript : undefined,
-      ...(options?.autoFix ? { autoFix: true, fixNotice: `Trying to fix: ${this.lastRun?.error ?? 'the error'}` } : {}),
+      ...(options?.autoFix
+        ? { autoFix: true, fixNotice: `Trying to fix (${options.fixAttempt ?? 1} of ${MAX_FIX_ATTEMPTS}): ${this.lastRun?.error ?? 'the error'}` }
+        : {}),
       timestamp: Date.now(),
     };
 
@@ -775,8 +783,9 @@ export class ConversationOrchestrator {
       // Stage 5: Generate incrementally (the phone pipeline may already have answered with a ready-made tool)
       let finalCanonicalText = '';
       let generationProvider = this.llmProvider;
-      // What the program being written is for (remembered for follow-up edits)
-      let codeTask = normalized;
+      // What the program being written is for (remembered for follow-up edits); a fix's program
+      // is still for the original request, not for the fix request
+      let codeTask = options?.autoFix ? (this.lastRun?.task ?? normalized) : normalized;
 
       if (this.phonePipeline) {
         const route = await this.phonePipeline.router.route(normalized, signal, this.getLastAction(conversationId));
@@ -1010,15 +1019,7 @@ export class ConversationOrchestrator {
           // already came without them
           // Trimmed like the runtime trims it, so error lines match the program kept here
           let executableCode = (options?.autoFix ? inspected.code : stripComments(inspected.code)).trim();
-          // Members its objects don't have (ctx.fillstyle, style.backgroundColour): a sure slip is
-          // corrected now; anything else is reported after the run as its error (property-check.ts)
-          const unknown = inspected.isProse ? [] : unknownMembers(executableCode);
-          const slips = unknown.filter((issue) => issue.slip);
-          if (slips.length > 0) {
-            executableCode = renameMembers(executableCode, slips.map((issue) => ({ object: issue.object, from: issue.member, to: issue.slip! })));
-            for (const issue of slips) appendRunLog('imagined', `${issue.object}.${issue.member} → ${issue.object}.${issue.slip}: corrected before running`);
-          }
-          const notThere = unknown.filter((issue) => !issue.slip);
+          // First, lines that go (so the line numbers below match the program that runs).
           // Its own speak()/out/clear: taken out so the real helpers are used (error-hints.ts)
           if (!inspected.isProse) {
             const copies = dropHelperCopies(executableCode);
@@ -1031,6 +1032,33 @@ export class ConversationOrchestrator {
             if (packages.dropped.length > 0) {
               executableCode = packages.code;
               for (const from of packages.dropped) appendRunLog('imagined', `unused package '${from}' → removed: corrected before running`);
+            }
+          }
+          // Members its objects don't have (ctx.fillstyle, style.backgroundColour): a sure slip is
+          // corrected now; anything else is reported after the run as its error (property-check.ts)
+          const unknown = inspected.isProse ? [] : unknownMembers(executableCode);
+          const slips = unknown.filter((issue) => issue.slip);
+          if (slips.length > 0) {
+            executableCode = renameMembers(executableCode, slips.map((issue) => ({ object: issue.object, from: issue.member, to: issue.slip! })));
+            for (const issue of slips) appendRunLog('imagined', `${issue.object}.${issue.member} → ${issue.object}.${issue.slip}: corrected before running`);
+          }
+          const notThere: Array<{ line: number; error: string }> = unknown
+            .filter((issue) => !issue.slip)
+            .map((issue) => ({ line: issue.line, error: unknownMemberError(issue) }));
+          if (!inspected.isProse) {
+            // Writes to read-only properties and invalid style values (property-check.ts): a sure
+            // answer is corrected, the rest reported after the run
+            const unusable = unusableAssignments(executableCode);
+            if (unusable.some((issue) => issue.fix)) {
+              executableCode = applyAssignmentFixes(executableCode, unusable);
+              for (const issue of unusable) if (issue.fix) appendRunLog('imagined', `${issue.fix.note}: corrected before running`);
+            }
+            for (const issue of unusable) if (!issue.fix) notThere.push({ line: issue.line, error: issue.message });
+            // A name in the wrong letter case (mycount for myCount): the declared one
+            const cased = fixCaseSlips(executableCode);
+            if (cased.fixed.length > 0) {
+              executableCode = cased.code;
+              for (const { from, to } of cased.fixed) appendRunLog('imagined', `${from} → ${to}: corrected before running`);
             }
           }
           const isProse = inspected.isProse || forceProse;
@@ -1075,6 +1103,13 @@ export class ConversationOrchestrator {
             const attempt = options?.fixAttempt ?? 1;
             if (failed?.error && attempt < MAX_FIX_ATTEMPTS) {
               this.escalateFix(failed, attempt + 1, `Your last reply was not a working corrected ${options?.fixBlock ? 'function' : 'line'} (${why.toLowerCase()}).`);
+            } else if (failed?.error && options?.autoFix) {
+              // That was the last attempt: say so, and what the user can do
+              const text = gaveUpText(failed.error);
+              assistantMsg.canonicalContent = text;
+              this.events.onTokenStream?.(turnId, text, text);
+              this.events.onMessageUpdated?.({ ...assistantMsg });
+              for (const phrase of segmenter.push(text + ' ')) enqueuePhraseForSpeech(phrase);
             }
           } else if (isProse) {
             if (options?.autoFix) {
@@ -1148,7 +1183,7 @@ export class ConversationOrchestrator {
             }
             // It ran, but uses a member its object doesn't have: that is its error (it did nothing)
             if (!execResult.error && notThere.length > 0) {
-              execResult.error = unknownMemberError(notThere[0]);
+              execResult.error = notThere[0].error;
               execResult.errorLine = notThere[0].line;
               appendRunLog('error', `line ${notThere[0].line}: ${execResult.error}`);
             }
@@ -1216,7 +1251,10 @@ export class ConversationOrchestrator {
                   typeof execResult.output === 'object'
                     ? JSON.stringify(execResult.output)
                     : String(execResult.output);
-              } else if (execResult.error && !(this.autoFixErrors && !options?.autoFix)) {
+              } else if (execResult.error && options?.autoFix && (options.fixAttempt ?? 0) >= MAX_FIX_ATTEMPTS) {
+                // The last fix failed too: say so, and what the user can do
+                spokenText = gaveUpText(execResult.error);
+              } else if (execResult.error && !this.autoFixErrors) {
                 // (When a fix follows, its reply is the answer)
                 spokenText = 'Something went wrong while running that.';
               } else if (execResult.hasVisualOutput) {
@@ -1436,6 +1474,8 @@ export class ConversationOrchestrator {
     if (!this.autoFixErrors) return;
     if (!run || run.turnId !== turnId || !run.error || run.fixRequested) return;
     if (this.scheduler.getActiveTurnId()) return; // the user has already moved on
+    // A line past the program's end came from somewhere else (the sandbox's own code): no line
+    if (run.errorLine && run.errorLine > run.code.split('\n').length) run.errorLine = undefined;
     // A sure slip (a method's wrong case, a typo of a declared name, an element id one slip
     // from an id on the page) is corrected and run again without the model, even in a fix's
     // program; anything else goes to the model with the facts it was missing (error-hints.ts)

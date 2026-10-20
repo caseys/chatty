@@ -1608,14 +1608,15 @@ export class JavascriptRuntime {
     const ProgramFunction = Object.getPrototypeOf(async function(){}).constructor;
     const lineOffsets = { expr: null, fn: null, eval: null };
     let runMode = 'eval';
-    function stackLine(err) {
+    function stackLine(err, programFrameOnly) {
       const m = String((err && err.stack) || '').match(/chatty-program\\.js:(\\d+)/);
       if (m) return Number(m[1]);
-      // Safari's stack may not name the program, but its errors carry the line
-      return err && typeof err.line === 'number' ? err.line : null;
+      // Safari's stack may not name the program, but its errors carry the line (an Error made
+      // here, in a watcher, carries this script's own line instead: no line then)
+      return !programFrameOnly && err && typeof err.line === 'number' ? err.line : null;
     }
-    function errorLine(err) {
-      const line = stackLine(err);
+    function errorLine(err, programFrameOnly) {
+      const line = stackLine(err, programFrameOnly);
       const offset = lineOffsets[runMode];
       return line !== null && offset !== null && line - offset >= 1 ? line - offset : undefined;
     }
@@ -1631,7 +1632,7 @@ export class JavascriptRuntime {
       (typeof v === 'string' && /\\b(?:NaN|undefined|Infinity)\\b/.test(v));
     function noteRejected(message) {
       if (rejected || rejectedReported) return;
-      const line = errorLine(new Error());
+      const line = errorLine(new Error(), true);
       if (runningProgram) {
         rejected = { message, line };
       } else {

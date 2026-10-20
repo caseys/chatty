@@ -14,9 +14,11 @@
     <meta property="og:title" content="Chatty — a local AI that answers by writing code" />
     <meta property="og:description" content="An AI that runs entirely in your browser and answers by writing JavaScript that draws, plays music and builds small apps. No account, no server-side inference." />
     <meta property="og:url" content="https://www.mudberry.com/chatty/" />
-    <meta property="og:image" content="https://www.mudberry.com/chatty/icons/icon-512.png" />
-    <meta property="og:image:alt" content="Chatty, a cartoon parrot wearing a headset" />
-    <meta name="twitter:card" content="summary" />
+    <meta property="og:image" content="https://www.mudberry.com/chatty/screenshots/screenshot-wide.png" />
+    <meta property="og:image:width" content="1280" />
+    <meta property="og:image:height" content="720" />
+    <meta property="og:image:alt" content="Chatty showing a starry night sky its model drew on a canvas" />
+    <meta name="twitter:card" content="summary_large_image" />
     <meta name="apple-mobile-web-app-title" content="Chatty" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="theme-color" content="#0a0d14" />
@@ -111,6 +113,11 @@
           <pre id="raw-output" class="raw-output scroller"></pre>
           <!-- Whether the newest reply's code ran, and any error it hit -->
           <div id="run-status" class="run-status" role="status" hidden></div>
+          <!-- A program opened from a share link: shown above, never run until this is clicked -->
+          <div id="shared-program" class="shared-program" hidden>
+            <span>Shared program (not run). Read the code, then:</span>
+            <button id="btn-run-shared" class="btn btn-primary" type="button">Run shared program</button>
+          </div>
         </section>
       </div>
 

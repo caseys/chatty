@@ -10,6 +10,7 @@ import { MODEL_REGISTRY } from './core/model-manager.ts';
 import { FluidAudioVisualizer } from './audio/visualizer.ts';
 import { clearModelCache, getModelCacheBytes } from './core/model-cache.ts';
 import { isAppleMobile } from './core/settings.ts';
+import { decodeProgramHash, encodeProgramHash } from './share-link.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
 import type { RunStatus } from './core/orchestrator.ts';
 import { createToolSummaryElement, parseStreamingToolCall, stripToolCallMarkup } from './tools/tool-formatter.ts';
@@ -84,6 +85,9 @@ export class MinimalVoiceApp {
   /** The raw panel shows the run log (tap the run status) instead of the newest code */
   private showingRunLog = false;
   private lastRawOutput = '';
+  /** The newest program, speak() lines included (what Share links to) */
+  private panelCode = '';
+  private sharedProgram: string | null = null;
   // Chat bubbles by message id and by turn (streamed text arrives before the reply is saved)
   private bubbles = new Map<string, HTMLElement>();
   private turnBubbles = new Map<string, HTMLElement>();
@@ -272,6 +276,8 @@ export class MinimalVoiceApp {
 
   async init(): Promise<void> {
     this.bindEvents();
+    this.openSharedProgram();
+    window.addEventListener('hashchange', () => this.openSharedProgram());
     this.startWaveforms();
     // Install click pass-through before the (potentially long) model download/initialization.
     this.updateBusyIndicator();
@@ -354,6 +360,11 @@ export class MinimalVoiceApp {
   private bindEvents(): void {
     // Tapping the run status switches the raw panel between the code and the run log
     this.runStatusEl?.addEventListener('click', (event) => {
+      const share = (event.target as HTMLElement).closest('.run-share');
+      if (share) {
+        void this.shareProgram(share as HTMLElement);
+        return;
+      }
       const copy = (event.target as HTMLElement).closest('.run-copy');
       if (copy) {
         void this.copyRawPanel(copy as HTMLElement);
@@ -361,7 +372,7 @@ export class MinimalVoiceApp {
       }
       this.showingRunLog = !this.showingRunLog;
       this.setRawOutput(this.lastRawOutput);
-      const hint = this.runStatusEl?.querySelector('.run-log-toggle:not(.run-copy)');
+      const hint = this.runStatusEl?.querySelector('.run-log-toggle:not(.run-copy):not(.run-share)');
       if (hint) hint.textContent = this.showingRunLog ? 'code' : 'log';
     });
     // Tapping an example sends it as if typed (the tap also unlocks audio for the reply)
@@ -897,14 +908,76 @@ export class MinimalVoiceApp {
     }
     // Without speak() lines (they're in the chat) and without code fences: an unmatched ``` reads
     // as an open template string and would turn everything after it into one green string
-    const code = text
+    const unfenced = text
       .split('\n')
+      .filter((line) => !/^\s*(?:(?:javascript|js|html|css)[ \t:]*)?(?:```|~~~|"""|''')[\w-]*\s*$/i.test(line));
+    this.panelCode = unfenced.join('\n').trim();
+    const code = unfenced
       .filter((line) => !/^\s*(?:await\s+)?speak\(.*\);?\s*$/.test(line))
-      .filter((line) => !/^\s*(?:(?:javascript|js|html|css)[ \t:]*)?(?:```|~~~|"""|''')[\w-]*\s*$/i.test(line))
       .join('\n')
       .trim();
     this.rawOutputEl.innerHTML = Prism.highlight(code, Prism.languages.javascript, 'javascript');
     this.rawOutputEl.scrollTop = this.rawOutputEl.scrollHeight;
+  }
+
+  /** Shows a program from a #program= link in the code panel. It runs only when the user clicks. */
+  private openSharedProgram(): void {
+    const code = decodeProgramHash(location.hash);
+    if (code === null) return;
+    history.replaceState(null, '', location.pathname + location.search);
+    this.sharedProgram = code;
+    this.showingRunLog = false;
+    this.setRunStatus(null);
+    this.setRawOutput(code);
+    const bar = document.getElementById('shared-program');
+    if (bar) bar.hidden = false;
+    const run = document.getElementById('btn-run-shared');
+    if (!run) return;
+    run.onclick = () => {
+      const program = this.sharedProgram;
+      if (program === null) return;
+      this.sharedProgram = null;
+      if (bar) bar.hidden = true;
+      this.resetVisualScreen();
+      void this.engine.executeJavascript(program).then(
+        (res) => this.setRunStatus(res.success ? { kind: 'ok', text: 'Ran the shared program' } : { kind: 'error', text: res.error ?? 'The shared program failed' }),
+        (e) => this.setRunStatus({ kind: 'error', text: String(e) })
+      );
+    };
+  }
+
+  /** Copies a link to the program in the code panel, through the share sheet where there is one */
+  private async shareProgram(button: HTMLElement): Promise<void> {
+    const hash = encodeProgramHash(this.panelCode);
+    const say = (text: string): void => {
+      const old = button.title;
+      button.title = text;
+      button.dataset.feedback = text;
+      setTimeout(() => {
+        if (!button.isConnected) return;
+        button.title = old;
+        delete button.dataset.feedback;
+      }, 1500);
+    };
+    if (hash === null) {
+      say(this.panelCode ? 'too long to share' : 'nothing to share');
+      return;
+    }
+    const url = location.origin + import.meta.env.BASE_URL + hash;
+    if (typeof navigator.share === 'function') {
+      try {
+        await navigator.share({ title: 'A Chatty program', url });
+        return;
+      } catch (e) {
+        if ((e as Error).name === 'AbortError') return;
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      say('link copied');
+    } catch {
+      say('copy failed');
+    }
   }
 
   /** Copies what the code panel shows (the run log, or the code) and says so on the link */
@@ -947,7 +1020,14 @@ export class MinimalVoiceApp {
       const copy = document.createElement('span');
       copy.className = 'run-log-toggle run-copy';
       copy.textContent = 'copy';
-      el.append(hint, copy);
+      const share = document.createElement('span');
+      share.className = 'run-log-toggle run-share';
+      share.title = 'Share this program as a link';
+      share.setAttribute('role', 'button');
+      share.setAttribute('aria-label', 'Share this program as a link');
+      share.innerHTML =
+        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>';
+      el.append(hint, copy, share);
     }
     // The run log grows with each run: keep it current while it's shown
     if (this.showingRunLog) this.setRawOutput(this.lastRawOutput);
@@ -1491,7 +1571,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
   const installField = document.getElementById('settings-install-field');
   if (isAppleMobile() && installField) {
-    installField.innerHTML = '<p class="settings-safari-warning" role="note">⚠️ Quality degraded on iPhone Safari</p>';
+    installField.innerHTML =
+      '<p class="settings-safari-warning" role="note">⚠️ Quality degraded on iPhone Safari</p>' +
+      (isStandalone
+        ? ''
+        : '<p class="settings-safari-warning" role="note">Add Chatty to your Home Screen to keep downloaded models (Safari clears them after 7 days unused).</p>');
     installField.hidden = false;
   }
 

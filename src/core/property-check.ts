@@ -163,3 +163,155 @@ export function unknownMemberError(issue: UnknownMember): string {
   const what = issue.isCall ? 'method' : 'property';
   return `${issue.object}.${issue.member} is not a ${what} of ${kind}. Its closest: ${issue.closest.join(', ')}.`;
 }
+
+/**
+ * Assignments that do nothing: a write to a property the browser gives only a getter
+ * (`canvas.clientWidth = 300`, `ctx.canvas = c`), and a literal value a style property can't
+ * take (`el.style.display = 'flexbox'`, checked with CSS.supports). Both are silent (or a
+ * TypeError in strict mode) in the sandbox, so they are found before the program runs. A
+ * `fix` (an edit to the code) is given only when one answer is clear.
+ */
+export interface AssignmentIssue {
+  line: number;
+  object: string;
+  member: string;
+  kind: 'read-only' | 'invalid-value';
+  /** The error text for the fix request */
+  message: string;
+  fix?: { start: number; end: number; text: string; note: string };
+}
+
+type Descriptor = { get?: unknown; set?: unknown; writable?: boolean } | undefined;
+
+/** How a type's member can be written: the first descriptor along each prototype chain */
+function writability(type: string, member: string, scope?: Record<string, unknown>): 'read-only' | 'writable' | 'unknown' {
+  const kinds: string[] = [];
+  for (const source of namesSources(type, scope)) {
+    let target: unknown = source;
+    while (target && target !== Object.prototype) {
+      const descriptor = Object.getOwnPropertyDescriptor(target, member) as Descriptor;
+      if (descriptor) {
+        const getterOnly = !!descriptor.get && !descriptor.set;
+        kinds.push(getterOnly ? 'read-only' : 'writable');
+        break;
+      }
+      target = Object.getPrototypeOf(target);
+    }
+  }
+  // An element of unknown tag spans many types: read-only only where every type that has it says so
+  if (kinds.length === 0) return 'unknown';
+  return kinds.every((k) => k === 'read-only') ? 'read-only' : 'writable';
+}
+
+/** The writable member a read-only size/position name stands for (clientWidth → width) */
+function writableCounterpart(type: string, member: string, scope?: Record<string, unknown>): string | null {
+  if (type === 'HTMLElement') return null;
+  const stem = member.match(/^(?:client|offset|scroll|natural)([A-Z]\w*)$/)?.[1];
+  if (!stem) return null;
+  const counterpart = stem[0].toLowerCase() + stem.slice(1);
+  return writability(type, counterpart, scope) === 'writable' ? counterpart : null;
+}
+
+/** Common keyword values of style properties, checked against CSS.supports before use */
+const STYLE_KEYWORDS: Record<string, string[]> = {
+  display: ['none', 'block', 'inline', 'inline-block', 'flex', 'inline-flex', 'grid', 'inline-grid', 'contents', 'table', 'flow-root'],
+  position: ['static', 'relative', 'absolute', 'fixed', 'sticky'],
+  visibility: ['visible', 'hidden', 'collapse'],
+  overflow: ['visible', 'hidden', 'scroll', 'auto', 'clip'],
+  textAlign: ['left', 'right', 'center', 'justify', 'start', 'end'],
+  flexDirection: ['row', 'row-reverse', 'column', 'column-reverse'],
+  flexWrap: ['nowrap', 'wrap', 'wrap-reverse'],
+  justifyContent: ['flex-start', 'flex-end', 'center', 'space-between', 'space-around', 'space-evenly', 'start', 'end'],
+  alignItems: ['stretch', 'flex-start', 'flex-end', 'center', 'baseline', 'start', 'end'],
+  cursor: ['auto', 'default', 'pointer', 'text', 'move', 'grab', 'grabbing', 'not-allowed', 'crosshair', 'wait'],
+  whiteSpace: ['normal', 'nowrap', 'pre', 'pre-wrap', 'pre-line'],
+  textTransform: ['none', 'capitalize', 'uppercase', 'lowercase'],
+  boxSizing: ['content-box', 'border-box'],
+  pointerEvents: ['auto', 'none'],
+  userSelect: ['auto', 'none', 'text', 'all'],
+  fontStyle: ['normal', 'italic', 'oblique'],
+  textDecoration: ['none', 'underline', 'overline', 'line-through'],
+};
+
+const kebab = (name: string) => name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
+
+/** Assignments to read-only properties and to style properties with values they can't take */
+export function unusableAssignments(code: string, scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>): AssignmentIssue[] {
+  let ast: AnyNode;
+  try {
+    ast = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true, locations: true }) as unknown as AnyNode;
+  } catch {
+    return [];
+  }
+  const assignments: AnyNode[] = [];
+  const visit = (node: AnyNode) => {
+    if (node.type === 'AssignmentExpression') assignments.push(node);
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && visit(child);
+      else if (value && typeof value === 'object' && typeof (value as AnyNode).type === 'string') visit(value as AnyNode);
+    }
+  };
+  visit(ast);
+  const supports = (scope.CSS as { supports?: (property: string, value: string) => boolean } | undefined)?.supports;
+  const issues: AssignmentIssue[] = [];
+  for (const assignment of assignments) {
+    const left = assignment.left as AnyNode;
+    if (left.type !== 'MemberExpression' || left.computed || (left.property as AnyNode).type !== 'Identifier') continue;
+    const object = pathOf(left.object as AnyNode, code);
+    if (!object) continue;
+    const member = (left.property as AnyNode).name as string;
+    const type = objectType(code, object);
+    if (!type || type.startsWith('@')) continue;
+    const line = (left.loc as { start: { line: number } }).start.line;
+    const property = left.property as AnyNode;
+    if (writability(type, member, scope) === 'read-only') {
+      const counterpart = writableCounterpart(type, member, scope);
+      issues.push({
+        line,
+        object,
+        member,
+        kind: 'read-only',
+        message: `${object}.${member} can only be read (${typeLabel(type, object)} gives it a getter and no setter), so writing to it changes nothing.${counterpart ? ` The property to write is ${counterpart}.` : ''}`,
+        ...(counterpart && assignment.operator === '='
+          ? { fix: { start: property.start, end: property.end, text: counterpart, note: `${object}.${member} → ${object}.${counterpart}` } }
+          : {}),
+      });
+      continue;
+    }
+    if (type !== 'CSSStyleDeclaration' || !supports || !/^[a-z][a-zA-Z]*$/.test(member)) continue;
+    const right = assignment.right as AnyNode;
+    const literal =
+      right.type === 'Literal' && typeof right.value === 'string'
+        ? (right.value as string)
+        : right.type === 'TemplateLiteral' && (right.expressions as AnyNode[]).length === 0
+          ? (((right.quasis as AnyNode[])[0].value as { cooked: string }).cooked)
+          : null;
+    const value = literal?.replace(/\s*!important\s*$/i, '').trim();
+    if (!value) continue;
+    try {
+      // The property must be one the browser knows (anything else is an unknown member's business)
+      if (!supports(kebab(member), 'inherit') || supports(kebab(member), value)) continue;
+      const candidates = (STYLE_KEYWORDS[member] ?? []).filter((candidate) => supports(kebab(member), candidate));
+      const near = nearMiss(value, candidates);
+      issues.push({
+        line,
+        object,
+        member,
+        kind: 'invalid-value',
+        message: `'${value}' is not a valid ${kebab(member)} value (${object}.${member}), so the browser ignores it.${candidates.length ? ` Values it accepts include: ${candidates.slice(0, 8).join(', ')}.` : ''}`,
+        ...(near ? { fix: { start: right.start, end: right.end, text: `'${near}'`, note: `${object}.${member} = '${value}' → '${near}'` } } : {}),
+      });
+    } catch {
+      // CSS.supports refused its input: nothing to say
+    }
+  }
+  return issues;
+}
+
+/** The program with the fixes of these issues applied (by position) */
+export function applyAssignmentFixes(code: string, issues: AssignmentIssue[]): string {
+  let out = code;
+  const fixes = issues.flatMap((issue) => (issue.fix ? [issue.fix] : [])).sort((a, b) => b.start - a.start);
+  for (const fix of fixes) out = out.slice(0, fix.start) + fix.text + out.slice(fix.end);
+  return out;
+}

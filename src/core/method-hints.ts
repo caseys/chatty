@@ -206,3 +206,106 @@ export function applyCorrection(code: string, correction: { object: string; from
   const object = correction.object.replace(/[.$]/g, (c) => `\\${c}`);
   return code.replace(new RegExp(`(\\b${object}\\s*\\.\\s*)${correction.from}\\b`, 'g'), `$1${correction.to}`);
 }
+
+/**
+ * Parameter names, where they can be given reliably: the browser's functions don't expose them,
+ * so only the common canvas methods are listed, and a list is used only when its length is the
+ * browser's own count for that method
+ */
+const PARAMETER_NAMES: Record<string, string[]> = {
+  'CanvasRenderingContext2D.arc': ['x', 'y', 'radius', 'startAngle', 'endAngle'],
+  'CanvasRenderingContext2D.arcTo': ['x1', 'y1', 'x2', 'y2', 'radius'],
+  'CanvasRenderingContext2D.ellipse': ['x', 'y', 'radiusX', 'radiusY', 'rotation', 'startAngle', 'endAngle'],
+  'CanvasRenderingContext2D.rect': ['x', 'y', 'width', 'height'],
+  'CanvasRenderingContext2D.fillRect': ['x', 'y', 'width', 'height'],
+  'CanvasRenderingContext2D.strokeRect': ['x', 'y', 'width', 'height'],
+  'CanvasRenderingContext2D.clearRect': ['x', 'y', 'width', 'height'],
+  'CanvasRenderingContext2D.fillText': ['text', 'x', 'y'],
+  'CanvasRenderingContext2D.strokeText': ['text', 'x', 'y'],
+  'CanvasRenderingContext2D.moveTo': ['x', 'y'],
+  'CanvasRenderingContext2D.lineTo': ['x', 'y'],
+  'CanvasRenderingContext2D.translate': ['x', 'y'],
+  'CanvasRenderingContext2D.scale': ['x', 'y'],
+  'CanvasRenderingContext2D.quadraticCurveTo': ['cpx', 'cpy', 'x', 'y'],
+  'CanvasRenderingContext2D.bezierCurveTo': ['cp1x', 'cp1y', 'cp2x', 'cp2y', 'x', 'y'],
+};
+
+/** The function a type's method is, read from the browser's prototype chain, or null */
+function methodFunction(type: string, name: string, scope?: Record<string, unknown>): ((...args: unknown[]) => unknown) | null {
+  if (OWN_METHODS[type]) return null;
+  const found: Array<(...args: unknown[]) => unknown> = [];
+  for (const source of namesSources(type, scope)) {
+    let target: unknown = source;
+    while (target && target !== Object.prototype) {
+      const descriptor = Object.getOwnPropertyDescriptor(target, name);
+      if (descriptor) {
+        if (typeof descriptor.value === 'function') found.push(descriptor.value);
+        break;
+      }
+      target = Object.getPrototypeOf(target);
+    }
+  }
+  // An element of unknown tag has many types: the count must be the same on all that have it
+  return found.length > 0 && found.every((fn) => fn.length === found[0].length) ? found[0] : null;
+}
+
+/** The type's own name for the table above ('CanvasRenderingContext2D'), when the type is one */
+const tableKey = (type: string, method: string) => `${type}.${method}`;
+
+/**
+ * "ctx.arc needs 5 arguments (x, y, …); this call gives 3": the facts for a call of a browser
+ * method with fewer arguments than it requires. The count is `Function.prototype.length` of the
+ * real method. The error points at it ("5 arguments required, but only 3 present" in Chrome,
+ * "Not enough arguments" in Safari, "At least 5 arguments required" in Firefox): the calls on
+ * the failing line (or, when the error names the method, anywhere) of a typed object are checked.
+ * A fact only: what the missing values should be is the model's to decide.
+ */
+export function argumentCountFact(code: string, error: string, errorLine?: number, scope?: Record<string, unknown>): string | null {
+  if (!/arguments? required|Not enough arguments|At least \d+ arguments?/i.test(error)) return null;
+  const named = error.match(/Failed to execute '(\w+)'/)?.[1] ?? error.match(/\w+\.(\w+): At least \d+ arguments?/)?.[1];
+  const lines = code.split('\n');
+  const scoped = errorLine && errorLine <= lines.length ? lines[errorLine - 1] : null;
+  const facts: string[] = [];
+  const callPattern = /([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.([A-Za-z_$][\w$]*)\s*\(/g;
+  for (const match of (scoped ?? code).matchAll(callPattern)) {
+    const [, object, method] = match;
+    if (named && method !== named) continue;
+    const type = objectType(code, object);
+    if (!type) continue;
+    const fn = methodFunction(type, method, scope);
+    if (!fn || fn.length === 0) continue;
+    const given = countArguments((scoped ?? code).slice(match.index! + match[0].length));
+    if (given === null || given >= fn.length) continue;
+    const names = PARAMETER_NAMES[tableKey(type, method)];
+    const listed = names && names.length === fn.length ? ` (${names.join(', ')})` : '';
+    facts.push(`${object}.${method} needs ${fn.length} argument${fn.length === 1 ? '' : 's'}${listed}; this call gives ${given}.`);
+  }
+  return facts.length > 0 ? [...new Set(facts)].slice(0, 3).join(' ') : null;
+}
+
+/** How many arguments the call has, given the text just after its "(" (null when spread or unclosed) */
+function countArguments(rest: string): number | null {
+  let depth = 0;
+  let count = 0;
+  let any = false;
+  let quote = '';
+  for (let i = 0; i < rest.length; i++) {
+    const ch = rest[i];
+    if (quote) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') quote = ch;
+    else if ('([{'.includes(ch)) {
+      depth++;
+      any = true;
+    } else if (')]}'.includes(ch)) {
+      if (depth === 0) return any ? count + 1 : 0;
+      depth--;
+    } else if (ch === ',' && depth === 0) count++;
+    else if (ch === '.' && rest.startsWith('...', i) && depth === 0) return null;
+    else if (!/\s/.test(ch)) any = true;
+  }
+  return null;
+}

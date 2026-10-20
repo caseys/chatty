@@ -2894,3 +2894,38 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Share icon among the run status controls */
+.run-share {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.run-share svg {
+  display: block;
+}
+
+/* A program opened from a share link waits for a click */
+.shared-program {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.shared-program[hidden] {
+  display: none;
+}
+
+.run-share[data-feedback]::after {
+  content: attr(data-feedback);
+  margin-left: 6px;
+  font-size: 12px;
+}

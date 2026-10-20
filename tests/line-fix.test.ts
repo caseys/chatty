@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyFixReply, FIX_SYSTEM_PROMPT, fixRequest } from '../src/core/line-fix.ts';
+import { applyFixReply, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest } from '../src/core/line-fix.ts';
 
 const program = Array.from({ length: 30 }, (_, i) => `  const v${i + 1} = ${i + 1};`).join('\n');
 
@@ -91,5 +91,34 @@ describe('finding what does not parse', () => {
     expect(request).toContain("The marked lines don't parse");
     expect(request).toContain('// >>> ERROR');
     expect(request).toContain('rewritten as valid JavaScript');
+  });
+});
+
+describe('a reply that brings the named function around the marked lines', () => {
+  const program = [
+    'function play(t) {',
+    '  const { time } = t;',
+    '}',
+    'function loop() {',
+    '  for (const t of tracks) {',
+    '    setTimeout(() => {',
+    '      play(t);',
+    '    }, time * 1000);',
+    '  }',
+    '}',
+    'loop();',
+  ].join('\n');
+
+  it('asks for the named function, not the anonymous callback inside it', () => {
+    expect(enclosingFunction(program, 8)).toEqual({ start: 4, end: 10, name: 'loop' });
+  });
+
+  it('replaces that function wherever the marked lines were, instead of nesting it', () => {
+    const reply = '// Cause: time\nfunction loop() {\n  for (const t of tracks) {\n    setTimeout(() => play(t), t.time * 1000);\n  }\n}';
+    const fixed = applyFixReply(program, reply, 6, 8);
+    expect(fixed.match(/function loop/g)?.length).toBe(1);
+    expect(fixed).toContain('t.time * 1000');
+    expect(fixed).toContain('function play(t)');
+    expect(fixed.trim().endsWith('loop();')).toBe(true);
   });
 });

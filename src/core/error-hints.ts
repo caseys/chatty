@@ -12,7 +12,7 @@
  * what was left open. Method names are in method-hints.ts.
  */
 import { parse, tokenizer, type Node } from 'acorn';
-import { applyCorrection, methodHint } from './method-hints.ts';
+import { applyCorrection, argumentCountFact, methodHint } from './method-hints.ts';
 
 export interface ErrorHint {
   /** Facts for the fix request */
@@ -101,11 +101,17 @@ function distance(a: string, b: string): number {
   return d[a.length][b.length];
 }
 
+/** The one name that differs from the missing one only in letter case, or null */
+function caseSlip(missing: string, names: string[]): string | null {
+  const sameLetters = [...new Set(names)].filter((name) => name !== missing && name.toLowerCase() === missing.toLowerCase());
+  return sameLetters.length === 1 ? sameLetters[0] : null;
+}
+
 /** The one name a missing one is surely a slip of, or null */
 function slipOf(missing: string, names: string[]): string | null {
   const unique = [...new Set(names)].filter((name) => name !== missing);
-  const sameLetters = unique.filter((name) => name.toLowerCase() === missing.toLowerCase());
-  if (sameLetters.length === 1) return sameLetters[0];
+  const sameCase = caseSlip(missing, unique);
+  if (sameCase) return sameCase;
   if (missing.length < 4) return null;
   const close = unique.filter((name) => distance(missing.toLowerCase(), name.toLowerCase()) <= (missing.length >= 7 ? 2 : 1));
   return close.length === 1 ? close[0] : null;
@@ -296,6 +302,52 @@ function syntaxSlip(code: string, error: string, errorLine?: number): ErrorHint 
 
 /** Helpers every program already has, ready to use */
 const HELPERS = ['out', 'speak', 'clear', 'root'];
+/** Names the sandbox provides besides the browser's own */
+const SANDBOX_NAMES = [...HELPERS, 'playNotes', 'searchWikipedia'];
+
+/**
+ * Before a program runs: a name used but never declared, that differs from exactly one declared
+ * name (visible from where it is used) only in letter case (`mycount` for `myCount`,
+ * `drawscene()` for `drawScene()`), is renamed. The error-time version is notDefined(); both
+ * use caseSlip(). Browser globals and the sandbox's own names are never renamed.
+ */
+export function fixCaseSlips(code: string): { code: string; fixed: Array<{ from: string; to: string }> } {
+  const ast = tryParse(code);
+  if (!ast) return { code, fixed: [] };
+  const declared = declarations(ast);
+  const declaredNames = new Set(declared.map((d) => d.name));
+  const edits = new Map<number, { end: number; text: string; from: string; to: string }>();
+  const visit = (node: AnyNode, parent: AnyNode | null, functions: AnyNode[]) => {
+    if (node.type === 'Identifier') {
+      const name = node.name as string;
+      const p = parent;
+      const isName =
+        (p?.type === 'MemberExpression' && p.property === node && !p.computed) ||
+        (p?.type === 'Property' && p.key === node && !p.computed && !p.shorthand) ||
+        ((p?.type === 'MethodDefinition' || p?.type === 'PropertyDefinition') && p.key === node && !p.computed) ||
+        ((p?.type === 'LabeledStatement' || p?.type === 'BreakStatement' || p?.type === 'ContinueStatement') && p.label === node) ||
+        (p?.type === 'UnaryExpression' && p.operator === 'typeof');
+      if (!isName && !declaredNames.has(name) && !(name in globalThis) && !SANDBOX_NAMES.includes(name)) {
+        const visible = declared.filter((d) => !d.inside || functions.includes(d.inside)).map((d) => d.name);
+        const to = caseSlip(name, visible);
+        if (to && !edits.has(node.start)) {
+          const shorthand = p?.type === 'Property' && p.shorthand;
+          edits.set(node.start, { end: node.end, text: shorthand ? `${name}: ${to}` : to, from: name, to });
+        }
+      }
+    }
+    const inner = /Function/.test(node.type) ? [...functions, node] : functions;
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && visit(child, node, inner);
+      else if (value && typeof value === 'object' && typeof (value as AnyNode).type === 'string') visit(value as AnyNode, node, inner);
+    }
+  };
+  visit(ast, null, []);
+  let out = code;
+  for (const [start, edit] of [...edits].sort((a, b) => b[0] - a[0])) out = out.slice(0, start) + edit.text + out.slice(edit.end);
+  const fixed = [...new Map([...edits.values()].map((e) => [`${e.from}→${e.to}`, { from: e.from, to: e.to }])).values()];
+  return { code: out, fixed };
+}
 
 /**
  * Before a program runs: its own definitions of a ready-made helper (`function speak(text) {
@@ -425,23 +477,71 @@ function redeclaredHelper(code: string, error: string): ErrorHint | null {
 /** Calls whose value is a promise: await them to get the thing itself */
 const PROMISE_CALL = /\b(?:fetch|requestMIDIAccess|getUserMedia|requestPermission|json|text|blob|arrayBuffer|decodeAudioData|resume|requestFullscreen|play)\s*\(/;
 
+/** The name a call goes by (`fetch`, or `json` for `res.json()`), or null */
+function calleeName(call: AnyNode): string | null {
+  const callee = call.callee as AnyNode;
+  if (callee.type === 'Identifier') return callee.name as string;
+  if (callee.type === 'MemberExpression' && !callee.computed) return (callee.property as AnyNode).name as string;
+  return null;
+}
+
 /**
- * A promise used as the value it promises (`const res = fetch(url); res.json()`): the call that
- * made it gets an await (an enclosing function is made async before it runs)
+ * A promise used as the value it promises (`const res = fetch(url); res.json()`, or
+ * `res.json().title`): the call that made it gets an await (an enclosing function is made async
+ * before it runs). The failing value is named by "x.m is not a function", or found on the
+ * failing line when the error is a property read of undefined and exactly one name there is
+ * assigned from an un-awaited promise call.
  */
-function missingAwait(code: string, error: string): ErrorHint | null {
-  const subject =
+function missingAwait(code: string, error: string, errorLine?: number): ErrorHint | null {
+  const notFunction =
     error.match(/([A-Za-z_$][\w$]*)\.[A-Za-z_$][\w$]* is not a function/)?.[1] ??
     error.match(/undefined is not an object \(evaluating '([A-Za-z_$][\w$]*)\./)?.[1];
-  if (!subject) return null;
+  const ofUndefined = /Cannot read propert(?:y|ies) of undefined|undefined is not an object/.test(error);
+  if (!notFunction && !ofUndefined) return null;
   const asyncFunctions = [...code.matchAll(/async\s+function\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]);
-  const assignment = new RegExp(`(\\b(?:const|let|var)\\s+${subject.replace(/\$/g, '\\$')}\\s*=\\s*)(?!await\\b)([^;\\n]+)`);
-  const found = code.match(assignment);
-  if (!found) return null;
-  const init = found[2];
-  const promises = PROMISE_CALL.test(init) || asyncFunctions.some((fn) => new RegExp(`^\\s*${fn}\\s*\\(`).test(init));
-  if (!promises) return null;
-  return { correction: { code: code.replace(assignment, '$1await $2'), note: `${subject} was a promise → await` } };
+  const promiseAssignment = (name: string) => {
+    const assignment = new RegExp(`((?<![\\w$.])(?:(?:const|let|var)\\s+)?${name.replace(/\$/g, '\\$')}\\s*=(?![=>])(?!\\s*await\\b)\\s*)([^;\\n]+)`);
+    const found = code.match(assignment);
+    if (!found) return null;
+    const init = found[2];
+    const promises = PROMISE_CALL.test(init) || asyncFunctions.some((fn) => new RegExp(`^\\s*${fn}\\s*\\(`).test(init));
+    return promises ? assignment : null;
+  };
+  const lines = code.split('\n');
+  const line = errorLine && errorLine <= lines.length ? lines[errorLine - 1] : '';
+  const candidates = notFunction ? [notFunction] : [...new Set([...line.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\./g)].map((m) => m[1]))];
+  const made = candidates.map((name) => ({ name, assignment: promiseAssignment(name) })).filter((c) => c.assignment);
+  if (made.length === 1) {
+    const { name, assignment } = made[0];
+    return { correction: { code: code.replace(assignment!, '$1await $2'), note: `${name} was a promise → await` } };
+  }
+  // The value used right where the call is: res.json().title, fetch(url).json()
+  if (errorLine && made.length === 0) {
+    const ast = tryParse(code);
+    if (!ast) return null;
+    const own = new Set(declarations(ast).map((d) => d.name));
+    const spots: AnyNode[] = [];
+    const visit = (node: AnyNode, parent: AnyNode | null) => {
+      if (node.type === 'CallExpression' && parent?.type === 'MemberExpression' && parent.object === node && lineOf(node) === errorLine) {
+        const name = calleeName(node);
+        const member = parent.computed ? '' : ((parent.property as AnyNode).name as string);
+        if (name && !own.has(name) && PROMISE_CALL.test(`${name}(`) && !/^(?:then|catch|finally)$/.test(member)) spots.push(node);
+      }
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && visit(child, node);
+        else if (value && typeof value === 'object' && typeof (value as AnyNode).type === 'string') visit(value as AnyNode, node);
+      }
+    };
+    visit(ast, null);
+    // The outermost such call, when only one chain on the line is a candidate
+    const outer = spots.filter((spot) => !spots.some((other) => other !== spot && other.start <= spot.start && other.end >= spot.end));
+    if (outer.length === 1) {
+      const spot = outer[0];
+      const text = code.slice(spot.start, spot.end);
+      return { correction: { code: `${code.slice(0, spot.start)}(await ${text})${code.slice(spot.end)}`, note: `${text} was a promise → await` } };
+    }
+  }
+  return null;
 }
 
 /**
@@ -480,10 +580,16 @@ function shortCalls(code: string, errorLine?: number): string | null {
   return `${signature} is called with ${most} values elsewhere, but with fewer here: ${listed.join('; ')}.`;
 }
 
+/** Facts for a browser method called with too few arguments (method-hints.ts) */
+function argumentCountFacts(code: string, error: string, errorLine?: number): ErrorHint | null {
+  const text = argumentCountFact(code, error, errorLine);
+  return text ? { text } : null;
+}
+
 /** Help for a failed program: a correction, or facts for the fix request */
 export function errorHint(code: string, error: string, errorLine?: number, page?: PageFacts): ErrorHint | null {
   // Corrections by rule first: they need no model
-  const rule = redeclaredHelper(code, error) ?? missingAwait(code, error) ?? syntaxSlip(code, error, errorLine);
+  const rule = redeclaredHelper(code, error) ?? missingAwait(code, error, errorLine) ?? syntaxSlip(code, error, errorLine);
   if (rule) return rule;
   const method = methodHint(code, error);
   if (method) {
@@ -496,7 +602,7 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
         }
       : { text: method.text };
   }
-  const found = notDefined(code, error, errorLine) ?? nothingThere(code, error, errorLine, page) ?? leftOpen(code, error) ?? tooEarly(code, error, errorLine);
+  const found = argumentCountFacts(code, error, errorLine) ?? notDefined(code, error, errorLine) ?? nothingThere(code, error, errorLine, page) ?? leftOpen(code, error) ?? tooEarly(code, error, errorLine);
   if (found?.correction) return found;
   // Calls of the failing function that pass too few values, added to whatever else was found
   const calls = shortCalls(code, errorLine);

@@ -19,14 +19,17 @@ export function enclosingFunction(code: string, line: number | undefined): { sta
   } catch {
     return null;
   }
+  // The innermost named function around the line (an anonymous callback is a poor unit to ask
+  // for: models answer with the named function around it); the innermost one when none is named
   let best: { start: number; end: number; name: string } | null = null;
+  let named: { start: number; end: number; name: string } | null = null;
   const visit = (node: Record<string, unknown>) => {
     const loc = node.loc as { start: { line: number }; end: { line: number } } | undefined;
     if (/Function/.test(String(node.type)) && loc && loc.start.line <= line && loc.end.line >= line && loc.end.line > loc.start.line) {
-      if (!best || loc.end.line - loc.start.line < best.end - best.start) {
-        const id = node.id as { name?: string } | null;
-        best = { start: loc.start.line, end: loc.end.line, name: id?.name ?? '' };
-      }
+      const id = node.id as { name?: string } | null;
+      const found = { start: loc.start.line, end: loc.end.line, name: id?.name ?? '' };
+      if (!best || found.end - found.start < best.end - best.start) best = found;
+      if (found.name && (!named || found.end - found.start < named.end - named.start)) named = found;
     }
     for (const value of Object.values(node)) {
       if (Array.isArray(value)) value.forEach((child) => child && typeof child.type === 'string' && visit(child));
@@ -34,7 +37,7 @@ export function enclosingFunction(code: string, line: number | undefined): { sta
     }
   };
   visit(ast as Record<string, unknown>);
-  return best;
+  return named ?? best;
 }
 
 const STRICT = { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true } as const;
@@ -201,6 +204,33 @@ function replyCode(reply: string): string[] {
  * The program after a fix reply: the corrected marked line put back in its place (`line`), or
  * search/replace blocks applied. A reply as long as the program is taken as a whole new program.
  */
+/** The program with its declaration of the reply's one function swapped for the reply, or null */
+function replaceDeclaredFunction(program: string, reply: string): string | null {
+  type Node = { type: string; start: number; end: number; id?: { name?: string } | null };
+  let replyBody: Node[];
+  let programAst: unknown;
+  try {
+    replyBody = (parse(reply, STRICT) as unknown as { body: Node[] }).body;
+    programAst = parse(program, STRICT);
+  } catch {
+    return null;
+  }
+  if (replyBody.length !== 1 || replyBody[0].type !== 'FunctionDeclaration' || !replyBody[0].id?.name) return null;
+  const name = replyBody[0].id.name;
+  const found: Node[] = [];
+  const visit = (node: Record<string, unknown>) => {
+    if (node.type === 'FunctionDeclaration' && (node.id as { name?: string } | null)?.name === name) found.push(node as unknown as Node);
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach((child) => child && typeof child.type === 'string' && visit(child));
+      else if (value && typeof value === 'object' && typeof (value as { type?: unknown }).type === 'string') visit(value as Record<string, unknown>);
+    }
+  };
+  visit(programAst as Record<string, unknown>);
+  if (found.length !== 1) return null;
+  const fn = reply.slice(replyBody[0].start, replyBody[0].end);
+  return program.slice(0, found[0].start) + fn + program.slice(found[0].end);
+}
+
 export function applyFixReply(program: string, reply: string, line?: number, endLine?: number): string {
   const blocks = [...reply.matchAll(SEARCH_REPLACE)];
   // Edit markers but no edit that can be read: nothing to apply (running it would only fail)
@@ -218,6 +248,10 @@ export function applyFixReply(program: string, reply: string, line?: number, end
   const code = replyCode(reply);
   while (code.length > 0 && !code[code.length - 1].trim()) code.pop();
   while (code.length > 0 && !code[0].trim()) code.shift();
+  // One function, and the program declares exactly one function of that name: that one is
+  // replaced, wherever the marked lines were (a reply often brings the named function around them)
+  const sameFunction = replaceDeclaredFunction(program, code.join('\n'));
+  if (sameFunction) return sameFunction;
   const lines = program.split('\n');
   const substantial = code.filter((l) => l.trim() && !/^\s*\/\//.test(l)).length;
   const last = endLine && endLine >= (line ?? 0) && endLine <= lines.length ? endLine : line;

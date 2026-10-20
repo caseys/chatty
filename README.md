@@ -87,6 +87,8 @@ The replay corpus is `tests/replay/cases.json`, built from run logs copied out o
 
 [docs/deploy-nginx.md](docs/deploy-nginx.md) has a complete Nginx setup.
 
+`npm run deploy` (`scripts/deploy.sh`) tests, builds, backs up the live copy over SSH, rsyncs `dist/`, and checks the live bundle matches. Override the target with `DEPLOY_HOST`, `DEPLOY_PATH` and `DEPLOY_URL`.
+
 ## Limitations
 
 - **Big first download.** Models range from about 200 MB to 5 GB and are fetched from Hugging Face on first use.

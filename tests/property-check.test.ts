@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { renameMembers, unknownMemberError, unknownMembers } from '../src/core/property-check.ts';
+import { applyAssignmentFixes, unusableAssignments, renameMembers, unknownMemberError, unknownMembers } from '../src/core/property-check.ts';
 
 class FakeContext2D {
   fillStyle = '';
@@ -79,5 +79,71 @@ describe('no false alarms', () => {
   it('(E) types webgl2 as WebGL2', () => {
     const code = "const gl = c.getContext('webgl2');\ngl.createVertexArray();\ngl.bindVertexArray(null);";
     expect(unknownMembers(code, wider)).toEqual([]);
+  });
+});
+
+describe('writes that do nothing', () => {
+  class FakeCanvas {
+    width = 0;
+  }
+  Object.defineProperty(FakeCanvas.prototype, 'width', { get: () => 0, set: () => {}, configurable: true });
+  Object.defineProperty(FakeCanvas.prototype, 'clientWidth', { get: () => 0, configurable: true });
+  class FakeCtx2 {}
+  Object.defineProperty(FakeCtx2.prototype, 'canvas', { get: () => null, configurable: true });
+  const fakeDoc = { createElement: (tag: string) => (tag === 'canvas' ? new FakeCanvas() : { style: {} }) };
+  const sc2 = { document: fakeDoc, CanvasRenderingContext2D: FakeCtx2 } as unknown as Record<string, unknown>;
+  const canvas = (body: string) => `const canvas = document.createElement('canvas');\nconst ctx = canvas.getContext('2d');\n${body}`;
+
+  it('corrects a read-only write with one writable counterpart', () => {
+    const code = canvas('canvas.clientWidth = 300;');
+    const [issue] = unusableAssignments(code, sc2);
+    expect(issue).toMatchObject({ kind: 'read-only', object: 'canvas', member: 'clientWidth', line: 3 });
+    expect(applyAssignmentFixes(code, [issue])).toContain('canvas.width = 300;');
+  });
+
+  it('reports a read-only write with no counterpart, without correcting', () => {
+    const [issue] = unusableAssignments(canvas('ctx.canvas = canvas;'), sc2);
+    expect(issue.fix).toBeUndefined();
+    expect(issue.message).toMatch(/^ctx\.canvas can only be read/);
+  });
+
+  it('leaves writable properties, compound writes, and unknown objects alone', () => {
+    expect(unusableAssignments(canvas('canvas.width = 300;'), sc2)).toEqual([]);
+    expect(unusableAssignments('thing.clientWidth = 3;', sc2)).toEqual([]);
+    const [compound] = unusableAssignments(canvas('canvas.clientWidth += 3;'), sc2);
+    expect(compound.fix).toBeUndefined();
+  });
+});
+
+describe('style values the browser would ignore', () => {
+  const valid: Record<string, string[]> = { display: ['none', 'block', 'flex', 'grid', 'inline', 'inline-block', 'inline-flex', 'inline-grid', 'contents', 'table', 'flow-root'], color: ['red'] };
+  const CSS = {
+    supports: (property: string, value: string) => {
+      if (value === 'inherit') return property in { display: 1, color: 1 };
+      return (valid[property] ?? []).includes(value);
+    },
+  };
+  const sc3 = { CSS, document: { createElement: () => ({ style: {} }) } } as unknown as Record<string, unknown>;
+  const el = (line: string) => `const el = document.getElementById('box');\n${line}`;
+
+  it('reports an invalid literal with the property and value', () => {
+    const [issue] = unusableAssignments(el("el.style.display = 'flexbox';"), sc3);
+    expect(issue).toMatchObject({ kind: 'invalid-value', member: 'display', line: 2 });
+    expect(issue.message).toMatch(/^'flexbox' is not a valid display value/);
+    expect(issue.fix).toBeUndefined();
+  });
+
+  it('corrects a near miss of one supported value', () => {
+    const code = el("el.style.display = 'inline-bock';");
+    const issues = unusableAssignments(code, sc3);
+    expect(applyAssignmentFixes(code, issues)).toBe(el("el.style.display = 'inline-block';"));
+  });
+
+  it('leaves valid values, non-literals, empty resets, unknown properties, and a missing CSS', () => {
+    expect(unusableAssignments(el("el.style.display = 'flex';"), sc3)).toEqual([]);
+    expect(unusableAssignments(el('el.style.display = mode;'), sc3)).toEqual([]);
+    expect(unusableAssignments(el("el.style.display = '';"), sc3)).toEqual([]);
+    expect(unusableAssignments(el("el.style.fillstyle = 'x';"), sc3)).toEqual([]);
+    expect(unusableAssignments(el("el.style.display = 'flexbox';"), {})).toEqual([]);
   });
 });

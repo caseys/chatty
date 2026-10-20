@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dropUnusedPackages, errorHint } from '../src/core/error-hints.ts';
+import { dropUnusedPackages, errorHint, fixCaseSlips } from '../src/core/error-hints.ts';
 
 describe('"x is not defined"', () => {
   it('says where a name is really declared when it is used outside that function', () => {
@@ -145,5 +145,54 @@ describe('packages the browser does not have', () => {
   it('lists each variable once', () => {
     const code = "const { getBody } = foo();\nconst c = 1;\nzap();";
     expect(errorHint(code, 'zap is not defined', 3)?.text).toContain('Its variables: getBody, c.');
+  });
+});
+
+describe('case slips before running', () => {
+  it('renames a name that matches one declared name in everything but case', () => {
+    const code = 'let myCount = 0;\nfunction drawScene() {\n  mycount++;\n}\ndrawscene();\nspeak(`${mycount}`);\nconst o = { mycount };';
+    const out = fixCaseSlips(code);
+    expect(out.code).toBe('let myCount = 0;\nfunction drawScene() {\n  myCount++;\n}\ndrawScene();\nspeak(`${myCount}`);\nconst o = { mycount: myCount };');
+    expect(out.fixed).toEqual([{ from: 'mycount', to: 'myCount' }, { from: 'drawscene', to: 'drawScene' }]);
+  });
+
+  it('leaves properties, strings, globals, helpers, typeof, ambiguous and out-of-scope names', () => {
+    const cases = [
+      'const total = 1;\nobj.TOTAL = total;\nspeak("TOTAL");',
+      'const Date2 = 1;\nconst x = date;',
+      'const Speak = 1;\nspeak(Speak);',
+      'const Foo = 1;\nif (typeof foo !== "undefined") {}',
+      'const aB = 1;\nconst Ab = 2;\nspeak(ab);',
+      'function f() {\n  const inner = 1;\n}\nspeak(INNER);',
+      'const count = 1;\nfunction g(Count) { return Count; }',
+    ];
+    for (const code of cases) expect(fixCaseSlips(code).code).toBe(code);
+  });
+});
+
+describe('a promise used as its value', () => {
+  it('awaits an assignment without a declaration', () => {
+    const code = "let data;\ndata = fetch('/a');\nspeak(data.json());";
+    expect(errorHint(code, 'data.json is not a function', 3)!.correction!.code).toContain('data = await fetch');
+  });
+
+  it('awaits the one promise on the line for "Cannot read properties of undefined"', () => {
+    const code = "const res = fetch('/a');\nconst title = res.title.length;";
+    const hint = errorHint(code, "Cannot read properties of undefined (reading 'length')", 2)!;
+    expect(hint.correction!.code).toBe("const res = await fetch('/a');\nconst title = res.title.length;");
+  });
+
+  it('awaits a promise call used in place: res.json().title.length', () => {
+    const code = "const res = await fetch('/a');\nspeak(res.json().title.length);";
+    const hint = errorHint(code, "Cannot read properties of undefined (reading 'length')", 2)!;
+    expect(hint.correction!.code).toBe("const res = await fetch('/a');\nspeak((await res.json()).title.length);");
+  });
+
+  it('does nothing when the value is not a promise, is already awaited, or is a chained then', () => {
+    const undef = "Cannot read properties of undefined (reading 'x')";
+    expect(errorHint('const a = {};\nspeak(a.b.x);', undef, 2)?.correction).toBeUndefined();
+    expect(errorHint("const res = await fetch('/a');\nspeak(res.b.x);", undef, 2)?.correction).toBeUndefined();
+    expect(errorHint("fetch('/a').then(r => r.x);", undef, 1)?.correction).toBeUndefined();
+    expect(errorHint('function json() { return 1; }\nspeak(json().a.x);', undef, 2)?.correction).toBeUndefined();
   });
 });

@@ -721,12 +721,19 @@ describe('more than one fix attempt', () => {
     expect(last).not.toMatch(/Fix 4 failed/);
     // Each attempt says in the chat what it is fixing
     expect(notices).toEqual([
-      'Trying to fix: boom is not defined',
-      'Trying to fix: bang is not defined',
-      'Trying to fix: bang is not defined',
-      'Trying to fix: zap is not defined',
-      'Trying to fix: ok is not defined',
+      'Trying to fix (1 of 5): boom is not defined',
+      'Trying to fix (2 of 5): bang is not defined',
+      'Trying to fix (3 of 5): bang is not defined',
+      'Trying to fix (4 of 5): zap is not defined',
+      'Trying to fix (5 of 5): ok is not defined',
     ]);
+    // Each fix is still for the original request, not for the fix request before it
+    expect(last).toContain('This program was written for: Draw it\n');
+    expect(last).not.toContain('written for: This program');
+    // After the last attempt fails, Chatty says so and what to do (once, not after each attempt)
+    const said = orchestrator.memoryStore.getMessages().filter((m) => m.role === 'assistant').map((m) => m.canonicalContent).join('\n');
+    expect(said).toContain("I couldn't get this working after 5 tries (the last error: fin is not defined)");
+    expect(said).not.toContain('Something went wrong');
     // The first fix has nothing earlier to be told
     expect(llm.turns[1].messages.at(-1)!.content).not.toContain('Earlier attempts');
   }, 30000);
