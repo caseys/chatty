@@ -39,6 +39,11 @@ function settingsNotSeenForThisVersion(): boolean {
   }
 }
 
+/** The short part of a WebLLM progress message: "Loading GPU shader modules[12/80]: 15% ..." → "Loading GPU shader modules [12/80]" */
+function loadStageText(text: string): string {
+  return text.split(/[:.]/)[0].replace(/\[/, ' [').trim().slice(0, 60);
+}
+
 export class MinimalVoiceApp {
   private engine: VoiceAssistantEngine;
   private micBtn = document.getElementById('btn-mic-toggle') as HTMLButtonElement | null;
@@ -1119,8 +1124,13 @@ export class MinimalVoiceApp {
     const step = index >= 0 && order.length > 1 ? `model ${index + 1} of ${order.length}: ` : '';
     const rate = this.measureDownloadRate(label, own.loaded);
     const rateText = rate && own.loaded < own.total ? ` · ${rate.toFixed(1)} MB/s` : '';
+    // Nothing downloaded yet: say what the runtime is doing instead ("Loading GPU shader
+    // modules [12/80]"), so a load that stalls before the download shows where
+    const stage = kind === 'llm' && own.loaded === 0 ? loadStageText(this.engine.getLlmLoadStage()) : '';
     this.updateDownloadProgress(
-      `Loading ${step}${label} — ${mb(own.loaded)} / ${mb(own.total)} MB (${ownPct}%)${rateText}`,
+      stage
+        ? `Loading ${step}${label} — ${stage}`
+        : `Loading ${step}${label} — ${mb(own.loaded)} / ${mb(own.total)} MB (${ownPct}%)${rateText}`,
       overallPct,
       `${overallPct}% · ${mb(sumLoaded)} / ${mb(sumTotal)} MB`
     );

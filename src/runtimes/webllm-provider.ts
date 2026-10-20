@@ -52,6 +52,47 @@ export function withoutThinking(raw: string): string | null {
   return end === -1 ? null : trimmed.slice(end + '</think>'.length).trimStart();
 }
 
+/** Where WebLLM stores downloaded model files (Cache API) */
+const WEBLLM_CACHE = 'webllm/model';
+
+/** The base URL of a model's files as WebLLM fetches and stores them */
+export const modelFilesUrl = (model: string) => `${model.replace(/\/+$/, '')}/resolve/main/`;
+
+/**
+ * Deletes the stored pieces of a model whose size doesn't match its index (tensor-cache.json), so
+ * only those are downloaded again. Returns how many were deleted (an unreadable index counts).
+ */
+export async function dropBrokenPieces(cache: Cache, baseUrl: string): Promise<number> {
+  const indexUrl = `${baseUrl}tensor-cache.json`;
+  const index = await cache.match(indexUrl);
+  if (!index) return 0;
+  let records: Array<{ dataPath: string; nbytes: number }>;
+  try {
+    records = (await index.json()).records ?? [];
+  } catch {
+    await cache.delete(indexUrl);
+    return 1;
+  }
+  let dropped = 0;
+  for (const { dataPath, nbytes } of records) {
+    const url = baseUrl + dataPath;
+    const stored = await cache.match(url);
+    if (!stored) continue; // not downloaded yet
+    const size = (await stored.blob()).size;
+    if (size !== nbytes) {
+      await cache.delete(url);
+      dropped++;
+    }
+  }
+  return dropped;
+}
+
+/** A load error from a broken stored copy of the model ("Tensor-cache record range [0, 393216) exceeds shard size 0") */
+export function isBrokenCacheError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /exceeds shard size|(?:tensor|ndarray)-cache record/i.test(message);
+}
+
 export class WebLlmProvider implements LlmRuntimeProvider {
   readonly id: string;
   readonly contextLimit: number;
@@ -59,6 +100,8 @@ export class WebLlmProvider implements LlmRuntimeProvider {
   readonly supportsStreaming = true;
   readonly supportsCancellation = true;
   readonly supportsTools = false;
+  /** What WebLLM is doing while it loads ("Loading GPU shader modules[12/80]: ..."), for the status line */
+  loadStage = '';
 
   private worker: Worker | null = null;
   private engine: WebWorkerMLCEngine | null = null;
@@ -79,37 +122,67 @@ export class WebLlmProvider implements LlmRuntimeProvider {
   initialize(onProgress?: (loaded: number, total: number) => void): Promise<void> {
     if (this.engine) return Promise.resolve();
     this.initPromise ??= (async () => {
-      const { CreateWebWorkerMLCEngine } = await import('@mlc-ai/web-llm');
-      const worker = new Worker(new URL('../workers/webllm.worker.ts', import.meta.url), { type: 'module' });
-      this.worker = worker;
+      const webllm = await import('@mlc-ai/web-llm');
       const total = this.spec.sizeBytes;
       onProgress?.(0, total);
       try {
-        const engine = await CreateWebWorkerMLCEngine(
-          worker,
-          this.spec.mlcId,
-          // WebLLM reports a 0..1 fraction (download, then loading onto the GPU)
-          { initProgressCallback: (report) => onProgress?.(Math.round(report.progress * total), total) },
-          { context_window_size: this.spec.contextLimit }
-        );
-        if (this.worker !== worker) {
-          // Disposed while loading
-          await engine.unload().catch(() => {});
-          throw new Error(`${this.modelId} unloaded`);
-        }
-        this.engine = engine;
-        onProgress?.(total, total);
+        await this.load(webllm.CreateWebWorkerMLCEngine, total, onProgress);
       } catch (err) {
-        if (this.worker === worker) {
-          worker.terminate();
-          this.worker = null;
-        }
-        throw err;
+        // A broken stored copy (an empty or cut-off piece left by a download that stopped) fails
+        // the same way every time. The pieces whose size doesn't match the model's index are
+        // deleted, so only those download again; if none can be found, the whole model is.
+        if (!isBrokenCacheError(err)) throw err;
+        this.loadStage = 'Repairing the download';
+        onProgress?.(0, total);
+        const record = webllm.prebuiltAppConfig.model_list.find((m) => m.model_id === this.spec.mlcId);
+        const dropped =
+          record && typeof caches !== 'undefined'
+            ? await dropBrokenPieces(await caches.open(WEBLLM_CACHE), modelFilesUrl(record.model)).catch(() => 0)
+            : 0;
+        if (dropped === 0) await webllm.deleteModelAllInfoInCache(this.spec.mlcId).catch(() => {});
+        await this.load(webllm.CreateWebWorkerMLCEngine, total, onProgress);
       }
     })().finally(() => {
       this.initPromise = null;
     });
     return this.initPromise;
+  }
+
+  /** One attempt at loading the model in a new worker */
+  private async load(
+    create: typeof import('@mlc-ai/web-llm').CreateWebWorkerMLCEngine,
+    total: number,
+    onProgress?: (loaded: number, total: number) => void
+  ): Promise<void> {
+    const worker = new Worker(new URL('../workers/webllm.worker.ts', import.meta.url), { type: 'module' });
+    this.worker = worker;
+    try {
+      const engine = await create(
+        worker,
+        this.spec.mlcId,
+        // WebLLM reports a 0..1 fraction (download, then loading onto the GPU) and what it's doing
+        {
+          initProgressCallback: (report) => {
+            this.loadStage = report.text ?? '';
+            onProgress?.(Math.round(report.progress * total), total);
+          },
+        },
+        { context_window_size: this.spec.contextLimit }
+      );
+      if (this.worker !== worker) {
+        // Disposed while loading
+        await engine.unload().catch(() => {});
+        throw new Error(`${this.modelId} unloaded`);
+      }
+      this.engine = engine;
+      onProgress?.(total, total);
+    } catch (err) {
+      if (this.worker === worker) {
+        worker.terminate();
+        this.worker = null;
+      }
+      throw err;
+    }
   }
 
   generate(options: LlmGenerationOptions): Promise<LlmGenerationResult> {

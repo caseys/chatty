@@ -832,6 +832,11 @@ export class VoiceAssistantEngine {
   }
 
   /** Name of the model(s) loading/answering, for status text. */
+  /** What the chat model's runtime is doing while it loads (WebLLM only), or '' */
+  getLlmLoadStage(): string {
+    return (this.chatLlm as { loadStage?: string }).loadStage ?? '';
+  }
+
   getLlmDisplayName(): string {
     if (this.phoneModels) return this.phoneModels.chatSpec.label;
     if (this.localChat) return findLocalChatModel(this.localChat.modelId)?.label ?? this.localChat.modelId;

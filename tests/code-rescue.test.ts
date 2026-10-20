@@ -171,3 +171,35 @@ describe('syntax error lines', () => {
     expect(await syntaxErrorLine('const a = await fetch("x");\nreturn a;')).toBeUndefined();
   });
 });
+
+describe('broken model downloads', () => {
+  it('recognizes the error a broken stored copy gives, and nothing else', async () => {
+    const { isBrokenCacheError } = await import('../src/runtimes/webllm-provider.ts');
+    expect(isBrokenCacheError(new Error('Tensor-cache record range [0, 393216) exceeds shard size 0'))).toBe(true);
+    expect(isBrokenCacheError(new Error('Failed to get GPU adapter'))).toBe(false);
+  });
+});
+
+describe('repairing a broken model download', () => {
+  it('deletes only the stored pieces whose size does not match the index', async () => {
+    const { dropBrokenPieces, modelFilesUrl } = await import('../src/runtimes/webllm-provider.ts');
+    const base = modelFilesUrl('https://huggingface.co/mlc-ai/Some-Model-MLC');
+    expect(base).toBe('https://huggingface.co/mlc-ai/Some-Model-MLC/resolve/main/');
+    const store = new Map<string, Response>([
+      [`${base}tensor-cache.json`, Response.json({ records: [
+        { dataPath: 'params_shard_0.bin', nbytes: 8 },
+        { dataPath: 'params_shard_1.bin', nbytes: 4 },
+        { dataPath: 'params_shard_2.bin', nbytes: 4 },
+      ] })],
+      [`${base}params_shard_0.bin`, new Response(new Uint8Array(8))],
+      [`${base}params_shard_1.bin`, new Response(new Uint8Array(0))],
+      // params_shard_2.bin was never downloaded
+    ]);
+    const cache = {
+      match: async (url: string) => store.get(url)?.clone(),
+      delete: async (url: string) => store.delete(url),
+    } as unknown as Cache;
+    expect(await dropBrokenPieces(cache, base)).toBe(1);
+    expect([...store.keys()].map((k) => k.split('/').pop())).toEqual(['tensor-cache.json', 'params_shard_0.bin']);
+  });
+});
