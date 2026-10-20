@@ -195,14 +195,14 @@ const FACTS_REQUEST =
 const PROMPT_RULES: ReadonlyArray<{ text: string; when?: RegExp }> = [
   { text: '- Reply with perfect JavaScript syntax ONLY. Concise logic, fully functional.' },
   { text: '- Act first: do what was asked (draw, build, play, compute, look up) as a live, working browser app, then tell the user what you did with speak("...").' },
-  { text: '- ALL messages to the user go through speak(text): plain conversation is just speak(), and nothing is written outside the code (no explanations, notes or markdown). speak() accepts computed values in template strings. Never mention code, JavaScript or programming in what you say, and never offer code.' },
+  { text: '- ALL messages to the user go through speak(text): plain conversation is just speak(). speak() accepts computed values in template strings.' },
   { text: '- What you add to document.body appears in a card in the middle of the screen. Use HTML and CSS for interfaces: buttons, forms, cards, notes, tables, gauges, dashboards and widgets. The screen is wiped with clear(): to completely update the screen, call clear() first.' },
   { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations.', when: DRAWING_REQUEST },
   { text: '- For 3D, use WebGL on a <canvas>.', when: THREE_D_REQUEST },
   { text: '- <svg> works for diagrams and icons.', when: DIAGRAM_REQUEST },
-  { text: '- Sound: Web Audio (create an AudioContext and await ctx.resume() first), or Web MIDI for instruments: out = (await navigator.requestMIDIAccess()).outputs.values().next().value; then call out.send([instrument, notes, velocity, durationMs], time) once per note, chord or drum hit, at its own time. Instruments: piano, bass, organ, guitar, strings, violin, trumpet, sax, flute, drums. Notes: one note (\'G3\'), a chord by name (\'G major\', \'Am7\'), a scale (\'G pentatonic down\' plays its notes in order), drum hits (\'kick\', \'snare\', \'hihat\'), or an array (up to 4 notes sound together; 5 or more play one after another). Timing: declare const bpm, beat = 60000 / bpm and start = performance.now() at the top; beat n plays at start + n * beat, and a 4/4 measure is 4 beats. Play it once unless asked to loop or repeat. To loop: put the bars in a function that ends with start += their length, call it, then setInterval it with that same length. A beat or groove means drums. Boom-chuck: kick on beats 1 and 3, snare on 2 and 4. Walking bass: one bass note per beat, stepping through the chord\'s notes. Shuffle: hi-hats on each beat and two-thirds of the way through it.', when: SOUND_REQUEST },
+  { text: '- Sound: Web Audio (create an AudioContext and await ctx.resume() first), or Web MIDI for instruments: out = (await navigator.requestMIDIAccess()).outputs.values().next().value; then call out.send([instrument, notes, velocity, durationMs], time) once per note, chord or drum hit, at its own time. Instruments: piano, bass, organ, guitar, strings, violin, trumpet, sax, flute, drums. Notes: one note (\'G3\'), a chord by name (\'G major\', \'Am7\'), a scale (\'G pentatonic down\' plays its notes in order), drum hits (\'kick\', \'snare\', \'hihat\'), or an array (up to 4 notes sound together; 5 or more play one after another). Timing: declare const bpm, beat = 60000 / bpm and start = performance.now() at the top; beat n plays at start + n * beat, and a 4/4 measure is 4 beats. To loop: put the bars in a function that ends with start += their length, call it, then setInterval it with that same length. A beat or groove means drums. Boom-chuck: kick on beats 1 and 3, snare on 2 and 4. Walking bass: one bass note per beat, stepping through the chord\'s notes. Shuffle: hi-hats on each beat and two-thirds of the way through it.', when: SOUND_REQUEST },
   { text: '- Answer what you know directly. To look up facts you don\'t know, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it, not the whole text.', when: FACTS_REQUEST },
-  { text: '- Write code instead of guessing results.' },
+  { text: '- Calculate all results using JavaScript logic.' },
   { text: '- If you define a function, call it.' },
 ];
 
@@ -232,6 +232,12 @@ export const CONCISE_VOICE_SYSTEM_PROMPT = promptRules();
 
 /** A line of a streaming reply that starts code: the reply isn't prose (shown and spoken as it comes) */
 const STREAM_CODE_LINE = /^(?:const|let|var|function|class|import|MODE:|```|\/\/|\/\*|root\.|document\.|window\.)\b/m;
+/** What the code panel shows of a streaming reply: the inside of its code fences, when it has any */
+function codeView(text: string): string {
+  if (!text.includes('```')) return text;
+  return [...text.matchAll(/```[\w-]*[^\n]*\n([\s\S]*?)(?:```|$)/g)].map((m) => m[1]).join('\n');
+}
+
 /** Markup in a streaming reply */
 const STREAM_MARKUP = /<(?:script|canvas|html|!doctype)\b/i;
 
@@ -829,7 +835,8 @@ export class ConversationOrchestrator {
               }
             }
             const currentFull = rawAccumulatedTokens;
-            this.events.onRawOutput?.(turnId, currentFull);
+            // The code panel shows only code: the fenced part once a fence starts
+            this.events.onRawOutput?.(turnId, codeView(currentFull));
 
             if (streamMode === 'unknown') {
               // Markup counts as code too: an HTML reply
@@ -842,7 +849,10 @@ export class ConversationOrchestrator {
                 (currentFull.length >= 10 && !/^\s*(?:speak|const|let|var|func|root|doc|win|import|\/\/|\/\*|`|<)/i.test(currentFull))
               ) {
                 streamMode = 'prose';
-                if (!quietReply) {
+                // Shown as it streams only for the phone chat model, whose replies are all prose:
+                // otherwise prose may still turn out to wrap code, and talk outside speak() is
+                // dropped (see the isProse branch for a reply that is only prose)
+                if (!quietReply && voiceProseWhileStreaming) {
                   // Flush buffered prefix to canonicalContent
                   assistantMsg.canonicalContent = currentFull;
                   this.events.onTokenStream?.(turnId, currentFull, assistantMsg.canonicalContent);
@@ -866,7 +876,7 @@ export class ConversationOrchestrator {
               streamMode = 'code';
             }
             if (streamMode === 'prose') {
-              if (!quietReply) {
+              if (!quietReply && voiceProseWhileStreaming) {
                 assistantMsg.canonicalContent += chunk;
                 this.events.onTokenStream?.(turnId, chunk, assistantMsg.canonicalContent);
                 this.events.onMessageUpdated?.({ ...assistantMsg });
@@ -933,8 +943,8 @@ export class ConversationOrchestrator {
                 ? "The fix didn't change the program"
                 : 'The fix came back incomplete';
             appendRunLog('discarded', `// ${why}, so it was not run. The model replied:\n${rawContent}`);
-            // The code panel shows what the model sent instead, to see why it didn't apply
-            this.events.onRawOutput?.(turnId, `// ${why}. The model replied:\n${rawContent}`);
+            // The code panel keeps the program that is still current; the reply is in the run log
+            this.events.onRawOutput?.(turnId, `// ${why} (its reply is in the log)\n${originalCode}`);
             this.events.onRunStatus?.(turnId, {
               kind: 'error',
               text: `${why}, so it was not run. ${failed?.error ? errorText(failed.error, failed.errorLine) : 'The program failed.'}`,

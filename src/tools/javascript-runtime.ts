@@ -152,46 +152,117 @@ function htmlToCode(html: string): string {
 const CODE_LINE =
   /^\s*(?:const |let |var |(?:async\s+)?function\b|class |await |speak\(|playNotes\(|root\.|document\.|window\.|canvas\.|ctx\.|for\s*\(|\/\/)/;
 
+type ReplyPart = { kind: 'code' | 'talk'; text: string };
+
+/** A line of code (not a sentence) */
+const looksLikeCode = (line: string) => CODE_LINE.test(line) || /[;{}()[\]]\s*(\/\/.*)?$/.test(line.trim());
+/** A line of talk: words, not code or markup */
+const looksLikeTalk = (line: string) => {
+  const t = line.trim();
+  return !!t && !looksLikeCode(t) && !/[<>{};=]/.test(t) && /[A-Za-z]{2,}[^A-Za-z]+[A-Za-z]{2,}/.test(t);
+};
+
+/**
+ * The parts of an unfenced reply, in order. Models put a blank line between their code and their
+ * talk, so each paragraph is one or the other; a paragraph that starts or ends with sentences has
+ * those split off. When taking the talk out leaves code that doesn't parse (plain text inside an
+ * HTML template string), it was code after all.
+ */
+function paragraphParts(text: string): ReplyPart[] {
+  const parts: ReplyPart[] = [];
+  const add = (kind: ReplyPart['kind'], lines: string[]) => {
+    const body = lines.join('\n').trim();
+    if (!body) return;
+    const prev = parts[parts.length - 1];
+    if (prev && prev.kind === kind) prev.text += (kind === 'code' ? '\n\n' : ' ') + body;
+    else parts.push({ kind, text: body });
+  };
+  for (const paragraph of text.split(/\n[ \t]*\n/)) {
+    const lines = paragraph.split('\n');
+    let start = 0;
+    let end = lines.length;
+    while (start < end && (looksLikeTalk(lines[start]) || !lines[start].trim())) start++;
+    while (end > start && (looksLikeTalk(lines[end - 1]) || !lines[end - 1].trim())) end--;
+    add('talk', lines.slice(0, start));
+    // Not one line of code in it ("Hi!", a list of words): talk
+    const middle = lines.slice(start, end);
+    const isCode =
+      middle.some((line) => CODE_LINE.test(line)) || (parsesAsJs(middle.join('\n')) && /[;{}=]/.test(middle.join('\n')));
+    add(isCode ? 'code' : 'talk', middle);
+    add('talk', lines.slice(end));
+  }
+  const codeParts = parts.filter((part) => part.kind === 'code');
+  if (codeParts.length === 0) return parts;
+  // Talk between code parts that the code needs to parse: all of it from the first code to the last is code
+  const code = codeParts.map((part) => part.text).join('\n\n');
+  if (!parsesAsJs(code)) {
+    const first = parts.indexOf(codeParts[0]);
+    const last = parts.lastIndexOf(codeParts[codeParts.length - 1]);
+    const span = text.slice(text.indexOf(parts[first].text), text.lastIndexOf(parts[last].text) + parts[last].text.length);
+    if (parsesAsJs(span)) {
+      return [...parts.slice(0, first), { kind: 'code', text: span }, ...parts.slice(last + 1)];
+    }
+  }
+  return parts;
+}
+
 /**
  * Pulls the program out of a reply that wraps it in markdown or explanation (small models often
- * do, despite the prompt), so it runs instead of being read aloud. `lead` is the prose before it.
+ * do, despite the prompt), with the talk around it in order, to be said with speak() (withTalk).
+ * Null when the reply has no code.
  */
-function extractProgram(text: string): { code: string; lead: string } | null {
+function extractProgram(text: string): ReplyPart[] | null {
   const blocks = Array.from(text.matchAll(/```([\w-]*)[^\n]*\n([\s\S]*?)(?:```|$)/g));
   if (blocks.length > 0) {
-    const parts: string[] = [];
-    for (const [, lang, body] of blocks) {
+    const parts: ReplyPart[] = [];
+    let at = 0;
+    for (const block of blocks) {
+      const [whole, lang, body] = block;
+      // Outside the fences may be code too ("speak(…); clear();" before an ```html block)
+      parts.push(...paragraphParts(text.slice(at, block.index)));
+      at = (block.index ?? 0) + whole.length;
       const l = lang.toLowerCase();
-      if (l === 'html') parts.push(htmlToCode(body));
-      else if (l === 'css') parts.push(`document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ${JSON.stringify(body)} }));`);
-      else if (!l || /^(?:js|javascript|jsx|mjs)$/.test(l)) parts.push(body);
+      if (l === 'html') parts.push({ kind: 'code', text: htmlToCode(body) });
+      else if (l === 'css') parts.push({ kind: 'code', text: `document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ${JSON.stringify(body)} }));` });
+      else if (!l || /^(?:js|javascript|jsx|mjs)$/.test(l)) parts.push({ kind: 'code', text: body.trim() });
     }
-    const code = parts.join('\n').trim();
-    return code ? { code, lead: text.slice(0, blocks[0].index).trim() } : null;
+    parts.push(...paragraphParts(text.slice(at)));
+    return parts.some((part) => part.kind === 'code' && part.text) ? parts : null;
   }
-  // Unfenced: explanation, then code, then maybe more explanation
-  const lines = text.split('\n');
-  const start = lines.findIndex((l) => CODE_LINE.test(l));
-  if (start < 0) return null;
-  const lead = lines.slice(0, start).join(' ').trim();
-  const looksLikeCode = (line: string) => CODE_LINE.test(line) || /[;{}()[\]]\s*(\/\/.*)?$/.test(line.trim());
-  // A line that is, or ends in, a sentence ("…; Then we play it."), but not a // comment
-  const looksLikeProse = (line: string) => {
-    const t = line.trim();
-    return !t.startsWith('//') && (/^[A-Z][^;{}=]*[.!?]$/.test(t) || /\b[A-Z][\w']*,?( [\w'-]+,?){2,}[.!?]$/.test(t));
-  };
-  for (let end = lines.length; end > start && lines.length - end < 40; end--) {
-    const code = lines.slice(start, end).join('\n').trim();
-    if (!parsesAsJs(code)) continue;
-    // Only explanation may be cut off the end. Cut-off code means a syntax error broke the
-    // program: run it whole, so the error reaches the model to fix instead of a fragment running
-    const cut = lines.slice(end).filter((line) => line.trim());
-    if (cut.some(looksLikeCode) && !cut.some(looksLikeProse)) break;
-    return { code, lead };
-  }
-  // Nothing parses: run it whole if it's all code (the error goes to the model), else it's prose
-  const tail = lines.slice(start).filter((line) => line.trim());
-  return tail.some(looksLikeProse) ? null : { code: lines.slice(start).join('\n').trim(), lead };
+  const parts = paragraphParts(text);
+  return parts.some((part) => part.kind === 'code') ? parts : null;
+}
+
+/** A sentence about the code itself ("Here's the JavaScript code:"): nothing the user needs to hear */
+const CODE_TALK = /\b(?:code|javascript|js|snippet|script|html|css|function|variable|syntax|example usage)\b|```/i;
+
+/** Talk the model wrote outside its code, as one plain sentence or two to say, or '' */
+function talkToSay(text: string, code: string): string {
+  const plain = text
+    .replace(/[#*_`>]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const sentences = (plain.match(/[^.!?]+[.!?]*/g) ?? [])
+    .map((sentence) => sentence.trim())
+    // Already said by the program, or about the code rather than to the user
+    .filter((sentence) => sentence && !CODE_TALK.test(sentence) && !code.includes(sentence.replace(/[.!?:]+$/, '')));
+  return sentences.join(' ').replace(/:$/, '.').slice(0, 300).trim();
+}
+
+/**
+ * The program with the talk around it said through speak(), each part where the model put it:
+ * all messages to the user go through speak()
+ */
+function withTalk(parts: ReplyPart[]): string {
+  const code = parts.filter((part) => part.kind === 'code').map((part) => part.text).join('\n');
+  return parts
+    .map((part) => {
+      if (part.kind === 'code') return part.text;
+      const talk = talkToSay(part.text, code);
+      return talk ? `speak(${JSON.stringify(talk)});` : '';
+    })
+    .filter(Boolean)
+    .join('\n');
 }
 
 /**
@@ -385,12 +456,6 @@ export function exposeFunctionsToInlineHandlers(code: string): string {
 }
 
 /** Speaks the explanation that came before extracted code when the code says nothing itself. */
-function withLead(code: string, lead: string): string {
-  if (!lead || /\bspeak\(/.test(code) || /\b(?:code|javascript|js|script|snippet|program|html|function)\b/i.test(lead)) {
-    return code;
-  }
-  return `speak(${JSON.stringify(lead.replace(/[\s:]+$/, '').slice(0, 200))});\n${code}`;
-}
 
 /**
  * Other ways small models fence code (triple double or single quotes, ~~~, or a
@@ -421,7 +486,7 @@ export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
   if (cleaned.includes('```')) {
     const program = extractProgram(cleaned);
     if (program) {
-      cleaned = withLead(program.code, program.lead);
+      cleaned = withTalk(program);
       hadFences = true;
     }
   }
@@ -468,7 +533,7 @@ export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
   // 4b. Explanation wrapped around unfenced code: run the code part
   const program = extractProgram(cleaned);
   if (program) {
-    return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(withLead(program.code, program.lead))), isProse: false };
+    return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(withTalk(program))), isProse: false };
   }
 
   // 5. If it's a simple arithmetic expression or number (e.g. 42 or 3 * 7), compute and speak it
@@ -1570,6 +1635,14 @@ export class JavascriptRuntime {
       value: (options) => window.parent.__chattyMidi(options, () => performance.now()),
     });
 
+    // Whether the program has put anything on screen (canvas, svg, div, table, etc.)
+    function hasVisualNow() {
+      const rootEl = document.getElementById('root');
+      return Boolean(rootEl && rootEl.childNodes.length > 0 && rootEl.innerHTML.trim().length > 0) ||
+        Boolean(document.querySelector('canvas, svg, table, img, video, form, button, input, div:not(#root)')) ||
+        Array.from(document.body.children).some(c => c !== rootEl && c.tagName !== 'SCRIPT' && c.tagName !== 'STYLE');
+    }
+
     // clear(): empties the card, so a program can start the screen over
     window.clear = () => {
       window.root.innerHTML = '';
@@ -1662,12 +1735,7 @@ export class JavascriptRuntime {
           res = await res;
         }
 
-        // Detect if DOM has rendered visual elements (canvas, svg, div, table, etc.)
-        const rootEl = document.getElementById('root');
-        const hasVisualElements =
-          Boolean(rootEl && rootEl.childNodes.length > 0 && rootEl.innerHTML.trim().length > 0) ||
-          Boolean(document.querySelector('canvas, svg, table, img, video, form, button, input, div:not(#root)')) ||
-          Array.from(document.body.children).some(c => c !== rootEl && c.tagName !== 'SCRIPT' && c.tagName !== 'STYLE');
+        const hasVisualElements = hasVisualNow();
 
         // A function (often the program's last line defines or exposes one) is never a reply
         let out = typeof res === 'function' ? undefined : res;
@@ -1697,7 +1765,8 @@ export class JavascriptRuntime {
           error: err ? (err.message || String(err)) : String(err),
           errorLine: errorLine(err),
           logs,
-          hasVisual: false,
+          // A program that failed partway may already have drawn something (the Clear button shows)
+          hasVisual: hasVisualNow(),
         }, '*');
       } finally {
         console.log = origLog;

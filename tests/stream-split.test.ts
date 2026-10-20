@@ -95,7 +95,7 @@ describe('voicing a streaming reply', () => {
     expect(voiced.map((v) => v.text)).toEqual(['Here it is.']);
   });
 
-  it('voices a prose reply once, after it is complete, while the chat shows it as it streams', async () => {
+  it('shows and voices a prose reply once, after it is complete', async () => {
     const prose = 'Paris is the capital of France. It sits on the Seine river. Many people visit every year.';
     const { voiced, shown } = await voicedFrom(prose);
     expect(voiced.map((v) => v.text)).toEqual([
@@ -104,9 +104,8 @@ describe('voicing a streaming reply', () => {
       'Many people visit every year.',
     ]);
     expect(voiced.every((v) => v.replyDone)).toBe(true);
-    // The chat bubble still grew a piece at a time
-    expect(shown.length).toBeGreaterThan(3);
-    expect(shown.at(-1)).toBe(prose);
+    // Not shown while it streams: it might still have turned out to wrap code
+    expect(shown).toEqual([prose]);
   });
 
   it('voices a short prose reply that never left the undecided state', async () => {

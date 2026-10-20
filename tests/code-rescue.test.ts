@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { callUncalledFunctions, exposeFunctionsToInlineHandlers, inspectExecutableCode } from '../src/tools/javascript-runtime.ts';
 
 describe('running code the model wrapped or forgot to call', () => {
-  it('runs a fenced block after an explanation, speaking the explanation', () => {
+  it('runs a fenced block, saying the talk before and after it with speak()', () => {
     const out = inspectExecutableCode('Sure! Here is a red circle:\n```javascript\nroot.innerHTML = "<b>hi</b>";\n```\nEnjoy!');
     expect(out.isProse).toBe(false);
-    expect(out.code).toBe('speak("Sure! Here is a red circle");\nroot.innerHTML = "<b>hi</b>";');
+    // All messages go through speak(): the talk around the code becomes speak() calls
+    expect(out.code).toBe('speak("Sure! Here is a red circle.");\nroot.innerHTML = "<b>hi</b>";\nspeak("Enjoy!");');
   });
 
   it('does not speak explanations that talk about code', () => {
@@ -32,10 +33,29 @@ describe('running code the model wrapped or forgot to call', () => {
     expect(out.code).toBe('document.body.insertAdjacentHTML("beforeend", "<canvas id=\\"c\\"></canvas>");\n\nconst a = 1;\n\nspeak("Here it is.");');
   });
 
+  it('says talk paragraphs between code paragraphs where the model put them', () => {
+    const reply = 'Here is your counter.\n\nlet n = 0;\nroot.textContent = n;\n\nNow it counts up every second.\n\nsetInterval(() => { n++; root.textContent = n; }, 1000);';
+    expect(inspectExecutableCode(reply).code).toBe(
+      'speak("Here is your counter.");\nlet n = 0;\nroot.textContent = n;\nspeak("Now it counts up every second.");\nsetInterval(() => { n++; root.textContent = n; }, 1000);'
+    );
+  });
+
+  it('runs code written outside the fences, and says only the talk', () => {
+    const reply = 'speak("Here is your list.");\nclear();\n\n```html\n<ul><li>Towel</li></ul>\n```\n\nHave a good trip!';
+    const code = inspectExecutableCode(reply).code;
+    expect(code.startsWith('speak("Here is your list.");\nclear();\n')).toBe(true);
+    expect(code.endsWith('speak("Have a good trip!");')).toBe(true);
+  });
+
+  it('keeps plain text inside a template string as code', () => {
+    const reply = 'root.innerHTML = `<h2>Notes</h2>\n\nWelcome to your notes app\n\n<p>Add one below</p>`;';
+    expect(inspectExecutableCode(reply).code).toBe(reply);
+  });
+
   it('runs unfenced code between explanations', () => {
     const out = inspectExecutableCode('I will draw it now.\nconst c = document.createElement("canvas");\nroot.appendChild(c);\nThis creates a canvas.');
     expect(out.isProse).toBe(false);
-    expect(out.code).toBe('speak("I will draw it now.");\nconst c = document.createElement("canvas");\nroot.appendChild(c);');
+    expect(out.code).toBe('speak("I will draw it now.");\nconst c = document.createElement("canvas");\nroot.appendChild(c);\nspeak("This creates a canvas.");');
   });
 
   it('calls a drawing function nothing calls', () => {

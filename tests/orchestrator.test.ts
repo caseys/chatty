@@ -1231,8 +1231,7 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         },
         'standard'
       );
-      expect(built.systemPrompt).toContain('Never mention code, JavaScript or programming');
-      expect(built.systemPrompt).toContain('never offer code');
+      expect(built.systemPrompt).toContain('ALL messages to the user go through speak(text)');
     });
 
     it('runs interactive widgets and canvas games in iframe mode', async () => {
