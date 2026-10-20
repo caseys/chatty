@@ -20,8 +20,17 @@ describe('fix requests for failed programs', () => {
         '}',
         'f();',
         '```',
+        'Marked line:',
+        'g(t);',
+        'Corrected line:',
       ].join('\n')
     );
+  });
+
+  it('drops copied labels, and a leading "Corrected line:" label', () => {
+    const failed = 'a();\n  g(t);\nb();';
+    expect(applyFixReply(failed, 'Corrected line: g(1);', 2).split('\n')[1]).toBe('  g(1);');
+    expect(applyFixReply(failed, 'Marked line:\nCorrected line:\ng(2);', 2).split('\n')[1]).toBe('  g(2);');
   });
 
   it('asks for the whole program when the error has no line', () => {

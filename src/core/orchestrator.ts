@@ -177,13 +177,13 @@ export function classifyTranscript(
 
 /** Requests (or the program being changed) that the optional rules are for */
 const SOUND_REQUEST =
-  /\b(?:play|music|song|sing|sound|beat|groove|drum|piano|bass|guitar|organ|violin|strings|trumpet|sax|flute|chord|melod|tune|notes?\b|midi|rhythm|jam|loop|tempo|bpm|beep|tone|audio|instrument|scale|requestMIDIAccess|AudioContext)/i;
+  /\b(?:play|music|song|sing|sound|beat|groove|drum|piano|bass|guitar|organ|violin|strings|trumpet|sax|flute|chord|melod|tune|notes?\b|midi|rhythm|jam|music loop|loop(?:ed)? (?:the )?(?:song|beat|music|melody)|tempo|bpm|beep|\btone\b.*\bplay|\bplay\b.*\btone\b|audio|instrument|\b[a-g][#b]? (?:major|minor|pentatonic)|(?:major|minor|pentatonic) scale|scale (?:in|of) [a-g]|requestMIDIAccess|AudioContext)/i;
 const DRAWING_REQUEST =
-  /\b(?:draw|paint|sketch|picture|image|art|animat|game|simulat|bounc|canvas|scene|shape|circle|square|triangle|star|sky|rainbow|landscape|pattern|fractal|particle|mov(?:e|ing)|getContext)/i;
+  /\b(?:draw|paint|sketch|picture|image|art\b|animat|game|simulat|bounc|canvas|scene|shape|circle|square|triangle|stars?\b|sky|rainbow|landscape|pattern|fractal|particle|mov(?:e|ing)|getContext)/i;
 const THREE_D_REQUEST = /(?:\b3d\b|\bthree[- ]?d\b|\bcube|\bsphere|\bwebgl|\brotat|\bspin|\borbit|\bplanet|THREE\.)/i;
 const DIAGRAM_REQUEST = /\b(?:svg|diagram|icon|chart|graph|logo|vector|flowchart|map)/i;
 const FACTS_REQUEST =
-  /\b(?:who|what|when|where|why|which|how (?:many|much|old|tall|far|big|long)|tell me|about|look up|search|find out|history|define|meaning|capital|population|weather|news|facts?|wiki|fetch)\b/i;
+  /\b(?:who (?:was|is)|what (?:is|was|are) (?:a|an|the)|when|where|why|which|how (?:many|much|old|tall|far|big|long)|tell me about|look up|search|find out|history|define|meaning|capital|population|weather|news|facts?|wiki|fetch)\b/i;
 
 /**
  * The rules, as bullets (small models copy numbering into their replies). A rule with `when` is
@@ -232,8 +232,6 @@ export const EXAMPLE_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content:
     role: 'assistant',
     content: 'speak("Morning! Keep Zibble\'s flying lessons short, reward every good landing, and keep the snacks away from the curtains.");',
   },
-  { role: 'user', content: 'If one blorp is 2,340 zorbs, how many zorbs are in 0.15 blorps?' },
-  { role: 'assistant', content: 'const zorbs = 2340 * 0.15;\nspeak(`0.15 blorps is ${zorbs} zorbs.`);' },
   { role: 'user', content: 'Play the Zorblax theme on organ with strings and a slow beat, on repeat' },
   {
     role: 'assistant',
@@ -288,7 +286,7 @@ export const EXAMPLE_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content:
       '  box.textContent = left;',
       '  if (left === 0) {',
       '    clearInterval(tick);',
-      '    speak("Liftoff!");',
+      '    speak("Time\'s up.");',
       '  }',
       '}, 1000);',
       'speak("Blip lifts off in seven seconds.");',
@@ -308,7 +306,7 @@ export const EXAMPLE_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content:
  */
 export const FORMAT_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content: string }> = [
   { role: 'user', content: 'Hi Chatty!' },
-  { role: 'assistant', content: 'speak("Hi! What would you like me to make?");' },
+  { role: 'assistant', content: 'document.body.innerHTML = "<h2>Hi!</h2>";\nspeak("Hi! What would you like me to make?");' },
 ];
 
 /** The example exchanges as the system prompt shows them (see EXAMPLE_TURNS) */
@@ -320,6 +318,14 @@ const EXAMPLES_PROMPT = [
   ),
   '</examples>',
 ].join('\n');
+
+/** Names from the examples: a reply that holds one the request doesn't was copied from them */
+const EXAMPLE_LEAK_WORDS = ['zibble', 'zorbs', 'blips', 'zorblax', 'okapi'];
+const LEAK_RETRY_NOTE = '\n(That reply reused the examples\' names. Write it again for this request.)';
+function leakWordsIn(text: string): string[] {
+  const lower = text.toLowerCase();
+  return EXAMPLE_LEAK_WORDS.filter((word) => lower.includes(word));
+}
 
 /** A line of a streaming reply that starts code: the reply isn't prose (shown and spoken as it comes) */
 const STREAM_CODE_LINE = /^(?:const|let|var|function|class|import|MODE:|```|\/\/|\/\*|root\.|document\.|window\.)\b/m;
@@ -618,8 +624,10 @@ export class ConversationOrchestrator {
 
     // Context Compaction Check: When context exceeds threshold (>= 85% of what the prompt may
     // use: the window less the room for the reply), compact before continuing
+    // (A fix turn doesn't use the history, so its request, program and all, must not wipe it)
     this.syncPromptReserve();
     if (
+      !options?.autoFix &&
       this.memoryStore.isContextCompactionNeeded(
         this.llmProvider.contextLimit,
         normalized,
@@ -649,13 +657,13 @@ export class ConversationOrchestrator {
     };
 
     // Stage 2: Resolve context BEFORE adding current message so history is clean
-    const resolvedContext = this.memoryStore.resolveContextForQuery(
-      normalized,
-      Math.floor(this.memoryStore.usablePromptTokens(this.llmProvider.contextLimit) * this.compactionThreshold)
-    );
-
-    // Chatty's own fix request is no reference to an earlier answer ("Your last program …")
-    if (options?.autoFix) resolvedContext.resolvedReferencesNote = null;
+    // (A fix turn sends no history, memories or references: nothing to resolve)
+    const resolvedContext: ReturnType<ConversationMemoryStore['resolveContextForQuery']> = options?.autoFix
+      ? { workingMessages: [], conversationSummary: null, relevantMemories: [], resolvedReferencesNote: null, estimatedTokens: 0 }
+      : this.memoryStore.resolveContextForQuery(
+          normalized,
+          Math.floor(this.memoryStore.usablePromptTokens(this.llmProvider.contextLimit) * this.compactionThreshold)
+        );
 
     // Commit user message to working memory
     this.memoryStore.addMessage(userMsg);
@@ -872,6 +880,13 @@ export class ConversationOrchestrator {
       if (!finalCanonicalText) {
         let rawAccumulatedTokens = '';
         let lastSpokenTextEmitted = '';
+        // A normal reply that reuses the examples' names (and the request doesn't) is written again
+        // once, before anything of it runs; its streamed speech stops at the word (see EXAMPLE_LEAK_WORDS)
+        const requestLower = `${normalized}\n${programBeingEdited ?? ''}`.toLowerCase();
+        const leaksExamples = (text: string) =>
+          !options?.autoFix && leakWordsIn(text).some((word) => !requestLower.includes(word));
+        let leaked = false;
+        let retriedForLeak = false;
         // Phone chat model replies in prose only; only the coder's output is run as code
         const forceProse = !!this.phonePipeline && generationProvider !== this.phonePipeline.coder;
         let streamMode: 'unknown' | 'code' | 'prose' = forceProse ? 'prose' : 'unknown';
@@ -883,23 +898,30 @@ export class ConversationOrchestrator {
         // back as chat instead of the program, it is dropped (see lostProgram)
         const quietReply = !!options?.autoFix;
         // Small models can fall into repeating one line forever: stop generating when they do
-        const generationAbort = new AbortController();
+        let generationAbort = new AbortController();
         const abortGeneration = () => generationAbort.abort();
         signal.addEventListener('abort', abortGeneration, { once: true });
         let stoppedRepeating = false;
         let repeatCheckedAt = 0;
 
-        const genResult = await withActivity('generating a reply', () => generationProvider.generate({
+        const generateReply = (messages: typeof promptMessages) => withActivity('generating a reply', () => generationProvider.generate({
           turnId,
           systemPrompt,
-          messages: promptMessages,
+          messages,
           temperature: 0.1,
           maxOutputTokens: generationProvider.maxOutputTokens,
+          // A fix wants the one most likely line, not a varied one
+          ...(options?.autoFix ? { exact: true } : {}),
           signal: generationAbort.signal,
           onToken: (chunk) => {
-            if (!this.scheduler.isTurnValid(turnId) || stoppedRepeating) return;
+            if (!this.scheduler.isTurnValid(turnId) || stoppedRepeating || leaked) return;
 
             rawAccumulatedTokens += chunk;
+            if (!retriedForLeak && leaksExamples(rawAccumulatedTokens)) {
+              leaked = true;
+              generationAbort.abort();
+              return;
+            }
             if (rawAccumulatedTokens.length - repeatCheckedAt >= 40) {
               repeatCheckedAt = rawAccumulatedTokens.length;
               const cut = repetitionCutIndex(rawAccumulatedTokens);
@@ -999,6 +1021,29 @@ export class ConversationOrchestrator {
           },
         }));
 
+        let genResult = await generateReply(promptMessages);
+        if (!retriedForLeak && this.scheduler.isTurnValid(turnId) && !signal.aborted && (leaked || leaksExamples(rawAccumulatedTokens || genResult.text))) {
+          // Write it again for this request; the note goes with this attempt only, not into history
+          retriedForLeak = true;
+          leaked = false;
+          rawAccumulatedTokens = '';
+          lastSpokenTextEmitted = '';
+          processedSpeakMatches = 0;
+          streamMode = forceProse ? 'prose' : 'unknown';
+          stoppedRepeating = false;
+          repeatCheckedAt = 0;
+          generationAbort = new AbortController();
+          if (assistantMsg.canonicalContent) {
+            assistantMsg.canonicalContent = '';
+            this.events.onMessageUpdated?.({ ...assistantMsg });
+          }
+          const last = promptMessages[promptMessages.length - 1];
+          genResult = await generateReply([
+            ...promptMessages.slice(0, -1),
+            { ...last, content: `${last.content}${LEAK_RETRY_NOTE}` },
+          ]);
+        }
+
         if (generationProvider !== this.llmProvider) this.events.onStatusChange?.(null);
 
         signal.removeEventListener('abort', abortGeneration);
@@ -1037,6 +1082,7 @@ export class ConversationOrchestrator {
             !!originalCode && !lostProgram && !unchangedProgram && (await syntaxErrorLine(executableCode)) !== undefined;
 
           if (lostProgram || unchangedProgram || incompleteProgram) {
+            if (options?.autoFix) this.finishFixLog(lostProgram ? 'lost' : unchangedProgram ? 'unchanged' : 'incomplete');
             const failed = this.lastRun;
             const why = lostProgram
               ? 'The fix lost the program'
@@ -1050,6 +1096,7 @@ export class ConversationOrchestrator {
               text: `${why}, so it was not run. ${failed?.error ? errorText(failed.error, failed.errorLine) : 'The program failed.'}`,
             });
           } else if (isProse) {
+            if (options?.autoFix) this.finishFixLog('lost');
             this.events.onRunStatus?.(turnId, { kind: 'none', text: 'No code to run in this reply' });
             // The reply is known not to be a program, so voice it now (not while it streamed, when
             // it might still have turned into code). Nothing was voiced yet unless it is the phone
@@ -1104,6 +1151,7 @@ export class ConversationOrchestrator {
               audioContextAccessor: this.audioContextAccessor,
             });
             runFinished = true;
+            if (options?.autoFix) this.finishFixLog(execResult.error ? 'error' : 'ran');
             // A syntax error comes without a line: a parser finds it, so the fix can point at it
             if (execResult.error && execResult.errorLine === undefined) {
               execResult.errorLine = await syntaxErrorLine(executableCode);
@@ -1163,7 +1211,9 @@ export class ConversationOrchestrator {
                 execResult.output !== 'undefined' &&
                 execResult.output !== 'use strict' &&
                 // A program's last line is often `document.body.innerHTML = "<div>…"`: that value is markup, not a reply
-                !/<[a-z][^>]*>/i.test(String(execResult.output))
+                !/<[a-z][^>]*>/i.test(String(execResult.output)) &&
+                // …or an element it made ("[object HTMLDivElement]")
+                !/^\[object [A-Za-z]+\]$/.test(String(execResult.output))
               ) {
                 spokenText =
                   typeof execResult.output === 'object'
@@ -1274,6 +1324,7 @@ export class ConversationOrchestrator {
         return assistantMsg;
       }
       const error = err instanceof Error ? err : new Error(String(err));
+      if (options?.autoFix) this.finishFixLog('error');
       if (!assistantMsg.canonicalContent) {
         assistantMsg.canonicalContent = `[Error: ${error.message}]`;
         this.memoryStore.updateMessage(assistantMsg.id, {
@@ -1351,10 +1402,48 @@ export class ConversationOrchestrator {
       text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
     const request = fixRequest(run.task, run.code, run.errorLine, run.error);
+    this.startFixLog(run);
     // A short pause before the model runs again, unless the user moves on meanwhile
     void settle(AFTER_HEAVY_MS).then(() => {
       if (this.scheduler.getActiveTurnId()) return;
       return this.submitUserInput(request, { autoFix: run.code });
+    });
+  }
+
+  /**
+   * A record of each fix turn in localStorage (chatty_fix_log, the last 50), to see how often
+   * fixes work: the error and line, and how the fix ended (finishFixLog).
+   */
+  private fixLogTime: number | null = null;
+
+  private updateFixLog(change: (log: Array<Record<string, unknown>>) => void): void {
+    try {
+      if (typeof localStorage === 'undefined') return;
+      const parsed = JSON.parse(localStorage.getItem('chatty_fix_log') ?? '[]');
+      const log: Array<Record<string, unknown>> = Array.isArray(parsed) ? parsed : [];
+      change(log);
+      localStorage.setItem('chatty_fix_log', JSON.stringify(log.slice(-50)));
+    } catch {
+      // The log is only a measurement: never in the way
+    }
+  }
+
+  private startFixLog(run: { code: string; errorLine?: number; error: string | null }): void {
+    const time = Date.now();
+    this.fixLogTime = time;
+    const markedLine = run.errorLine ? (run.code.split('\n')[run.errorLine - 1] ?? '').trim() : '';
+    this.updateFixLog((log) => {
+      log.push({ time, modelId: this.llmProvider.modelId, error: run.error, line: run.errorLine ?? null, markedLine });
+    });
+  }
+
+  private finishFixLog(outcome: 'ran' | 'lost' | 'unchanged' | 'incomplete' | 'error'): void {
+    const time = this.fixLogTime;
+    if (time === null) return;
+    this.fixLogTime = null;
+    this.updateFixLog((log) => {
+      const entry = log.find((e) => e.time === time);
+      if (entry) entry.outcome = outcome;
     });
   }
 
@@ -1605,13 +1694,15 @@ export class ConversationOrchestrator {
     // The format, restated after the examples and everything else
     const tail = this.phonePipeline
       ? []
-      : ['Reply with perfect JavaScript syntax ONLY. ALL messages to the user go through speak().'];
+      : ['Reply with one JavaScript program: first the code that does the request, then one speak() sentence about it. ALL messages to the user go through speak().'];
     return { head, tail };
   }
 
   /** Estimated tokens of what every prompt carries: the system prompt and the format turns */
   private fixedPromptTokens(): number {
-    const { head, tail } = this.staticPromptParts();
+    // Small models get a prompt with only the rules a request needs, so count the core rules
+    // (the examples and format turns are always there)
+    const { head, tail } = this.staticPromptParts(this.isSmallModel ? '' : undefined);
     let tokens = this.memoryStore.estimateTokens([...head, ...tail].join('\n'));
     if (!this.phonePipeline) {
       // A few tokens per message for the chat template's role markers

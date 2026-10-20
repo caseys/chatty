@@ -19,13 +19,15 @@ const MARK_END = '// <<< ERROR';
 /** A line the model copied from the markers */
 const MARKER_LINE = /^\s*\/\/\s*(?:>>>|<<<)\s*ERROR\b.*$/;
 /** An instruction line the model copied back from the request */
-const INSTRUCTION_LINE = /^\s*(?:Reply with|First write|Then write|Second write)\b.*(?:Cause|corrected|program)/i;
+const INSTRUCTION_LINE =
+  /^\s*(?:(?:Reply with|First write|Then write|Second write)\b.*(?:Cause|corrected|program)|(?:Marked line|Corrected line):?\s*$)/i;
 
 export function fixRequest(request: string, code: string, line: number | undefined, error: string): string {
   const task = request.replace(/\s+/g, ' ').trim().replace(/[.!?:,;\s]+$/, '').slice(0, 200);
   const problem = error.trim().replace(/\.+$/, '');
   const lines = code.split('\n');
   const at = line && line >= 1 && line <= lines.length ? line : undefined;
+  const failing = at ? lines[at - 1].trim() : '';
   if (at) {
     const indent = lines[at - 1].match(/^\s*/)?.[0] ?? '';
     lines.splice(at - 1, 1, `${indent}${MARK_START}: ${problem}`, lines[at - 1], `${indent}${MARK_END}`);
@@ -40,6 +42,8 @@ export function fixRequest(request: string, code: string, line: number | undefin
     '```js',
     lines.join('\n'),
     '```',
+    // The reply starts right after the label, so it is the line and not talk
+    ...(at ? ['Marked line:', failing, 'Corrected line:'] : []),
   ].join('\n');
 }
 
@@ -94,6 +98,8 @@ function replyCode(reply: string): string[] {
   const fenced = reply.match(/```[\w-]*[ \t]*\n([\s\S]*?)(?:```|$)/);
   return (fenced ? fenced[1] : reply)
     .split('\n')
+    // "Corrected line: foo();" copied the label the request ended with
+    .map((l, i) => (i === 0 ? l.replace(/^\s*Corrected line:[ \t]*/i, '') : l))
     .filter((l) => !MARKER_LINE.test(l) && !INSTRUCTION_LINE.test(l) && !/^\s*```/.test(l));
 }
 

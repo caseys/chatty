@@ -61,6 +61,10 @@ export const LOCAL_CHAT_MODELS: ReadonlyArray<LocalChatModel> = [
   {
     // Not on phones: Transformers.js (ONNX) crashes the iPhone tab while loading
     ...local('lfm2.5-230m', 'LFM2.5 230M', '', 200, 450, 'Liquid AI, tiniest and fastest (experimental)', false),
+    // Too small to follow the full prompt: a phone-sized context makes the orchestrator treat it as
+    // a small model, though it stays off phones
+    contextLimit: 4096,
+    maxOutputTokens: 1280,
     onnx: { repo: 'LiquidAI/LFM2.5-230M-ONNX', dtype: 'q4' },
   },
   local('smollm2-360m', 'SmolLM2 360M', 'SmolLM2-360M-Instruct-q4f16_1-MLC', 204, 376, 'Tiniest download, basic answers', true),

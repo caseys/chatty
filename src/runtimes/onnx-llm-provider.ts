@@ -185,7 +185,8 @@ export class OnnxLlmProvider implements LlmRuntimeProvider {
     const res = await this.generateRaw({
       messages,
       maxNewTokens: options.maxOutputTokens ?? this.maxOutputTokens,
-      temperature: options.temperature,
+      // Exact turn: greedy decoding (temperature 0 means do_sample false in the worker)
+      temperature: options.exact ? 0 : options.temperature,
       topP: options.topP,
       signal: options.signal,
       onToken: options.onToken,

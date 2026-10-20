@@ -140,12 +140,19 @@ export class ConversationMemoryStore {
   compactIfNecessary(customMaxTurns?: number): ConversationSummary | null {
     const limit = customMaxTurns ?? this.maxVerbatimTurns;
     // An explicit limit (a forced compaction) trims exactly; the automatic one waits for the slack
-    if (this.messages.length <= limit + (customMaxTurns === undefined ? this.compactionSlack : 0)) {
+    // Fix turns (Chatty's own requests and their replies) are not conversation: they don't count
+    const fixTurns = this.fixTurnIds();
+    const counted = this.messages.filter((m) => !fixTurns.has(m.turnId)).length;
+    if (counted <= limit + (customMaxTurns === undefined ? this.compactionSlack : 0)) {
       return this.summary;
     }
 
-    const toSummarizeCount = this.messages.length - limit;
-    const olderMessages = this.messages.slice(0, toSummarizeCount);
+    // Cut after the last message that has to go; the fix turns before it go with it
+    let toSummarizeCount = 0;
+    for (let toDrop = counted - limit; toDrop > 0 && toSummarizeCount < this.messages.length; toSummarizeCount++) {
+      if (!fixTurns.has(this.messages[toSummarizeCount].turnId)) toDrop--;
+    }
+    const olderMessages = this.messages.slice(0, toSummarizeCount).filter((m) => !fixTurns.has(m.turnId));
 
     const decisions = new Set<string>(this.summary?.decisions ?? []);
     const unresolvedQuestions = new Set<string>(this.summary?.unresolvedQuestions ?? []);

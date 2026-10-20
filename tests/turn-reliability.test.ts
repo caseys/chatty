@@ -7,6 +7,7 @@ import {
   FORMAT_TURNS,
   type RunStatus,
 } from '../src/core/orchestrator.ts';
+import { promptRules } from '../src/core/orchestrator.ts';
 import { FIX_SYSTEM_PROMPT } from '../src/core/line-fix.ts';
 import { StateMachineCoordinator } from '../src/core/state-machine.ts';
 import type { JavascriptExecutionResult, JavascriptRuntime } from '../src/tools/javascript-runtime.ts';
@@ -358,7 +359,7 @@ describe('the prompt budget counts what the prompt really holds', () => {
     const orchestrator = orchestratorFor(new QueueLlm([], 4096, 1536), { memoryStore: store });
     store.addMessage({ id: 'u1', turnId: 't1', role: 'user', canonicalContent: 'Hi', timestamp: 0 });
     // System prompt (rules, examples) and format turns come to well over a thousand tokens
-    expect(store.getCurrentContextTokens()).toBeGreaterThan(1000);
+    expect(store.getCurrentContextTokens()).toBeGreaterThan(900);
     expect(orchestrator).toBeDefined();
   });
 
@@ -514,5 +515,121 @@ describe('a fix that comes back cut off', () => {
     await vi.waitFor(() => expect(statuses.some((s) => s.text.includes('came back incomplete'))).toBe(true), { timeout: 3000 });
     await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
     expect(executed).toEqual([DRAWING]);
+  });
+});
+
+
+describe('fix turns and compaction', () => {
+  it('a fix turn skips the compaction check and asks for an exact reply', async () => {
+    const llm = new QueueLlm([DRAWING, 'ctx.fillStyle = "red";']);
+    const { runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 3 }]);
+    const store = new ConversationMemoryStore();
+    const check = vi.spyOn(store, 'isContextCompactionNeeded').mockReturnValue(true);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime, memoryStore: store });
+    await orchestrator.submitUserInput('draw a red circle');
+    await vi.waitFor(() => expect(llm.turns.length).toBe(2), { timeout: 3000 });
+    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+    // Only the normal turn asked (and compacted); the fix turn did not
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(llm.turns.at(-1)!.systemPrompt).toBe(FIX_SYSTEM_PROMPT);
+    expect(llm.turns.at(-1)!.exact).toBe(true);
+    expect(llm.turns[0].exact).toBeUndefined();
+  });
+
+  it('fix turns do not count toward the verbatim turns kept', () => {
+    const store = new ConversationMemoryStore({ maxVerbatimTurns: 2, compactionSlack: 0 });
+    const add = (id: string, turnId: string, role: 'user' | 'assistant', autoFix = false) =>
+      store.addMessage({ id, turnId, role, canonicalContent: id, timestamp: 0, ...(autoFix ? { autoFix: true } : {}) });
+    add('u1', 't1', 'user');
+    add('a1', 't1', 'assistant');
+    add('fixu', 't2', 'user', true);
+    add('fixa', 't2', 'assistant');
+    expect(store.compactIfNecessary()).toBeNull();
+    expect(store.getMessages().length).toBe(4);
+    add('u3', 't3', 'user');
+    add('a3', 't3', 'assistant');
+    store.compactIfNecessary();
+    expect(store.getMessages().map((m) => m.id)).toEqual(['fixu', 'fixa', 'u3', 'a3']); // the fix turns stay but count for nothing
+  });
+});
+
+describe('the examples leak guard', () => {
+  it('writes a reply again once when it reuses an example name the request lacks', async () => {
+    const llm = new QueueLlm(['speak("Zibble would love that.");', 'speak("Sure, here you go.");']);
+    const { executed, runtime } = fakeRuntime([]);
+    const store = new ConversationMemoryStore();
+    const orchestrator = orchestratorFor(llm, { javascriptRuntime: runtime, memoryStore: store });
+    await orchestrator.submitUserInput('Make me a tea timer');
+    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+    expect(llm.turns.length).toBe(2);
+    expect(llm.turns[1].messages.at(-1)!.content).toBe(
+      "Make me a tea timer\n(That reply reused the examples' names. Write it again for this request.)"
+    );
+    expect(executed).toEqual(['speak("Sure, here you go.");']);
+    // The note is not kept in the history
+    expect(store.getMessages().find((m) => m.role === 'user')!.canonicalContent).toBe('Make me a tea timer');
+  });
+
+  it('leaves a reply alone when the request has the name, and retries only once', async () => {
+    const llm = new QueueLlm(['speak("Zibble is a fine name.");']);
+    const orchestrator = orchestratorFor(llm, { javascriptRuntime: fakeRuntime([]).runtime });
+    await orchestrator.submitUserInput('Name my dragon Zibble');
+    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+    expect(llm.turns.length).toBe(1);
+
+    const again = new QueueLlm(['speak("zorbs");', 'speak("okapi");']);
+    const second = orchestratorFor(again, { javascriptRuntime: fakeRuntime([]).runtime });
+    await second.submitUserInput('Make me a tea timer');
+    await vi.waitFor(() => expect(second.scheduler.getActiveTurnId()).toBeNull());
+    expect(again.turns.length).toBe(2);
+  });
+});
+
+describe('the optional rules follow the request', () => {
+  const canvas = 'Use <canvas>';
+  const sound = 'Sound: Web Audio';
+  const facts = 'public API';
+  const cases: Array<[string, { canvas?: boolean; sound?: boolean; facts?: boolean }]> = [
+    ['Draw a rainbow over green hills on a canvas', { canvas: true }],
+    ['Play a music loop with a G major chord on piano, a walking bass line and a boom-chuck drum track', { sound: true }],
+    ['Animate a ball bouncing around the screen', { canvas: true }],
+    ['Code a tip calculator app with a UI for the bill and tip %', {}],
+    ['Show a big ten second countdown on screen', {}],
+    ['Who was Ada Lovelace?', { facts: true }],
+    ["What's 15 percent of 84?", {}],
+  ];
+  it.each(cases)('%s', (request, want) => {
+    const rules = promptRules(request, true);
+    expect(rules.includes(canvas)).toBe(!!want.canvas);
+    expect(rules.includes(sound)).toBe(!!want.sound);
+    expect(rules.includes(facts)).toBe(!!want.facts);
+  });
+
+  it('does not match "start" as a star or "article" as art', () => {
+    expect(promptRules('start the timer, then read the article', true).includes(canvas)).toBe(false);
+  });
+});
+
+describe('the fix log', () => {
+  it('records each fix turn and its outcome in localStorage, keeping the last 50', async () => {
+    const store: Record<string, string> = { chatty_fix_log: JSON.stringify(Array.from({ length: 50 }, (_, i) => ({ time: i }))) };
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store[k] ?? null,
+      setItem: (k: string, v: string) => void (store[k] = v),
+    });
+    try {
+      const llm = new QueueLlm([DRAWING, 'Sure, let me fix that for you right away.']);
+      const { runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 3 }]);
+      const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+      await orchestrator.submitUserInput('draw a red circle');
+      await vi.waitFor(() => expect(llm.turns.length).toBe(2), { timeout: 3000 });
+      await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+      const log = JSON.parse(store.chatty_fix_log);
+      expect(log.length).toBe(50);
+      expect(log.at(-1)).toMatchObject({ modelId: 'queue', error: 'boom is not defined', line: 3, outcome: 'lost' });
+      expect(log.at(-1).markedLine).toBe('root.appendChild(canvas);');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -234,6 +234,11 @@ export interface LlmGenerationOptions {
   temperature?: number;
   topP?: number;
   stopSequences?: string[];
+  /**
+   * Near-greedy decoding for an exact answer (a fix turn's corrected line): runtimes that can,
+   * use a low temperature and no repetition penalty
+   */
+  exact?: boolean;
   signal?: AbortSignal;
   onToken?: (chunk: string, sequence: number) => void;
 }

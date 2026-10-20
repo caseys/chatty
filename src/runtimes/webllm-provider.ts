@@ -22,6 +22,29 @@ type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
 /** Lowest temperature used with WebLLM models (see runGeneration) */
 const WEBLLM_MIN_TEMPERATURE = 0.6;
+/** Temperature for an exact answer (a fix turn's corrected line) */
+const WEBLLM_EXACT_TEMPERATURE = 0.2;
+
+/**
+ * Sampling fields for a WebLLM request. Code repeats lines on purpose (`out.send(...)`, `ctx.`), so
+ * a repetition penalty hurts: Qwen3 / Qwen3.5 get Qwen's recommended presence penalty instead, and
+ * other models (Qwen2.5-Coder ships 1.05) keep a mild repetition penalty. An exact turn is
+ * near-greedy with no penalty at all.
+ */
+export function webLlmSampling(
+  options: Pick<LlmGenerationOptions, 'temperature' | 'topP' | 'exact'>,
+  spec: Pick<WebLlmModelSpec, 'mlcId' | 'noThinking'>
+): { temperature: number; top_p: number; repetition_penalty?: number; presence_penalty?: number } {
+  const top_p = options.topP ?? 0.8;
+  if (options.exact) return { temperature: WEBLLM_EXACT_TEMPERATURE, top_p };
+  // Small models get stuck repeating themselves on near-greedy decoding (Chatty asks for 0.1,
+  // which suits Gemma on LiteRT), so normal turns keep a floor.
+  const temperature = Math.max(options.temperature ?? WEBLLM_MIN_TEMPERATURE, WEBLLM_MIN_TEMPERATURE);
+  const qwen3 = spec.noThinking || /^qwen3/i.test(spec.mlcId);
+  return qwen3
+    ? { temperature, top_p, presence_penalty: 0.5 }
+    : { temperature, top_p, repetition_penalty: 1.05 };
+}
 
 /** One system message first, then alternating turns (consecutive same-role messages are merged). */
 function toChatMessages(systemPrompt: string, messages: LlmGenerationOptions['messages']): ChatMessage[] {
@@ -220,12 +243,7 @@ export class WebLlmProvider implements LlmRuntimeProvider {
       const stream = await engine.chat.completions.create({
         messages: toChatMessages(options.systemPrompt, options.messages),
         stream: true,
-        // Small models get stuck repeating themselves on near-greedy decoding (Chatty asks for 0.1,
-        // which suits Gemma on LiteRT). Qwen's guidance: about 0.7 / 0.8 with a mild repetition
-        // penalty, as Qwen2.5-Coder ships.
-        temperature: Math.max(options.temperature ?? WEBLLM_MIN_TEMPERATURE, WEBLLM_MIN_TEMPERATURE),
-        top_p: options.topP ?? 0.8,
-        repetition_penalty: 1.05,
+        ...webLlmSampling(options, this.spec),
         max_tokens: options.maxOutputTokens ?? this.maxOutputTokens,
         ...(this.spec.noThinking ? { extra_body: { enable_thinking: false } } : {}),
       });

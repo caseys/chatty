@@ -569,8 +569,11 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
         options.messages[options.messages.length - 1]?.content ?? '';
       const priorMessagesKey = historyKey(priorMessages);
 
-      // Google's recommended Gemma sampling, whatever the caller asks for
-      const targetTemperature = GEMMA_SAMPLER.temperature;
+      // Google's recommended Gemma sampling, except near-greedy for an exact answer (a fix turn's
+      // corrected line). A fix turn has its own system prompt, so it starts a new conversation
+      // anyway: the different temperature costs nothing extra.
+      const sampler = options.exact ? { ...GEMMA_SAMPLER, temperature: 0.2 } : GEMMA_SAMPLER;
+      const targetTemperature = sampler.temperature;
       const targetMaxOutputTokens = options.maxOutputTokens ?? this.maxOutputTokens;
 
       // Reuse the existing WebGPU Conversation & KV cache if the system prompt, prior turns,
@@ -592,7 +595,7 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
         await this.clearPersistentConversation();
         conversation = await this.engine.createConversation({
           sessionConfig: {
-            samplerParams: GEMMA_SAMPLER,
+            samplerParams: sampler,
             maxOutputTokens: targetMaxOutputTokens,
           },
           preface: {
