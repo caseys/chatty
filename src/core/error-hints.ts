@@ -673,7 +673,7 @@ function standInElement(code: string, error: string, errorLine: number | undefin
     const call = !!member && /is not a function/.test(error);
     const stoodIn = made === 'empty' ? `an empty <${tag}> stood in for it` : `the <${tag}> it made last stood in for it`;
     let text = `#${id} was never created: the program has no element with that id, so ${stoodIn}${member ? ` (a <${tag}> has no ${member}${call ? '()' : ''})` : ''}. Create the element it needs with document.createElement and give it id "${id}".`;
-    if (member && SOUND_MEMBER.test(member)) text += ' Notes, chords and drums play through out.send({ notes, instrument, time, duration }).';
+    if (member && SOUND_MEMBER.test(member)) text += ' Notes play through a Web MIDI output: output.send([0x90 + channel, note, velocity], time), from (await navigator.requestMIDIAccess()).outputs.';
     return { text };
   }
   return null;

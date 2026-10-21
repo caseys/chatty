@@ -7,11 +7,19 @@ import { pastProgramResult } from '../src/core/history-format.ts';
 import type { ConversationMessage } from '../src/types/index.ts';
 
 const outcome = (request: string, runtime: object) =>
-  (ConversationOrchestrator.prototype as any).missingOutcome.call({ javascriptRuntime: runtime }, request, 0) as Promise<string | null>;
+  (ConversationOrchestrator.prototype as any).missingOutcome.call({ javascriptRuntime: runtime }, request, { uses: 0, heard: 0, silent: 0 }) as Promise<string | null>;
 const nothing = { soundUseCount: () => 0, hasVisualContent: () => false };
 const sees = { soundUseCount: () => 0, hasVisualContent: () => true };
 
 describe('the outcome check', () => {
+  it('counts sound only when it reaches the speakers, and says how to connect it when it never does', async () => {
+    const asked = { soundUseCount: () => 1, hasVisualContent: () => false };
+    expect(await outcome('Play a G major chord', { ...asked, soundHeardCount: () => 1, soundSilentCount: () => 0 })).toBeNull();
+    expect(await outcome('Play a G major chord', { ...asked, soundHeardCount: () => 0, soundSilentCount: () => 1 })).toContain('never reached the speakers');
+    // Not measured (audio paused until a tap): the request counts
+    expect(await outcome('Play a G major chord', asked)).toBeNull();
+  });
+
   it.each(['Show me the capital of France', 'List the planets', 'Write it in the form of a poem', 'Who was Ada Lovelace?'])(
     'does not fire for the spoken answer to "%s"',
     async (request) => {
@@ -43,9 +51,10 @@ describe('the outcome check', () => {
 });
 
 describe('prompt rules', () => {
-  it('names searchWikipedia for facts and out.loop for music', () => {
-    expect(promptRules('Who was Ada Lovelace?', true)).toContain('searchWikipedia');
-    expect(promptRules('Play a drum beat', true)).toContain('out.loop(bars');
+  it('teaches real browser interfaces: fetch for facts, Web MIDI for music', () => {
+    expect(promptRules('Who was Ada Lovelace?', true)).toContain('https://en.wikipedia.org/api/rest_v1/page/summary/');
+    expect(promptRules('Play a drum beat', true)).toContain('navigator.requestMIDIAccess()');
+    expect(promptRules('Play a drum beat', true)).not.toMatch(/out\.send|out\.loop/);
   });
 });
 

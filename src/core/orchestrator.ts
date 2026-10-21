@@ -222,8 +222,8 @@ const PROMPT_RULES: ReadonlyArray<{ text: string; when?: { test(request: string)
   { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations.', when: DRAWING_REQUEST },
   { text: '- For 3D, THREE (three.js) is ready to use: render with a THREE.WebGLRenderer, whose canvas you add to document.body.', when: THREE_D_REQUEST },
   { text: '- <svg> works for diagrams and icons.', when: DIAGRAM_REQUEST },
-  { text: "- Sound: music and instruments: out is ready to use. Call out.send once per note, chord or drum hit, with named values (durations and times in ms), like out.send({ instrument: 'piano', notes: 'G major', loudness: 80, duration: 4 * beat, time: start + 2 * beat }). Only notes is needed: the rest default to piano, loudness 100, half a second and now. Instruments: piano, bass, organ, guitar, strings, violin, trumpet, sax, flute, drums. Notes: a note ('G3'), a chord ('G major', 'Am7'), a scale ('G pentatonic down'), drum hits ('kick', 'snare', 'hihat'), or an array (up to 4 sound together, more play in turn). A beat or groove means drums. At the top, declare const bpm (beats per minute: 60 to 180), beat = 60000 / bpm (one beat in ms) and start = performance.now(). To loop, define a function bars(t) that schedules one pass of notes at times t + n * beat, then call out.loop(bars, the pass length in ms) to play it on repeat.", when: SOUND_REQUEST },
-  { text: '- Answer what you know directly. For facts you lack, use const { title, summary } = await searchWikipedia(query), and speak a sentence or two of the summary.', when: FACTS_REQUEST },
+  { text: "- Sound: Web MIDI plays instruments here. Get an output with const midi = await navigator.requestMIDIAccess() and const output = [...midi.outputs.values()][0]. Choose a General MIDI instrument for a channel with output.send([0xC0 + channel, program]) (0 piano, 19 organ, 24 guitar, 32 bass, 40 violin, 48 strings, 56 trumpet, 65 sax, 73 flute). Play a note with output.send([0x90 + channel, note, velocity], time) and end it with output.send([0x80 + channel, note, 0], time + length) (note 60 is middle C; times are performance.now() ms). Drums are channel 9: note 36 kick, 38 snare, 42 hi-hat. At the top, declare const bpm (beats per minute: 60 to 180), beat = 60000 / bpm (one beat in ms) and start = performance.now() + 100. To loop, put one pass of notes in a function that schedules them from a start time, call it, then call it again with setInterval every pass, moving the start time on by the pass length. For tones and effects, Web Audio works too (new AudioContext(), oscillators, gain).", when: SOUND_REQUEST },
+  { text: '- Answer what you know directly. For facts you lack, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it.', when: FACTS_REQUEST },
 ];
 
 /** The rules for a request: all of them, or (filter) only those it needs */
@@ -1456,7 +1456,11 @@ export class ConversationOrchestrator {
               : '';
             const saidBefore = (phrase: string) => !!fixSaid && !!phrase.trim() && fixSaid.includes(phrase.trim());
             const spokenThisRun = new Set<string>();
-            const soundMark = this.javascriptRuntime.soundUseCount?.() ?? 0;
+            const soundMark = {
+              uses: this.javascriptRuntime.soundUseCount?.() ?? 0,
+              heard: this.javascriptRuntime.soundHeardCount?.() ?? 0,
+              silent: this.javascriptRuntime.soundSilentCount?.() ?? 0,
+            };
             const execResult = await this.javascriptRuntime.execute(executableCode, undefined, {
               onSpeak: (phrase) => {
                 if (saidBefore(phrase)) return;
@@ -1995,7 +1999,7 @@ export class ConversationOrchestrator {
    * next attempt. Stops at once when the user starts a new turn.
    */
   /** What a sound or visual request's program never did, after a short wait, or null */
-  private async missingOutcome(request: string, soundMark: number): Promise<string | null> {
+  private async missingOutcome(request: string, soundMark: { uses: number; heard: number; silent: number }): Promise<string | null> {
     // A request that names something to see as well still gets its visual check; a bare "play"
     // (a game, a video) is not a sound on its own then
     const namesVisual = VISUAL_THING.test(request);
@@ -2004,12 +2008,23 @@ export class ConversationOrchestrator {
     const wantsSound = SOUND_WORDS_REQUEST.test(request) && !!this.javascriptRuntime.soundUseCount;
     const wantsVisual = namesVisual && !!this.javascriptRuntime.hasVisualContent;
     if (!wantsSound && !wantsVisual) return null;
-    const sounded = () => (this.javascriptRuntime.soundUseCount?.() ?? 0) > soundMark;
+    // Sound asked for, then measured at the speakers (two seconds): heard, or silent with the audio
+    // running. Not measured (audio paused until a tap, or a runtime that can't): the request counts
+    const asked = () => (this.javascriptRuntime.soundUseCount?.() ?? 0) > soundMark.uses;
+    const heard = () => (this.javascriptRuntime.soundHeardCount?.() ?? 0) > soundMark.heard;
+    const silent = () => !heard() && (this.javascriptRuntime.soundSilentCount?.() ?? 0) > soundMark.silent;
+    const measures = !!this.javascriptRuntime.soundHeardCount;
+    const soundSettled = () => heard() || silent() || (asked() && !measures);
     const shown = () => !!this.javascriptRuntime.hasVisualContent?.();
-    const done = () => (!wantsSound || sounded()) && (!wantsVisual || shown());
-    for (let waited = 0; !done() && waited < 1500; waited += 100) await settle(100);
+    const done = () => (!wantsSound || soundSettled()) && (!wantsVisual || shown());
+    // Long enough for the speaker measurement when sound was asked for
+    for (let waited = 0; !done() && waited < (wantsSound && asked() ? 2500 : 1500); waited += 100) await settle(100);
     const missing = [
-      wantsSound && !sounded() ? 'The program played nothing: notes, chords and drums play through out.send({ notes, instrument, time, duration }).' : '',
+      wantsSound && !asked()
+        ? 'The program played nothing: notes play through a Web MIDI output (output.send([0x90 + channel, note, velocity], time)) or Web Audio oscillators.'
+        : wantsSound && silent()
+          ? "The program's sound never reached the speakers: connect each sound to the audio context's destination (node.connect(audioContext.destination))."
+          : '',
       wantsVisual && !shown() ? 'The program showed nothing: what it adds to document.body appears in the card on screen.' : '',
     ].filter(Boolean);
     if (missing.length === 0) {

@@ -471,18 +471,18 @@ describe('rules picked for small models', () => {
     const tip = promptRules('Code a tip calculator app with a UI for the bill and tip %', true);
     expect(tip).toContain('- What you add to document.body appears in a card');
     expect(tip).toContain('Use HTML and CSS for interfaces');
-    expect(tip).not.toContain('out is ready to use');
+    expect(tip).not.toContain('Web MIDI plays instruments here');
     expect(tip).not.toContain('<canvas>');
     expect(tip).not.toMatch(/^\d+\. /m);
     const music = promptRules('Play a music loop with a G major chord on piano', true);
-    expect(music).toContain('out is ready to use');
+    expect(music).toContain('Web MIDI plays instruments here');
     // An edit is matched against the program it changes too
-    expect(promptRules('make it faster\nconst out = (await navigator.requestMIDIAccess())', true)).toContain('out is ready to use');
+    expect(promptRules('make it faster\nconst out = (await navigator.requestMIDIAccess())', true)).toContain('Web MIDI plays instruments here');
     expect(promptRules('Draw a rainbow over green hills', true)).toContain('<canvas>');
     expect(promptRules('Who was Ada Lovelace?', true)).toContain('Wikipedia');
     // Unfiltered: every rule
     const all = promptRules();
-    for (const part of ['out is ready to use', '<canvas>', '<svg>', 'WebGL', 'Wikipedia']) expect(all).toContain(part);
+    for (const part of ['Web MIDI plays instruments here', '<canvas>', '<svg>', 'WebGL', 'Wikipedia']) expect(all).toContain(part);
   });
 });
 
@@ -600,8 +600,8 @@ describe('fix turns and compaction', () => {
 
 describe('the optional rules follow the request', () => {
   const canvas = 'Use <canvas>';
-  const sound = 'Sound: music and instruments: out is ready to use';
-  const facts = 'searchWikipedia';
+  const sound = 'Sound: Web MIDI plays instruments here';
+  const facts = 'en.wikipedia.org/api/rest_v1';
   const cases: Array<[string, { canvas?: boolean; sound?: boolean; facts?: boolean }]> = [
     ['Draw a rainbow over green hills on a canvas', { canvas: true }],
     ['Play a music loop with a G major chord on piano, a walking bass line and a boom-chuck drum track', { sound: true }],
@@ -1290,7 +1290,7 @@ describe('a program that does nothing the request asked for', () => {
     await orchestrator.submitUserInput('Play a G major chord');
     await vi.waitFor(() => expect(llm.turns.length).toBe(2), { timeout: 10000 });
     expect(statuses.some((t) => t.includes('The program played nothing'))).toBe(true);
-    expect(llm.turns[1].messages.at(-1)!.content).toContain('out.send');
+    expect(llm.turns[1].messages.at(-1)!.content).toContain('Web MIDI output');
     uses = 1;
   }, 20000);
 

@@ -895,9 +895,15 @@ export class JavascriptRuntime {
     const samples = new Float32Array(analyser.fftSize);
     let peak = 0;
     let checks = 0;
+    let heard = false;
     const timer = setInterval(() => {
       analyser.getFloatTimeDomainData(samples);
       for (const v of samples) peak = Math.max(peak, Math.abs(v));
+      // Counted as soon as it is heard (the outcome check reads it, see soundHeardCount)
+      if (!heard && peak > 0.001) {
+        heard = true;
+        this.soundHeard++;
+      }
       if (++checks < 20) return;
       clearInterval(timer);
       try {
@@ -909,6 +915,9 @@ export class JavascriptRuntime {
       const sessionType = (navigator as { audioSession?: { type?: string } }).audioSession?.type;
       const session = sessionType ? `, session ${sessionType}` : '';
       this.soundLevelPending = false;
+      // Silent with the audio running: the sound went nowhere (a node never connected). A paused
+      // context (no tap yet) says nothing either way.
+      if (!heard && context.state === 'running') this.soundSilent++;
       this.onRunLog?.(
         peak > 0.001 ? 'console' : 'error',
         peak > 0.001
@@ -1107,6 +1116,18 @@ export class JavascriptRuntime {
       return [];
     }
   }
+
+  /** How many programs' sound has reached the speakers so far (measured on their output) */
+  soundHeardCount(): number {
+    return this.soundHeard;
+  }
+  private soundHeard = 0;
+
+  /** How many programs asked for sound that stayed silent for two seconds with the audio running */
+  soundSilentCount(): number {
+    return this.soundSilent;
+  }
+  private soundSilent = 0;
 
   /** How many times programs have asked for sound (Web Audio, MIDI, out, playNotes) so far */
   soundUseCount(): number {
@@ -1659,6 +1680,12 @@ export class JavascriptRuntime {
       __chattyHost.postMessage({ type: 'speak', id: currentExecId, text: s }, '*');
     };
 
+    // alert() and console.log() are the browser's ways to tell the user something: both are
+    // speak() here (alert() is blocked in the sandbox anyway, which has no modals)
+    window.alert = (message) => window.speak(message === undefined ? '' : message);
+    const logText = (args) => args.map((a) => (typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a))).join(' ');
+    console.log = (...args) => window.speak(logText(args));
+
     window.playNotes = (notes, tempo) => {
       return new Promise((resolve) => {
         const callId = Math.random().toString(36).slice(2);
@@ -1950,39 +1977,6 @@ export class JavascriptRuntime {
       },
       play(...args) { this.send(...args); },
       playNote(...args) { this.send(...args); },
-      // out.loop(bars, lengthMs): bars(t) schedules one pass of notes starting at time t (in
-      // performance.now() ms; the global \`start\` is set to t too). It runs now, then again for
-      // every following pass with t moved on by lengthMs, called a little ahead of time so
-      // playback has no gap. Returns a function that stops it.
-      loop(bars, lengthMs) {
-        if (typeof bars !== 'function' || !(Number(lengthMs) >= 50)) {
-          imagined('out.loop(bars, lengthMs) needs a function and a length in ms (at least 50): did nothing');
-          return () => {};
-        }
-        const length = Number(lengthMs);
-        const lead = Math.min(250, length / 2);
-        // Passes are given their start time, as a program's own \`start\` can shadow the global
-        let next = performance.now() + 100;
-        let timer = null;
-        let stopped = false;
-        // Plain setTimeout calls: tracked as the program's work, and gone with its page on reset
-        const pass = () => {
-          timer = null;
-          if (stopped) return;
-          // Passes missed while the tab was in the background are skipped, not played late
-          if (next < performance.now()) next = performance.now() + 100;
-          window.start = next;
-          bars(next);
-          next += length;
-          timer = window.setTimeout(pass, Math.max(0, next - lead - performance.now()));
-        };
-        pass();
-        return () => {
-          stopped = true;
-          if (timer !== null) window.clearTimeout(timer);
-          timer = null;
-        };
-      },
     };
 
     // Models call methods Chatty's own helpers don't have (out.playChord(), out.setTempo(90)).
@@ -2334,7 +2328,10 @@ export class JavascriptRuntime {
       const origWarn = console.warn;
       const origError = console.error;
 
-      console.log = (...args) => logs.push(args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
+      console.log = (...args) => {
+        logs.push(args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
+        origLog(...args);
+      };
       console.warn = (...args) => logs.push('[warn] ' + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
       console.error = (...args) => logs.push('[error] ' + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
 

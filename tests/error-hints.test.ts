@@ -211,7 +211,7 @@ describe('an element the program never made', () => {
     const text = errorHint(code, error, 3, { ids: ['sound'], standIns: [{ id: 'sound', tag: 'div', made: 'empty' }] })?.text ?? '';
     expect(text).toContain('#sound was never created');
     expect(text).toContain('a <div> has no play()');
-    expect(text).toContain('out.send');
+    expect(text).toContain('navigator.requestMIDIAccess');
   });
 
   it('follows a variable that holds the stand-in (Chrome names no id)', () => {

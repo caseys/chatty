@@ -59,32 +59,6 @@ describe('runner reliability', () => {
     }
   });
 
-  it('out.loop runs bars now and again each pass with start moved on, until stopped', async () => {
-    ({ win } = loadRunner());
-    const out = await programOut(win);
-    const starts: number[] = [];
-    const stop = out.loop((t: number) => starts.push(t), 60);
-    expect(starts).toHaveLength(1);
-    expect(starts[0]).toBeGreaterThan(win.performance.now());
-    await wait(300);
-    expect(starts.length).toBeGreaterThanOrEqual(3);
-    expect(starts[1] - starts[0]).toBe(60);
-    stop();
-    const n = starts.length;
-    await wait(100);
-    expect(starts.length).toBe(n);
-  });
-
-  it('out.loop with bad arguments does nothing and logs it as imagined', async () => {
-    let posted: any[];
-    ({ win, posted } = loadRunner());
-    const out = await programOut(win);
-    const stop = out.loop('nope', 0);
-    await wait(5);
-    expect(typeof stop).toBe('function');
-    expect(posted.some((m) => m.type === 'imagined' && /out\.loop/.test(m.text))).toBe(true);
-  });
-
   it('registersHandlers sees event wiring, not comments', () => {
     expect(registersHandlers("b.addEventListener('click', f)")).toBe(true);
     expect(registersHandlers('b.onclick = f')).toBe(true);
@@ -111,5 +85,24 @@ describe('runner reliability', () => {
     expect(posted.some((m) => m.type === 'smoke_done')).toBe(true);
     const err = posted.find((m) => m.type === 'program_error');
     expect(err?.message).toContain('boom in handler');
+  });
+});
+
+describe('real browser interfaces in the sandbox', () => {
+  it('sends alert() messages to the chat, as speak() does', async () => {
+    const { win, posted } = loadRunner();
+    win.postMessage({ type: 'execute', id: 'a', code: 'alert("Done!");' }, '*');
+    await wait(30);
+    expect(posted.some((m) => m.type === 'speak' && m.text === 'Done!')).toBe(true);
+    win.close();
+  });
+
+  it('says console.log() messages too, during the run and from a timer after it', async () => {
+    const { win, posted } = loadRunner();
+    win.postMessage({ type: 'execute', id: 'l', code: 'console.log("Total:", 42); setTimeout(() => console.log({ done: true }), 10);' }, '*');
+    await wait(60);
+    const said = posted.filter((m) => m.type === 'speak').map((m) => m.text);
+    expect(said).toEqual(['Total: 42', '{"done":true}']);
+    win.close();
   });
 });
