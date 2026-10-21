@@ -199,3 +199,29 @@ describe('adapting what small models write', async () => {
     expect(made.declared).toEqual([{ name: 'audio', make: 'new AudioContext()' }]);
   });
 });
+
+describe('repairs that leave correct programs alone', async () => {
+  const { dropBrowserCopies } = await import('../src/core/error-hints.ts');
+  const { declareMissing } = await import('../src/core/blank-fix.ts');
+  it('keeps a working stand-in for a browser function', () => {
+    const code = 'function fetch(url) {\n  return Promise.resolve({ json: () => ({ ok: true }) });\n}\nfetch("x").then((r) => speak(String(r.json().ok)));';
+    expect(dropBrowserCopies(code).dropped).toEqual([]);
+  });
+  it('makes no audio context of a button, and no 2D context from save/scale alone', () => {
+    expect(declareMissing('btn.addEventListener("click", () => speak("hi"));').declared).toEqual([]);
+    expect(declareMissing('view.save();\nview.scale(2, 2);').declared).toEqual([]);
+  });
+  it('makes the canvas a program draws on but never made', () => {
+    const made = declareMissing('const ctx = board.getContext("2d");\nctx.fillRect(0, 0, 5, 5);');
+    expect(made.declared.map((d) => d.name)).toEqual(['board']);
+  });
+});
+
+describe('a page whose buttons call its functions', async () => {
+  const { inspectExecutableCode } = await import('../src/tools/javascript-runtime.ts');
+  it('makes its indented functions reachable from inline handlers', () => {
+    const page = '<button onclick="startGame()">Go</button>\n<script>\n  function startGame() { speak("Go!"); }\n  function init() { speak("Ready."); }\n</script>';
+    const code = inspectExecutableCode(page).code;
+    expect(code).toContain('window.startGame = startGame;');
+  });
+});

@@ -1339,12 +1339,6 @@ export class ConversationOrchestrator {
               executableCode = browserCopies.code;
               for (const name of browserCopies.dropped) appendRunLog('imagined', `its own ${name}() → the browser's: corrected before running`);
             }
-            // A drawing context, canvas or audio context it uses but never made: made at its top
-            const missing = declareMissing(executableCode);
-            if (missing.declared.length > 0) {
-              executableCode = missing.code;
-              for (const { name, make } of missing.declared) appendRunLog('imagined', `${name} was never made → const ${name} = ${make}: corrected before running`);
-            }
             // A stray quote or backtick ending a line (markdown's, kept): removed when that alone
             // makes the program parse
             const stray = dropStrayQuote(executableCode);
@@ -1390,6 +1384,14 @@ export class ConversationOrchestrator {
             if (cased.fixed.length > 0) {
               executableCode = cased.code;
               for (const { from, to } of cased.fixed) appendRunLog('imagined', `${from} → ${to}: corrected before running`);
+            }
+            // A drawing context, canvas or audio context it uses but never made: made at its top
+            const missing = declareMissing(executableCode);
+            if (missing.declared.length > 0) {
+              executableCode = missing.code;
+              // (its lines moved down by the declarations put at its top)
+              for (const issue of notThere) issue.line += missing.declared.length;
+              for (const { name, make } of missing.declared) appendRunLog('imagined', `${name} was never made → const ${name} = ${make}: corrected before running`);
             }
           }
           const isProse = inspected.isProse || forceProse;

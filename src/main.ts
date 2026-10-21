@@ -405,7 +405,17 @@ export class MinimalVoiceApp {
       const text = this.chatInput?.value.trim();
       if (!text || this.chatSendBtn?.disabled) return;
       if (this.chatInput) this.chatInput.value = '';
+      // Sent: the field lets go (the card stays stepped back until the turn is done)
+      this.chatInput?.blur();
       void this.engine.submitText(text);
+    });
+    this.chatInput?.addEventListener('focus', () => {
+      this.inputFocused = true;
+      this.updateCardState();
+    });
+    this.chatInput?.addEventListener('blur', () => {
+      this.inputFocused = false;
+      this.updateCardState();
     });
 
     this.clearModelCacheBtn?.addEventListener('click', async () => {
@@ -1245,6 +1255,13 @@ export class MinimalVoiceApp {
       snap.turn === 'generating';
     bar.classList.toggle('busy', busy);
     bar.setAttribute('aria-busy', String(busy));
+    this.noteTurnWorking(
+      snap.interaction === 'finalizing_input' ||
+        snap.interaction === 'building_context' ||
+        snap.interaction === 'generating' ||
+        snap.turn === 'processing_input' ||
+        snap.turn === 'generating'
+    );
     // Also stay awake while the mic is on, so a hands-free conversation isn't cut off by sleep.
     this.setKeepAwake(busy || snap.microphone === 'listening');
   }
@@ -1559,12 +1576,44 @@ export class MinimalVoiceApp {
     const failed = status?.kind === 'error';
     const fixing = failed && /\((?:asking the model to fix it|trying fixes for )/.test(status.text);
     layer.classList.toggle('program-hidden', failed && status.text.includes('showed nothing'));
-    layer.classList.toggle('program-fixing', fixing);
     layer.classList.toggle('program-failed', failed && !fixing);
+    this.fixingNow = fixing;
+    this.updateCardState();
+  }
+
+  /** While typing, and while a reply or a fix is on its way: the card steps back (card-shrunk) */
+  private inputFocused = false;
+  private cardWorking = false;
+  private fixingNow = false;
+  private cardRelaxTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private updateCardState(): void {
+    this.screenVisualLayer?.classList.toggle('card-shrunk', this.inputFocused || this.cardWorking || this.fixingNow);
+  }
+
+  /** A turn is working (or not): the card comes back a moment after the last one ends, so it stays back between a turn and the fix that follows */
+  private noteTurnWorking(working: boolean): void {
+    if (working) {
+      if (this.cardRelaxTimer !== null) clearTimeout(this.cardRelaxTimer);
+      this.cardRelaxTimer = null;
+      if (!this.cardWorking) {
+        this.cardWorking = true;
+        this.updateCardState();
+      }
+      return;
+    }
+    if (!this.cardWorking || this.cardRelaxTimer !== null) return;
+    this.cardRelaxTimer = setTimeout(() => {
+      this.cardRelaxTimer = null;
+      this.cardWorking = false;
+      this.updateCardState();
+    }, 800);
   }
 
   private resetVisualScreen(): void {
-    this.screenVisualLayer?.classList.remove('program-hidden', 'program-fixing', 'program-failed');
+    this.screenVisualLayer?.classList.remove('program-hidden', 'program-failed');
+    this.fixingNow = false;
+    this.updateCardState();
     this.programSounding = false;
     this.programRunning = false;
     this.showScreenContent(false);

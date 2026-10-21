@@ -3113,24 +3113,29 @@ body {
   }
 }
 
-/* A failed program's card: hidden when it showed nothing; faded, pulsing between 5% and 35% while
-   a fix is coming (only then: no loop stays on screen), and faded once none is */
+/* A failed program's card: hidden when it showed nothing, stepped back while a fix is coming
+   (card-shrunk), and faded once none is */
 #screen-visual-layer.program-hidden {
   visibility: hidden;
 }
-#screen-visual-layer.program-fixing {
-  animation: program-fixing-pulse 1.4s ease-in-out infinite alternate;
+/* The card steps back (a quarter of its size, faded, toward the top) while the user types and
+   while a reply or a fix is on its way; it comes back when the turn is done */
+#screen-visual-layer {
+  transform-origin: 50% 0;
+  transition: transform 0.35s ease, opacity 0.35s ease;
+}
+#screen-visual-layer.card-shrunk {
+  transform: scale(0.25);
+  opacity: 0.35;
+}
+#screen-visual-layer.card-shrunk iframe {
+  pointer-events: none !important;
 }
 #screen-visual-layer.program-failed {
   opacity: 0.35;
 }
-@keyframes program-fixing-pulse {
-  from { opacity: 0.05; }
-  to { opacity: 0.35; }
-}
 @media (prefers-reduced-motion: reduce) {
-  #screen-visual-layer.program-fixing {
-    animation: none;
-    opacity: 0.2;
+  #screen-visual-layer {
+    transition: none;
   }
 }

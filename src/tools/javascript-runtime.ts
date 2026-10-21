@@ -407,6 +407,24 @@ export function callUncalledFunctions(code: string): string {
   return toCall.length ? `${code}\n${toCall.map((name) => `await ${name}();`).join('\n')}` : code;
 }
 
+/** The names of all top-level functions (declared, or a function in a const/let/var), however indented; null when the code doesn't parse */
+function topLevelFunctionNames(code: string): string[] | null {
+  let program: ReturnType<typeof parse>;
+  try {
+    program = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true });
+  } catch {
+    return null;
+  }
+  const names: string[] = [];
+  for (const node of program.body) {
+    if (node.type === 'FunctionDeclaration' && node.id) names.push(node.id.name);
+    if (node.type === 'VariableDeclaration') {
+      for (const d of node.declarations) if (d.id.type === 'Identifier' && d.init && /^(?:Arrow)?Function/.test(d.init.type)) names.push(d.id.name);
+    }
+  }
+  return names;
+}
+
 /** The names of the top-level functions (and arrow functions in a const/let/var) taking no parameters, or null when the code doesn't parse */
 function topLevelNoArgFunctions(code: string): string[] | null {
   let program: ReturnType<typeof parse>;
@@ -632,7 +650,7 @@ export function registersHandlers(code: string): boolean {
  */
 export function exposeFunctionsToInlineHandlers(code: string): string {
   if (!/\son[a-z]+\s*=\s*\\?["']/i.test(code)) return code;
-  const names = [
+  const names = topLevelFunctionNames(code) ?? [
     ...Array.from(code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm), (m) => m[1]),
     ...Array.from(code.matchAll(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/gm), (m) => m[1]),
   ];
@@ -686,7 +704,7 @@ export function inspectExecutableCode(rawText: string, options: { closeCutOff?: 
     let code = htmlToCode(opened > closed ? `${html}\n</script>` : html);
     const cut = options.closeCutOff === false ? null : closeCutOff(code);
     if (cut) code = cut.code;
-    return { code: callUncalledFunctions(code), isProse: false, ...(cut ? { cutOff: { dropped: cut.dropped, closed: cut.closed } } : {}) };
+    return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(code)), isProse: false, ...(cut ? { cutOff: { dropped: cut.dropped, closed: cut.closed } } : {}) };
   };
   if (HTML_START.test(cleaned)) return asPage(cleaned);
 
@@ -1897,27 +1915,43 @@ export class JavascriptRuntime {
       const label = el.id ? '#' + el.id : el.textContent ? " '" + el.textContent.trim().slice(0, 20) + "'" : '';
       return tag + label;
     }
-    // Made to be seen: a control, a canvas or media, or an element given content or a style
+    const isControl = (el) => /^(?:INPUT|BUTTON|SELECT|TEXTAREA)$/.test(el.tagName);
+    // Made to be seen: a canvas or media, or an element given content or a style
     function meantToShow(el) {
-      if (/^(?:INPUT|BUTTON|SELECT|TEXTAREA|CANVAS|VIDEO|IMG|SVG|svg)$/.test(el.tagName)) return true;
+      if (/^(?:CANVAS|VIDEO|IMG|SVG|svg)$/.test(el.tagName)) return true;
       return el.children.length > 0 || (el.textContent || '').trim() !== '' || !!el.getAttribute('style');
     }
-    function attachOrphanedControls() {
+    // The elements (and the trees holding them) that were made but are not on the page, by the
+    // tree's top element
+    function orphansOf(elements, wanted) {
       const roots = new Map();
-      for (const el of createdThisRun) {
-        if (el.isConnected || !meantToShow(el)) continue;
+      for (const el of elements) {
+        if (el.isConnected || !wanted(el)) continue;
         let top = el;
         while (top.parentNode) top = top.parentNode;
         if (top.nodeType !== 1) continue;
         if (!roots.has(top)) roots.set(top, []);
         roots.get(top).push(el);
       }
-      createdThisRun = [];
-      for (const [top, controls] of roots) {
+      return roots;
+    }
+    function attachTrees(roots) {
+      for (const [top, made] of roots) {
         window.root.appendChild(top);
-        const holder = top === controls[0] && controls.length === 1 ? '' : '<' + top.tagName.toLowerCase() + '> holding ';
-        imagined('never added to the page: ' + holder + controls.map(describeControl).join(', ') + ' → added to the card');
+        const holder = top === made[0] && made.length === 1 ? '' : '<' + top.tagName.toLowerCase() + '> holding ';
+        imagined('never added to the page: ' + holder + made.map(describeControl).join(', ') + ' → added to the card');
       }
+    }
+    // Controls made but never added go on the card at once. Anything else made to be seen (a
+    // canvas, a styled ball) only if the card still shows nothing a moment later: a buffer canvas,
+    // a sprite image or an overlay added later by a handler is left alone when something shows
+    function attachOrphanedControls() {
+      const made = createdThisRun;
+      createdThisRun = [];
+      attachTrees(orphansOf(made, isControl));
+      realSetTimeout(() => {
+        if (!hasVisualNow()) attachTrees(orphansOf(made, (el) => !isControl(el) && meantToShow(el)));
+      }, 600);
     }
 
     // A length given as a bare number (el.style.left = x * 10) is ignored by CSS: it gets px, as
@@ -2064,6 +2098,8 @@ export class JavascriptRuntime {
     };
     window.cancelAnimationFrame = (id) => {
       realCancelFrame(id);
+      // A cancelled frame is no longer pending: asking again schedules a new one
+      for (const [fn, pending] of pendingFrames) if (pending === id) pendingFrames.delete(fn);
       if (programWork.delete('f' + id)) workChanged();
     };
 

@@ -577,6 +577,13 @@ const AUDIO_CONTEXT = new Set([
   'decodeAudioData', 'destination', 'currentTime', 'sampleRate', 'resume', 'suspend', 'close', 'state',
 ]);
 
+/** What only a 2D context does: drawing (not save, scale or filter, which other things have) */
+const DRAWING = new Set(['arc', 'arcTo', 'beginPath', 'bezierCurveTo', 'clearRect', 'closePath', 'drawImage', 'ellipse', 'fill', 'fillRect', 'fillStyle', 'fillText', 'lineTo', 'moveTo', 'quadraticCurveTo', 'rect', 'stroke', 'strokeRect', 'strokeStyle', 'strokeText']);
+/** What only an audio context does: make audio nodes and buffers, and its output */
+const AUDIO_MAKERS = new Set(['createOscillator', 'createGain', 'createBufferSource', 'createBiquadFilter', 'createDynamicsCompressor', 'createDelay', 'createAnalyser', 'createStereoPanner', 'createConvolver', 'createBuffer', 'createWaveShaper', 'createPanner', 'decodeAudioData', 'destination', 'sampleRate']);
+/** EventTarget's members, which every element and node has too */
+const EVENT_TARGET = new Set(['addEventListener', 'removeEventListener', 'dispatchEvent']);
+
 /** Names the sandbox provides, never missing */
 const PROVIDED = new Set(['speak', 'clear', 'out', 'root', 'playNotes', 'searchWikipedia', 'THREE', 'bpm', 'beat', 'start']);
 
@@ -589,7 +596,8 @@ const PROVIDED = new Set(['speak', 'clear', 'out', 'root', 'playNotes', 'searchW
 export function declareMissing(code: string): { code: string; declared: Array<{ name: string; make: string }> } {
   const tree = analyse(code);
   if (!tree) return { code, declared: [] };
-  const hasCanvas = /createElement\(\s*['"`]canvas|<canvas|getContext|\bcanvas\b/i.test(code);
+  // A canvas of its own: made by it, or looked up and drawn on (getContext called on something)
+  const makesCanvas = /createElement\(\s*['"`]canvas|<canvas/i.test(code);
   const uses = new Map<string, AnyNode[]>();
   for (const n of tree.nodes) {
     if (n.type !== 'Identifier' || !isReference(tree, n) || resolve(tree, n, n.name) !== null) continue;
@@ -610,12 +618,16 @@ export function declareMissing(code: string): { code: string; declared: Array<{ 
     }
     if (members.size === 0) continue;
     const all = (has: (m: string) => boolean) => [...members].every(has);
+    // At least one member only that type has (a drawing call, an audio node maker): the generic
+    // ones (addEventListener, close, scale) say nothing
+    const some = (set: Set<string>) => [...members].some((m) => set.has(m));
+    const drawsOnSomething = /\.getContext\s*\(/.test(code);
     const make =
-      !hasCanvas && all((m) => typeHas('CanvasRenderingContext2D', m))
+      !makesCanvas && !drawsOnSomething && some(DRAWING) && all((m) => typeHas('CanvasRenderingContext2D', m))
         ? MAKEABLE.find((t) => t.type === 'CanvasRenderingContext2D')!.make
-        : !hasCanvas && members.has('getContext') && all((m) => typeHas('HTMLCanvasElement', m))
+        : !makesCanvas && members.has('getContext') && all((m) => typeHas('HTMLCanvasElement', m))
           ? MAKEABLE.find((t) => t.type === 'HTMLCanvasElement')!.make
-          : all((m) => typeHas('AudioContext', m) || AUDIO_CONTEXT.has(m))
+          : some(AUDIO_MAKERS) && all((m) => (typeHas('AudioContext', m) || AUDIO_CONTEXT.has(m)) && !EVENT_TARGET.has(m))
             ? 'new AudioContext()'
             : null;
     if (make) declared.push({ name, make });

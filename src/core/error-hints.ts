@@ -776,7 +776,9 @@ const BROWSER_FUNCTIONS = ['requestAnimationFrame', 'cancelAnimationFrame', 'set
 
 /**
  * Before a program runs: its own function named like one of the browser's (BROWSER_FUNCTIONS),
- * anywhere in it, is taken out, so its calls reach the real one
+ * anywhere in it, is taken out, so its calls reach the real one. Only one that does nothing (an
+ * empty body) or names itself (returns itself, or calls itself and never ends): a stand-in that
+ * works (a fetch() giving test data) stays.
  */
 export function dropBrowserCopies(code: string): { code: string; dropped: string[] } {
   const ast = tryParse(code);
@@ -784,7 +786,11 @@ export function dropBrowserCopies(code: string): { code: string; dropped: string
   const spans: Array<{ start: number; end: number; name: string }> = [];
   walk(ast, (node) => {
     const name = node.type === 'FunctionDeclaration' ? ((node.id as AnyNode | null)?.name as string | undefined) : undefined;
-    if (name && BROWSER_FUNCTIONS.includes(name)) spans.push({ start: node.start, end: node.end, name });
+    if (!name || !BROWSER_FUNCTIONS.includes(name)) return;
+    const body = node.body as AnyNode;
+    const inside = code.slice(body.start + 1, body.end - 1);
+    const empty = ((body.body as AnyNode[]) ?? []).length === 0;
+    if (empty || new RegExp(`(?<![\\w$.])${name}(?![\\w$])`).test(inside)) spans.push({ start: node.start, end: node.end, name });
   });
   if (spans.length === 0) return { code, dropped: [] };
   let out = code;

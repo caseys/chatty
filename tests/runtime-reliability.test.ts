@@ -119,10 +119,12 @@ describe('adapting what programs do in the page', () => {
     win.close();
   });
 
-  it('adds to the card what was made to be seen but never added: a styled div, a canvas', async () => {
+  it('adds to the card what was made to be seen but never added, when the card shows nothing', async () => {
     const { win } = loadRunner();
     win.postMessage({ type: 'execute', id: 'o', code: 'const ball = document.createElement("div");\nball.style.background = "red";\nconst c = document.createElement("canvas");\nconst scratch = document.createElement("span");\nwindow.__made = [ball, c, scratch];' }, '*');
     await wait(30);
+    expect(((win as any).__made as HTMLElement[])[0].isConnected).toBe(false); // not at once
+    await wait(700);
     const [ball, c, scratch] = (win as any).__made as HTMLElement[];
     expect(ball.isConnected).toBe(true);
     expect(c.isConnected).toBe(true);
@@ -135,6 +137,26 @@ describe('adapting what programs do in the page', () => {
     win.postMessage({ type: 'execute', id: 'f', code: 'window.__runs = 0;\nfunction tick() { window.__runs++; }\nconst a = requestAnimationFrame(tick);\nconst b = requestAnimationFrame(tick);\nwindow.__same = a === b;' }, '*');
     await wait(120);
     expect((win as any).__same).toBe(true);
+    expect((win as any).__runs).toBe(1);
+    win.close();
+  });
+});
+
+describe('leaving off-page what is meant to stay off-page', () => {
+  it('attaches nothing when the card already shows something (a buffer canvas, a sprite)', async () => {
+    const { win } = loadRunner();
+    win.postMessage({ type: 'execute', id: 'b', code: 'const shown = document.createElement("div");\nshown.textContent = "Score: 0";\ndocument.body.appendChild(shown);\nconst buffer = document.createElement("canvas");\nconst sprite = document.createElement("img");\nwindow.__off = [buffer, sprite];' }, '*');
+    await wait(750);
+    const [buffer, sprite] = (win as any).__off as HTMLElement[];
+    expect(buffer.isConnected).toBe(false);
+    expect(sprite.isConnected).toBe(false);
+    win.close();
+  });
+
+  it('schedules a frame again after it was cancelled', async () => {
+    const { win } = loadRunner();
+    win.postMessage({ type: 'execute', id: 'c', code: 'window.__runs = 0;\nfunction loop() { window.__runs++; }\nconst a = requestAnimationFrame(loop);\ncancelAnimationFrame(a);\nrequestAnimationFrame(loop);' }, '*');
+    await wait(150);
     expect((win as any).__runs).toBe(1);
     win.close();
   });
