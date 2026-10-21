@@ -275,3 +275,27 @@ describe('a bare number in CSS text gets px, whichever way the CSS is written', 
     expect(w.__t.querySelector('p').getAttribute('style')).toBe('line-height: 2');
   });
 });
+
+describe('round 21: a hex color without #, and text set many times in one go', () => {
+  let win: Win;
+  afterEach(() => win?.close());
+
+  it('adds the # to hex digits the browser ignores, and leaves real colors and names alone', async () => {
+    const loaded = loadRunner();
+    win = loaded.win;
+    (win as any).CSS = { supports: (_prop: string, value: string) => /^#[0-9a-f]{3,8}$/i.test(value) || /^(?:red|initial)$/.test(value) };
+    win.postMessage({ type: 'execute', id: 'h', code: "const d = document.createElement('div');\nd.style.color = '55558B';\nd.style.background = 'red';\ndocument.body.appendChild(d);\nwindow.__d = d;" }, '*');
+    await wait(40);
+    const imagined = loaded.posted.filter((m) => m.type === 'imagined').map((m) => m.text);
+    expect(imagined).toContain("style.color = '55558B' (hex digits without #) → '#55558B'");
+    expect(imagined.filter((t: string) => /background/.test(t))).toEqual([]);
+  });
+
+  it('notes text replaced three or more times in one go (only the last shows), not text added to', async () => {
+    const loaded = loadRunner();
+    win = loaded.win;
+    win.postMessage({ type: 'execute', id: 'o', code: "const el = document.createElement('div');\nel.id = 'countdown';\ndocument.body.appendChild(el);\nlet n = 5;\nwhile (n > 0) { el.textContent = n; n--; }\nconst list = document.createElement('ul');\ndocument.body.appendChild(list);\nfor (let i = 0; i < 5; i++) list.innerHTML += '<li>' + i + '</li>';" }, '*');
+    await wait(60);
+    expect((win as any).__chattyOverwrites()).toEqual(["div#countdown's text was set 5 times in a row without waiting, so only the last ('1') shows"]);
+  });
+});

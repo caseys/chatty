@@ -1814,6 +1814,16 @@ export class JavascriptRuntime {
     }
   }
 
+  /** Texts the card's program set three times or more in one go (only the last showed), as sentences */
+  overwrittenText(): string[] {
+    try {
+      const own = (this.activeIframe?.contentWindow as unknown as { __chattyOverwrites?: () => string[] } | null)?.__chattyOverwrites;
+      return typeof own === 'function' ? own() : [];
+    } catch {
+      return [];
+    }
+  }
+
   /** The empty elements on the card, as selectors (div.bar ×5), for saying what shows nothing */
   emptyElements(): string[] {
     try {
@@ -3212,6 +3222,45 @@ export class JavascriptRuntime {
       } catch {}
       return err;
     }
+    // A hex color without its # ('55558B'): the color with it, when that is one (the browser ignores the bare digits)
+    const hashNoted = new Set();
+    function withHash(prop, value, supported) {
+      if (typeof value !== 'string' || !/^(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(value.trim()) || !window.CSS || !CSS.supports) return value;
+      try {
+        if (supported(value) || !supported('#' + value.trim())) return value;
+      } catch {
+        return value;
+      }
+      if (!hashNoted.has(prop)) {
+        hashNoted.add(prop);
+        imagined(prop + " = '" + value + "' (hex digits without #) → '#" + value.trim() + "'");
+      }
+      return '#' + value.trim();
+    }
+    // A countdown written in one go (while (n > 0) el.textContent = n--) shows only its last value: the
+    // writes one task makes to one element's text are counted, and three or more that each replace the
+    // one before (not add to it, as innerHTML += does) are a fact for a screen that never changed
+    const __chattyBurst = new Map();
+    let __chattyBurstPending = false;
+    const __chattyOverwrites = [];
+    function noteTextWrite(el, value) {
+      const text = String(value);
+      const seen = __chattyBurst.get(el);
+      const replaces = !seen || !text.includes(seen.last);
+      __chattyBurst.set(el, { count: (seen ? seen.count : 0) + (replaces ? 1 : 0), last: text });
+      if (__chattyBurstPending) return;
+      __chattyBurstPending = true;
+      setTimeout(() => {
+        __chattyBurstPending = false;
+        for (const [target, { count, last }] of __chattyBurst) {
+          if (count < 3 || __chattyOverwrites.length >= 3) continue;
+          const name = target.tagName ? target.tagName.toLowerCase() + (target.id ? '#' + target.id : '') : 'the text';
+          __chattyOverwrites.push(name + "'s text was set " + count + ' times in a row without waiting, so only the last (' + shown(last.slice(0, 20)) + ') shows');
+        }
+        __chattyBurst.clear();
+      }, 0);
+    }
+    window.__chattyOverwrites = () => __chattyOverwrites.slice();
     function watchSetters(proto, label) {
       if (!proto) return;
       for (const key of Object.getOwnPropertyNames(proto)) {
@@ -3220,7 +3269,9 @@ export class JavascriptRuntime {
         Object.defineProperty(proto, key, {
           ...d,
           set(value) {
+            if (COLOR_PROPS.has(key)) value = withHash(label + '.' + key, value, (v) => CSS.supports('color', v));
             if (checking) {
+              if (key === 'textContent' || key === 'innerText' || key === 'innerHTML') noteTextWrite(this, value);
               checkSet(label, key, value);
               value = checkTook(label, key, d, this, value);
             }
@@ -3587,7 +3638,7 @@ export class JavascriptRuntime {
                 return typeof value === 'function' ? value.bind(target) : value;
               },
               set(target, prop, value) {
-                let given = typeof prop === 'string' ? asLength(prop, value) : value;
+                let given = typeof prop === 'string' ? withHash('style.' + prop, asLength(prop, value), (v) => CSS.supports(cssName(prop), v)) : value;
                 // (style.cssText = "left: 50; width: 100")
                 if (prop === 'cssText' && typeof given === 'string') given = pxInCss(given);
                 // (the properties are the style object's own in Chrome: the prototype's watchers don't see them)

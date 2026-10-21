@@ -3071,6 +3071,8 @@ export class ConversationOrchestrator {
     // A canvas drawn on all the time that shows nothing at the end of the window: what is drawn has left it
     // (or hides behind a flat fill). Judged on what is visible, not on the drawing calls, which go on
     const offCanvas = wantsVisual && !soundWaits && drawn() ? await nothingLands(this.javascriptRuntime) : null;
+    // Text set several times in one go, where only the last value ever shows (a countdown with no waiting)
+    const overwrites = this.javascriptRuntime.overwrittenText?.() ?? [];
     const stillScreen =
       wantsVisual && MOTION_REQUEST.test(request) && !soundWaits && !MOVES_WITH_USER.test(code) && drawn() && !(await screenChanges(this.javascriptRuntime));
     // MIDI that never started a note is silent for that reason: the audio context has nothing to do with it
@@ -3125,7 +3127,7 @@ export class ConversationOrchestrator {
             : noHandlers
               ? 'Nothing in the program reacts to the user: the request is for something to tap, click, type in or move, and no handler does that work (addEventListener("click", …) on what is tapped, an onclick, an input listener, a key or pointer listener).'
             : stillScreen
-              ? 'The screen never changed and nothing is scheduled to change it: something that moves or counts has to keep updating what it shows (setInterval, or requestAnimationFrame that draws again each frame).'
+              ? `The screen never changed and nothing is scheduled to change it: something that moves or counts has to keep updating what it shows (setInterval, or requestAnimationFrame that draws again each frame).${overwrites.length ? ` ${overwrites.join('; ')}: wait between the updates (setInterval, or await a timeout in the loop).` : ''}`
               : '',
       // A button whose handler in the markup (onclick="rollDice()") names a function the page does not have throws when pressed
       deadHandlers.length ? `The page's inline handlers call ${deadHandlers.map((name) => `${name}()`).join(', ')}, which the program never defines: onclick="${deadHandlers[0]}()" runs the function of that name when pressed, so it has to exist (function ${deadHandlers[0]}() { … }).` : '',
