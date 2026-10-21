@@ -748,13 +748,17 @@ export class VoiceAssistantEngine {
     await this.downloadsAllowed();
     if (!this.speechEnabled) return;
     writeLoadStage('speech recognition');
+    this.stateCoordinator.setModelState('stt', 'downloading');
     await this.sttProvider
       .initialize((loaded, total) => this.events.onSttProgress?.(loaded, total))
       .finally(settleAfterLoad)
       .catch((err) => {
         console.warn('Whistle STT pre-warm warning:', err);
       })
-      .finally(() => this.events.onSttLoadSettled?.());
+      .finally(() => {
+        this.stateCoordinator.setModelState('stt', 'ready');
+        this.events.onSttLoadSettled?.();
+      });
     if (!this.speechEnabled) await this.sttProvider.dispose();
   }
 
@@ -798,10 +802,11 @@ export class VoiceAssistantEngine {
   /** A greeting asked for while models load waits here until they're done */
   private greetWhenLoaded = false;
 
-  /** The chat model is ready and, with speech on, the voice has finished loading (or failed) */
+  /** The chat model is ready and, with speech on, the voice and speech recognition have finished loading (or failed) */
   private modelsLoaded(): boolean {
-    const { llm, tts } = this.stateCoordinator.getSnapshot().models;
-    return llm === 'ready' && (!this.speechEnabled || (tts !== 'downloading' && tts !== 'initializing'));
+    const { llm, tts, stt } = this.stateCoordinator.getSnapshot().models;
+    const loading = (state: string) => state === 'downloading' || state === 'initializing';
+    return llm === 'ready' && (!this.speechEnabled || (!loading(tts) && stt !== 'downloading'));
   }
 
   /** Adds the welcome message to an empty chat, spoken too when speech is on, once models are loaded. */
