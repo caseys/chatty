@@ -21,3 +21,12 @@ describe('repairs that would change what a program means', () => {
     expect(blankChoices(code, blank!, { ids: [] })).not.toContain('i');
   });
 });
+
+describe('fix sampling for small models', async () => {
+  const { forModel } = await import('../src/core/orchestrator.ts');
+  it('scales temperatures down for models under about 1.5B (hottest 1), and leaves larger ones alone', () => {
+    expect(forModel({ temperature: 1.3, topP: 0.95 }, 'qwen2.5-0.5b').temperature).toBe(1);
+    expect(forModel({ temperature: 1, topP: 0.99 }, 'qwen2.5-0.5b').temperature).toBe(0.77);
+    expect(forModel({ temperature: 1.3, topP: 0.95 }, 'gemma-4-e2b-it-web').temperature).toBe(1.3);
+  });
+});

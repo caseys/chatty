@@ -302,6 +302,20 @@ export const SAMPLING_SWINGS: ReadonlyArray<{ temperature: number; topP: number 
   { temperature: 0.8, topP: 0.75 },
 ];
 
+/** Above this, models under about 1.5B parameters write gibberish (mixed scripts, no code) */
+const SMALL_MODEL_MAX_TEMPERATURE = 1;
+
+/**
+ * A swing as the model can take it: small models' temperatures are scaled down so the hottest is
+ * SMALL_MODEL_MAX_TEMPERATURE, and every try still samples differently (see prefersLineFix)
+ */
+export function forModel(sampling: { temperature: number; topP: number }, modelId: string): { temperature: number; topP: number } {
+  if (prefersLineFix(modelId)) return sampling;
+  const hottest = Math.max(...SAMPLING_SWINGS.map((s) => s.temperature));
+  const scale = Math.min(1, SMALL_MODEL_MAX_TEMPERATURE / hottest);
+  return { ...sampling, temperature: Math.round(sampling.temperature * scale * 100) / 100 };
+}
+
 /** Attempt 1 takes the runtime's near-greedy decoding (exact); each later one its swing */
 export function fixSampling(attempt: number): { temperature: number; topP: number } | undefined {
   if (attempt <= 1) return undefined;
@@ -849,7 +863,10 @@ export class ConversationOrchestrator {
     // The line the fix request marked, where the corrected line goes back
     // (none for a whole-program fix: the reply is the program)
     const fixLine = options?.autoFix && (!options.fixWhole || options.fixBlock) ? (options.fixBlock?.start ?? this.lastRun?.errorLine) : undefined;
-    if (options?.autoFix) {
+    if (options?.autoFix === NO_PROGRAM_YET) {
+      // Nothing to fix: the program is written new, with the writing prompt, and only this request
+      promptMessages = [{ role: 'user', content: normalized }];
+    } else if (options?.autoFix) {
       systemPrompt = FIX_SYSTEM_PROMPT;
       // One message, the user's: the failed program is handed over to fix, not shown as the
       // model's own reply (which it copied back)
@@ -1058,7 +1075,13 @@ export class ConversationOrchestrator {
           temperature: 0.1,
           maxOutputTokens: generationProvider.maxOutputTokens,
           // A first fix wants the one most likely line; each later attempt samples differently
-          ...(options?.autoFix ? (reask ? { sampling: reask } : fixSampling(options.fixAttempt ?? 1) ? { sampling: fixSampling(options.fixAttempt ?? 1) } : { exact: true }) : {}),
+          ...(options?.autoFix
+            ? reask
+              ? { sampling: forModel(reask, generationProvider.modelId) }
+              : fixSampling(options.fixAttempt ?? 1)
+                ? { sampling: forModel(fixSampling(options.fixAttempt ?? 1)!, generationProvider.modelId) }
+                : { exact: true }
+            : {}),
           ...(options?.autoFix ? { fixShape: options.fixBlock ? ('function' as const) : fixLine ? ('line' as const) : ('program' as const) } : {}),
           ...(retry > 0 ? { retry } : {}),
           signal: generationAbort.signal,
@@ -1888,13 +1911,14 @@ export class ConversationOrchestrator {
       kind: 'error',
       text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
-    // No program to fix: the request is asked for again, as a whole program
-    if (!run.code.trim()) {
+    // No program to fix (nothing ran, or only speak()): the request is asked for again, as a
+    // whole program
+    if (!run.code.trim() || isTalkOnly(run.code)) {
       this.startFixLog(run);
       appendRunLog('retry', `the reply had no program: asking the model for the whole program (try ${attempt} of ${MAX_FIX_TRIES})`);
       const ask = [
         `Write the complete JavaScript program for: ${run.task}`,
-        `The last reply had no program in it (${run.error.replace(/\.+$/, '')}).`,
+        `The last reply had no program that does it (${run.error.replace(/\.+$/, '')}).`,
         'Reply with the complete program.',
       ].join('\n');
       void settle(AFTER_HEAVY_MS).then(() => {

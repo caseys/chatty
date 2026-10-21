@@ -768,11 +768,12 @@ describe('more than one fix attempt', () => {
     expect(llm.turns[1].exact).toBe(true);
     const temps = llm.turns.slice(2).map((t) => t.sampling?.temperature);
     const topPs = llm.turns.slice(2).map((t) => t.sampling?.topP);
+    // A small model's swings, scaled so the hottest is 1 (forModel)
     expect(llm.turns.slice(2).map((t) => t.sampling)).toEqual([
-      { temperature: 1, topP: 0.99 },
-      { temperature: 0.5, topP: 0.6 },
-      { temperature: 1.3, topP: 0.95 },
-      { temperature: 0.8, topP: 0.75 },
+      { temperature: 0.77, topP: 0.99 },
+      { temperature: 0.38, topP: 0.6 },
+      { temperature: 1, topP: 0.95 },
+      { temperature: 0.62, topP: 0.75 },
     ]);
     expect(new Set(temps).size).toBe(4);
     expect(new Set(topPs).size).toBe(4);
@@ -849,7 +850,7 @@ describe('a fix reply that is unusable starts the next try at once', () => {
     expect(llm.turns[1].exact).toBe(true);
     expect(llm.turns[2].messages).not.toEqual(llm.turns[1].messages);
     expect(llm.turns[2].messages.at(-1)!.content).toContain('Your last reply was not a working fix (');
-    expect(llm.turns[2].sampling).toEqual({ temperature: 1, topP: 0.99 });
+    expect(llm.turns[2].sampling).toEqual({ temperature: 0.77, topP: 0.99 }); // scaled for a small model
     // (the unchanged line fix is asked again twice within the first try)
     expect(notices).toEqual([
       'Fixing (1 of 5): boom is not defined',
@@ -866,8 +867,8 @@ describe('a fix reply that is unusable starts the next try at once', () => {
     await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
     expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'line', 'function', 'program']);
     expect(llm.turns.slice(2).map((t) => t.sampling)).toEqual([
-      { temperature: 1, topP: 0.99 },
-      { temperature: 0.5, topP: 0.6 },
+      { temperature: 0.77, topP: 0.99 },
+      { temperature: 0.38, topP: 0.6 },
     ]);
     expect(executed.length).toBe(2); // the unchanged replies never ran
   });
@@ -886,11 +887,12 @@ describe('a fix reply that is unusable starts the next try at once', () => {
 
 describe('the order of a request\'s fix questions', () => {
   const program = 'function draw() {\n  boom();\n}\ndraw();\nspeak("Drawn.");';
+  // A small model's swings, scaled so the hottest is 1 (forModel)
   const SWINGS = [
-    { temperature: 1, topP: 0.99 },
-    { temperature: 0.5, topP: 0.6 },
-    { temperature: 1.3, topP: 0.95 },
-    { temperature: 0.8, topP: 0.75 },
+    { temperature: 0.77, topP: 0.99 },
+    { temperature: 0.38, topP: 0.6 },
+    { temperature: 1, topP: 0.95 },
+    { temperature: 0.62, topP: 0.75 },
   ];
   /** A fix reply for a question that fails again with the error `name` (a different function body each time) */
   const bad = (name: string, shape: string) =>
@@ -1335,10 +1337,27 @@ describe('a reply with no program in it', () => {
     await vi.waitFor(() => expect(llm.turns.length).toBe(2), { timeout: 10000 });
     const ask = llm.turns[1].messages.at(-1)!.content;
     expect(ask).toContain('Write the complete JavaScript program for: Play a looped melody');
-    expect(ask).toContain('The last reply had no program in it');
+    expect(ask).toContain('The last reply had no program that does it');
+    expect(llm.turns[1].systemPrompt).not.toBe(FIX_SYSTEM_PROMPT);
     expect(ask).not.toContain('```');
     const asked = orchestrator.memoryStore.getMessages().filter((m) => m.role === 'user');
     expect(asked.at(-1)!.autoFix).toBe(true);
     await vi.waitFor(() => expect(executed.at(-1)).toContain('speak("Done.")'), { timeout: 5000 });
   }, 20000);
+});
+
+describe('a reply that only talks, for a request that shows something', () => {
+  it('asks for a new program with the writing prompt, not a fix of the talk', async () => {
+    const talk = 'speak("I could draw that for you.");';
+    const llm = new QueueLlm([talk, talk, '// Cause: no canvas\nconst c = document.createElement("canvas");\ndocument.body.appendChild(c);\nspeak("A ball.");']);
+    llm.modelId = 'qwen2.5-0.5b';
+    const { runtime } = fakeRuntime([{}, {}]);
+    (runtime as unknown as { hasVisualContent: () => boolean }).hasVisualContent = () => false;
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Animate a ball bouncing around the screen');
+    await vi.waitFor(() => expect(llm.turns.length).toBeGreaterThanOrEqual(3), { timeout: 15000 });
+    const fresh = llm.turns.at(-1)!;
+    expect(fresh.messages.at(-1)!.content).toContain('Write the complete JavaScript program for: Animate a ball bouncing around the screen');
+    expect(fresh.systemPrompt).not.toBe(FIX_SYSTEM_PROMPT);
+  }, 30000);
 });
