@@ -376,3 +376,35 @@ describe('a Tone part used as a value is left for the program to connect', () =>
     expect(errorHint(plain, error)?.correction?.code).toContain('const synth = new Tone.PolySynth(Tone.Synth).toDestination();');
   });
 });
+
+describe('names a program wrote on its objects that they do not have', () => {
+  it('reads back what was added after the object was made: a name that nothing reads, not a function or an underscore name', async () => {
+    const { win, posted } = loadRunner(fakeTone);
+    await run(
+      win,
+      posted,
+      [
+        'const synth = new Tone.PolySynth(Tone.Synth);',
+        'synth.tempo = 120;',
+        'synth._private = 1;',
+        'synth.helper = () => 1;',
+        'const el = document.createElement("div");',
+        'el.score = 3;',
+        'el.textContent = "ok";',
+        'document.body.append(el);',
+      ].join('\n')
+    );
+    expect(win.__chattyUnknownWrites()).toEqual([
+      { type: 'Tone.PolySynth', name: 'tempo' },
+      { type: 'element:div', name: 'score' },
+    ]);
+    win.close();
+  });
+
+  it('is empty for a program that only uses what the objects have', async () => {
+    const { win, posted } = loadRunner(fakeTone);
+    await run(win, posted, 'const synth = new Tone.Synth().toDestination();\nsynth.triggerAttackRelease("C4", "8n");\nconst el = document.createElement("p");\nel.textContent = "x";\nel.className = "a";');
+    expect(win.__chattyUnknownWrites()).toEqual([]);
+    win.close();
+  });
+});

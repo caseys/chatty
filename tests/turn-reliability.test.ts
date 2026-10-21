@@ -7,7 +7,7 @@ import {
   FORMAT_TURNS,
   type RunStatus,
 } from '../src/core/orchestrator.ts';
-import { prefersLineFix, promptRules, runScore, sameMissingMember } from '../src/core/orchestrator.ts';
+import { prefersLineFix, promptRules, repairBeforeRunning, runScore, sameMissingMember } from '../src/core/orchestrator.ts';
 import { FIX_SYSTEM_PROMPT } from '../src/core/line-fix.ts';
 import { StateMachineCoordinator } from '../src/core/state-machine.ts';
 import { runLogText } from '../src/core/run-log.ts';

@@ -66,26 +66,32 @@ const PRECACHE_ASSET_URLS = BUILD_ASSETS.filter((name) => /\.(js|css)$/.test(nam
   (name) => BASE + 'assets/' + name
 );
 
+// Registered as sw.js?lite=1 by iPhone and iPad Safari, which kill the tab when memory runs short:
+// the model is already on the GPU when this installs, so only the app shell is stored up front
+// and the build's chunks are cached the first time they're used (cache-first below)
+const LITE = new URL(self.location).searchParams.get('lite') === '1';
+
 self.addEventListener('install', (event) => {
   self.skipWaiting();
   event.waitUntil(
-    caches.open(CACHE_NAME_APP).then((cache) =>
-      // One URL at a time (addAll caches nothing if any one fails), straight from the network so
-      // a new install never stores an old index.html out of the browser's HTTP cache.
+    (async () => {
+      const cache = await caches.open(CACHE_NAME_APP);
+      // One URL at a time, so one response is in memory at once (and one failure doesn't stop the
+      // rest, as addAll would), straight from the network so a new install never stores an old
+      // index.html out of the browser's HTTP cache.
       // The build's JS/CSS chunks come along so lazy chunks survive the next deploy; .wasm doesn't.
       // A chunk already cached is kept: its hashed name means its content can't have changed, so
       // a deploy downloads only the chunks that did.
-      Promise.all(
-        [...APP_SHELL_URLS, ...PRECACHE_ASSET_URLS].map(async (url) => {
-          if (PRECACHE_ASSET_URLS.includes(url) && (await cache.match(url))) return;
-          return fetch(url, { cache: 'reload' })
-            .then((response) => (response.ok ? cache.put(url, response) : undefined))
-            .catch((err) => {
-              console.warn('[Chatty SW] Pre-caching failed for', url, err);
-            });
-        })
-      )
-    )
+      for (const url of LITE ? APP_SHELL_URLS : [...APP_SHELL_URLS, ...PRECACHE_ASSET_URLS]) {
+        if (PRECACHE_ASSET_URLS.includes(url) && (await cache.match(url))) continue;
+        try {
+          const response = await fetch(url, { cache: 'reload' });
+          if (response.ok) await cache.put(url, response);
+        } catch (err) {
+          console.warn('[Chatty SW] Pre-caching failed for', url, err);
+        }
+      }
+    })()
   );
 });
 

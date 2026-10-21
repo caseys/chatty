@@ -327,11 +327,27 @@ describe('blank choices and spans by scope', () => {
     expect(blankChoices(call, b2, { ids: [], fields: [] })).not.toContain('amount');
   });
 
-  it("fills only the failing function's references", () => {
-    const prog = 'function calc(amount) {\n  return bill * 0.15;\n}\nfunction show() {\n  speak(bill);\n}\ncalc(10);';
-    const blank = findBlank(prog, 'bill is not defined', 2)!;
-    expect(blank.spans.length).toBe(1);
-    expect(fillBlank(prog, blank, 'amount')).toContain('speak(bill)');
+  it('fills every reference at once: the name is declared once, before its first use, whatever function it is in', () => {
+    // (the tic-tac-toe run: `canvas` undeclared in two functions, each failed in turn when only one was filled)
+    const prog = 'const board = document.getElementById("board");\nfunction drawBoard(amount) {\n  return canvas.getContext("2d");\n}\nfunction show() {\n  speak(canvas.width);\n}\ndrawBoard();';
+    const blank = findBlank(prog, 'canvas is not defined', 3)!;
+    expect(blank.spans.length).toBe(2);
+    expect(blank.declareAt).toBeDefined();
+    const filled = fillBlank(prog, blank, 'board')!;
+    // One declaration, above the first function that uses it; every use reads it
+    expect(filled).toContain('const canvas = board;\nfunction drawBoard');
+    expect(filled.match(/const canvas/g)).toHaveLength(1);
+    // What is offered is what is visible there (not a parameter of the function that failed)
+    expect(blankChoices(prog, blank, { ids: [], fields: [] })).not.toContain('amount');
+    const plainUse = 'const total = 3;\nfunction a(amount) {\n  speak(bill);\n}\nfunction b() {\n  speak(bill);\n}\na(1);';
+    const plain = findBlank(plainUse, 'bill is not defined', 3)!;
+    expect(blankChoices(plainUse, plain, { ids: [], fields: [] })).toContain('total');
+    expect(blankChoices(plainUse, plain, { ids: [], fields: [] })).not.toContain('amount');
+    // A name used in one function only is still declared in that function
+    const single = 'function calc(amount) {\n  return bill * 0.15;\n}\ncalc(10);';
+    const one = findBlank(single, 'bill is not defined', 2)!;
+    expect(one.spans.length).toBe(1);
+    expect(blankChoices(single, one, { ids: [], fields: [] })).toContain('amount');
   });
 });
 

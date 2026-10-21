@@ -98,6 +98,15 @@ import { midiSummary as softwareMidiSummary, resetMidiSummary, silenceSoftwareMi
 
 export type JavascriptExecutionMode = 'iframe' | 'worker' | 'eval';
 
+/** Where a canvas's drawing calls landed over a moment: per kind of call, how many and the range they covered (see traceDrawing) */
+export interface CanvasTrace {
+  width: number;
+  height: number;
+  /** Calls made while the canvas was transformed (translate, scale, rotate): its coordinates are not the canvas's */
+  nonIdentity: number;
+  kinds: Array<{ kind: string; count: number; minX: number; maxX: number; minY: number; maxY: number }>;
+}
+
 export interface JavascriptExecutionResult {
   success: boolean;
   output?: unknown;
@@ -1587,6 +1596,35 @@ export class JavascriptRuntime {
     }
   }
 
+  /**
+   * The libraries a program uses (Tone, THREE), loaded into the program's page now, and that page's scope:
+   * what is a class there is known before the program runs (the page keeps them for the run: no second copy).
+   * Null for a program that uses none, or when the page can't say.
+   */
+  async libraryScope(code: string): Promise<Record<string, unknown> | null> {
+    if (this.mode !== 'iframe' || typeof document === 'undefined' || !/\b(?:Tone|THREE)\b/.test(code)) return null;
+    try {
+      const iframe = this.ensureIframe();
+      await this.iframeReadyPromise;
+      await withLibraries(code, iframe.contentWindow);
+      return this.pageScope();
+    } catch {
+      return null;
+    }
+  }
+
+  /** What each element id of the visible card is (`board` → `canvas`, `result` → `div`), as the page built it */
+  pageTags(): Record<string, string> {
+    try {
+      const doc = this.activeIframe?.contentDocument;
+      const tags: Record<string, string> = {};
+      if (doc) for (const el of doc.querySelectorAll('[id]')) if (el.id && el.id !== 'root') tags[el.id] = el.localName;
+      return tags;
+    } catch {
+      return {};
+    }
+  }
+
   /** Ids of the input, textarea and select elements in the visible card (what a program reads values from) */
   pageFields(): string[] {
     try {
@@ -1640,6 +1678,16 @@ export class JavascriptRuntime {
       return typeof read === 'function' ? read() : null;
     } catch {
       return null;
+    }
+  }
+
+  /** Names the program wrote on its Tone objects and elements that they don't have (`synth.tempo = 120`), as the page read them back */
+  unknownWrites(): Array<{ type: string; name: string }> {
+    try {
+      const read = (this.activeIframe?.contentWindow as unknown as { __chattyUnknownWrites?: () => Array<{ type: string; name: string }> } | null | undefined)?.__chattyUnknownWrites;
+      return typeof read === 'function' ? read() : [];
+    } catch {
+      return [];
     }
   }
 
@@ -1711,6 +1759,36 @@ export class JavascriptRuntime {
       return typeof own === 'function' ? own() : this.hasVisualContent();
     } catch {
       return this.hasVisualContent();
+    }
+  }
+
+  /** The 2D canvases the program has drawn on: the drawing calls each has had so far, and whether it shows one flat color now */
+  canvasState(): Array<{ calls: number; flat: boolean; width: number; height: number }> {
+    try {
+      const read = (this.activeIframe?.contentWindow as unknown as { __chattyCanvasState?: () => Array<{ calls: number; flat: boolean; width: number; height: number }> } | null | undefined)?.__chattyCanvasState;
+      return typeof read === 'function' ? read() : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Something visible in the card now: a canvas that was drawn on counts only when it shows more than one flat color */
+  seenNow(): boolean {
+    try {
+      const seen = (this.activeIframe?.contentWindow as unknown as { __chattySeen?: () => boolean } | null | undefined)?.__chattySeen;
+      return typeof seen === 'function' ? seen() : true;
+    } catch {
+      return true;
+    }
+  }
+
+  /** Where the program's drawing calls land over the next `ms` (see __chattyTrace in the sandbox runner); an empty list when the page can't say */
+  async traceDrawing(ms: number): Promise<CanvasTrace[]> {
+    try {
+      const trace = (this.activeIframe?.contentWindow as unknown as { __chattyTrace?: (ms: number) => Promise<CanvasTrace[]> } | null | undefined)?.__chattyTrace;
+      return typeof trace === 'function' ? await trace(ms) : [];
+    } catch {
+      return [];
     }
   }
 
@@ -2440,6 +2518,8 @@ export class JavascriptRuntime {
         const connects = typeof obj.connect === 'function';
         const makesSound = system === 'web' ? starts : connects && (typeof obj.triggerAttack === 'function' || (starts && 'state' in obj));
         const thing = { kind, system, starts, started: false, edges: [], opaque: false, role: makesSound ? 'source' : starts && !connects ? 'scheduler' : 'node' };
+        // What the object has of its own as it is made: a name the program writes after that is its own addition
+        if (system === 'tone') thing.keys = new Set(Object.getOwnPropertyNames(obj));
         __chattyMade.by.set(obj, thing);
         __chattyMade.things.push(thing);
         if (starts) {
@@ -2555,6 +2635,38 @@ export class JavascriptRuntime {
       };
       window.Audio.prototype = __chattyNativeAudio.prototype;
     }
+    // Names the program wrote on its Tone objects and elements that the object doesn't have (synth.tempo = 120
+    // makes a property that nothing reads): [{ type: 'Tone.PolySynth' | 'element:canvas', name }], each once. Not
+    // functions (the program's own helpers) or names with an underscore.
+    window.__chattyUnknownWrites = () => {
+      const found = [];
+      const seen = new Set();
+      const add = (type, name) => {
+        const key = type + '|' + name;
+        if (!seen.has(key) && found.length < 12) {
+          seen.add(key);
+          found.push({ type, name });
+        }
+      };
+      try {
+        for (const [obj, thing] of __chattyMade.by) {
+          if (thing.system !== 'tone' || !thing.keys) continue;
+          for (const name of Object.getOwnPropertyNames(obj)) {
+            if (thing.keys.has(name) || name.startsWith('_') || !/^[A-Za-z$][\\w$]*$/.test(name) || typeof obj[name] === 'function') continue;
+            add(thing.kind, name);
+          }
+        }
+      } catch {}
+      try {
+        for (const el of Array.from(document.querySelectorAll('*')).slice(0, 2000)) {
+          for (const name of Object.getOwnPropertyNames(el)) {
+            if (name.startsWith('_') || !/^[A-Za-z$][\\w$]*$/.test(name) || name in Object.getPrototypeOf(el) || typeof el[name] === 'function') continue;
+            add('element:' + el.localName, name);
+          }
+        }
+      } catch {}
+      return found;
+    };
     window.__chattySetup = () => {
       const things = __chattyMade.things.map((t) => ({
         kind: t.kind,
@@ -2598,7 +2710,9 @@ export class JavascriptRuntime {
       if (m) return Number(m[1]);
       // Safari's stack may not name the program, but its errors carry the line (an Error made
       // here, in a watcher, carries this script's own line instead: no line then)
-      return !programFrameOnly && err && typeof err.line === 'number' ? err.line : null;
+      // (an error thrown inside a library's bundle carries the bundle's line, not the program's: none then)
+      const inLibrary = err && typeof err.sourceURL === 'string' && !/chatty-program/.test(err.sourceURL) && /(?:tone|three)-global|\\/assets\\/|node_modules/.test(err.sourceURL);
+      return !programFrameOnly && err && typeof err.line === 'number' && !inLibrary ? err.line : null;
     }
     function errorLine(err, programFrameOnly) {
       const line = stackLine(err, programFrameOnly);
@@ -2920,6 +3034,48 @@ export class JavascriptRuntime {
     // check's "was anything drawn", without reading pixels back, which costs memory on a phone)
     const __chattyDrawn = new WeakMap();
     const __CHATTY_DRAWING = new Set(['fill', 'stroke', 'fillRect', 'strokeRect', 'fillText', 'strokeText', 'drawImage', 'putImageData', 'drawFocusIfNeeded']);
+    // Where the drawing calls land, noted for a moment when asked (the outcome check, once a canvas
+    // that is drawn on all the time shows nothing): each call's box in canvas coordinates, kept as
+    // the range per kind of call and canvas, with whether the canvas was transformed at the time
+    let __chattyTraceOn = false;
+    const __chattyTraced = new Map();
+    function __chattyNote(ctx, key, args) {
+      try {
+        const canvas = ctx.canvas;
+        if (!canvas) return;
+        const n = (i) => Number(args[i]);
+        let x, y, w = 0, h = 0;
+        if (key === 'arc' || key === 'ellipse') {
+          const r = key === 'arc' ? n(2) : Math.max(n(2), n(3));
+          [x, y, w, h] = [n(0) - r, n(1) - r, 2 * r, 2 * r];
+        } else if (key === 'rect' || key === 'fillRect' || key === 'strokeRect') {
+          [x, y, w, h] = [Math.min(n(0), n(0) + n(2)), Math.min(n(1), n(1) + n(3)), Math.abs(n(2)), Math.abs(n(3))];
+        } else if (key === 'fillText' || key === 'strokeText') {
+          [x, y] = [n(1), n(2)];
+        } else if (key === 'moveTo' || key === 'lineTo') {
+          [x, y] = [n(0), n(1)];
+        } else if (key === 'drawImage') {
+          const far = args.length >= 9;
+          [x, y, w, h] = far ? [n(5), n(6), n(7), n(8)] : [n(1), n(2), args.length >= 5 ? n(3) : 0, args.length >= 5 ? n(4) : 0];
+        } else {
+          return;
+        }
+        if (![x, y, w, h].every(Number.isFinite)) return;
+        let entry = __chattyTraced.get(canvas);
+        if (!entry) __chattyTraced.set(canvas, (entry = { width: canvas.width, height: canvas.height, nonIdentity: 0, kinds: new Map() }));
+        const m = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+        if (m && !(m.a === 1 && m.b === 0 && m.c === 0 && m.d === 1 && m.e === 0 && m.f === 0)) entry.nonIdentity++;
+        const kind = entry.kinds.get(key);
+        if (!kind) entry.kinds.set(key, { count: 1, minX: x, maxX: x + w, minY: y, maxY: y + h });
+        else {
+          kind.count++;
+          kind.minX = Math.min(kind.minX, x);
+          kind.maxX = Math.max(kind.maxX, x + w);
+          kind.minY = Math.min(kind.minY, y);
+          kind.maxY = Math.max(kind.maxY, y + h);
+        }
+      } catch {}
+    }
     function watchCalls(proto, label) {
       if (!proto) return;
       for (const key of Object.getOwnPropertyNames(proto)) {
@@ -2931,6 +3087,7 @@ export class JavascriptRuntime {
         proto[key] = function () {
           if (checking) checkCall(label, key, fn.length, Array.prototype.slice.call(arguments));
           if (draws && this && this.canvas) __chattyDrawn.set(this.canvas, (__chattyDrawn.get(this.canvas) || 0) + 1);
+          if (__chattyTraceOn && label === 'ctx') __chattyNote(this, key, arguments);
           try {
             return fn.apply(this, arguments);
           } catch (err) {
@@ -3713,9 +3870,29 @@ export class JavascriptRuntime {
     }
     // With ignoreBlank, a canvas nothing was drawn on and an element with nothing in it show
     // nothing (the outcome check's question)
-    function __chattyVisualNow(ignoreBlank) {
+    // A 2D canvas that has been drawn on but shows nothing now: its 24 x 24 picture is one flat color
+    // (all transparent, or a fill that nothing is drawn over). Null where it can't be told.
+    function __chattyFlat(canvas) {
+      try {
+        const picture = __chattyThumb(canvas);
+        if (!picture) return null;
+        const values = picture.split(',');
+        for (let i = 4; i < values.length; i++) if (values[i] !== values[i % 4]) return false;
+        return true;
+      } catch { return null; }
+    }
+    function __chattyIs2d(canvas) {
+      for (const context of contexts) if (context.canvas === canvas && !(context instanceof CanvasRenderingContext2D)) return false;
+      return true;
+    }
+    function __chattyFlatDrawn(el) {
+      try {
+        return !!el && el.tagName === 'CANVAS' && !!el.width && !!el.height && __chattyIs2d(el) && !!__chattyDrawn.get(el) && __chattyFlat(el) === true;
+      } catch { return false; }
+    }
+    function __chattyVisualNow(ignoreBlank, ignoreFlat) {
       const rootEl = document.getElementById('root');
-      const hidden = (n) => isEmptyStandIn(n) || (ignoreBlank && (n.nodeType === 1 && (__chattyBlank(n) || __chattyEmptyBox(n) || n.tagName === 'SCRIPT' || n.tagName === 'STYLE')));
+      const hidden = (n) => isEmptyStandIn(n) || (ignoreBlank && (n.nodeType === 1 && (__chattyBlank(n) || (ignoreFlat && __chattyFlatDrawn(n)) || __chattyEmptyBox(n) || n.tagName === 'SCRIPT' || n.tagName === 'STYLE')));
       const shows = (n) => n.nodeType === 3 ? n.textContent.trim().length > 0 : n.nodeType === 1 && !hidden(n);
       return Boolean(rootEl && Array.from(rootEl.childNodes).some(shows)) ||
         Array.from(document.querySelectorAll('canvas, svg, table, img, video, form, button, input, div:not(#root)')).some((el) => !hidden(el)) ||
@@ -3740,6 +3917,33 @@ export class JavascriptRuntime {
     // The host asks this page (see hasVisualContent, hasDrawnContent)
     window.__chattyHasVisual = hasVisualNow;
     window.__chattyHasDrawing = () => __chattyVisualNow(true);
+    // Something visible now: as above, and a canvas drawn on that shows only one flat color counts for nothing
+    window.__chattySeen = () => __chattyVisualNow(true, true);
+    // The 2D canvases that have been drawn on: how many drawing calls each has had, and whether it shows one flat color
+    window.__chattyCanvasState = () => {
+      const out = [];
+      for (const canvas of document.querySelectorAll('canvas')) {
+        try {
+          const calls = __chattyDrawn.get(canvas) || 0;
+          if (!canvas.width || !canvas.height || !calls || !__chattyIs2d(canvas)) continue;
+          out.push({ calls, flat: __chattyFlat(canvas) === true, width: canvas.width, height: canvas.height });
+        } catch {}
+      }
+      return out;
+    };
+    // Where the drawing calls land, for the next few milliseconds: per canvas and kind of call, the range of
+    // x and y they cover in the canvas's own coordinates (see __chattyNote)
+    window.__chattyTrace = (ms) => new Promise((resolve) => {
+      __chattyTraced.clear();
+      __chattyTraceOn = true;
+      realSetTimeout(() => {
+        __chattyTraceOn = false;
+        const out = [];
+        for (const entry of __chattyTraced.values()) out.push({ width: entry.width, height: entry.height, nonIdentity: entry.nonIdentity, kinds: Array.from(entry.kinds, ([kind, v]) => ({ kind, ...v })) });
+        __chattyTraced.clear();
+        resolve(out);
+      }, ms);
+    });
     // What the card looks like right now, as one string: its markup and each canvas's pixels. Two
     // that differ mean the screen changed. Null when it can't be told (a WebGL canvas can't be read
     // back); never equal while a CSS or SVG animation runs, which change the screen without touching it.
@@ -3809,8 +4013,14 @@ export class JavascriptRuntime {
       __chattyReported.add(key);
       __chattyHost.postMessage({ type: 'program_error', message, line }, '*');
     }
+    // A loop that ran too long (the guard in every loop threw): the program's frames and timers end with it, since
+    // each next frame would stop the page for as long again, and the page and the model are one thread
+    const __chattyLoopTripped = (message) => {
+      if (/^Loop exceeded \\d+ms/.test(String(message))) __chattyStopWork();
+    };
     window.addEventListener('error', (event) => {
       const err = event.error;
+      __chattyLoopTripped(err ? err.message : event.message);
       __chattyReportLate(err ? (err.message || String(err)) : event.message, errorLine(err));
     });
     window.addEventListener('unhandledrejection', (event) => {
@@ -3959,6 +4169,7 @@ export class JavascriptRuntime {
         }, '*');
       } catch (err) {
         if (err && err.stack) __chattyNoteLibrary('threw', err.message || String(err), err.stack);
+        if (err) __chattyLoopTripped(err.message);
         __chattyHost.postMessage({
           type: 'result',
           id,

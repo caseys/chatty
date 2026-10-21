@@ -448,3 +448,101 @@ export function restoreDeclarations(original: string, fixed: string): { code: st
   }
   return restored.length ? { code: `${parts.join('\n')}\n${fixed}`, restored } : { code: fixed, restored };
 }
+
+/**
+ * The lines a fix for this error may change: the top-level statement that holds the failing line
+ * (a function or class whole, since a fix of its body may rewrite it), or the statements that
+ * don't parse, when the program doesn't. Null when the line isn't known or isn't inside any.
+ */
+export function errorRegion(code: string, errorLine: number | undefined): { start: number; end: number } | null {
+  if (!errorLine) return null;
+  const broken = brokenLines(code);
+  if (broken) return broken;
+  try {
+    const program = parse(code, { ...STRICT, locations: true }) as unknown as { body: Array<{ loc: { start: { line: number }; end: { line: number } } }> };
+    const holder = program.body.find((statement) => statement.loc.start.line <= errorLine && errorLine <= statement.loc.end.line);
+    return holder ? { start: holder.loc.start.line, end: holder.loc.end.line } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A whole-program fix that only deleted parts of the program (a reply of just the class, so that
+ * every other line is "gone") has fixed nothing by that: the lines it deleted outside the error's
+ * own region come back, in their places, and what it changed inside the region stays. Judged by
+ * lines: the lines of the program that the reply has none like, between two lines it kept, and
+ * nothing of its own there. A change (the reply has other lines in the place) is left as the reply
+ * made it. Kept only when the result parses where the reply did. Null when nothing came back.
+ */
+export function restoreDeleted(original: string, fixed: string, region: { start: number; end: number } | null): { code: string; restored: number } | null {
+  if (!region) return null;
+  const o = original.split('\n');
+  const f = fixed.split('\n');
+  const key = (line: string) => line.trim();
+  const oi = o.map((l, i) => (key(l) ? i : -1)).filter((i) => i >= 0);
+  const fi = f.map((l, i) => (key(l) ? i : -1)).filter((i) => i >= 0);
+  // The longest run of lines both have, in order
+  const table: number[][] = Array.from({ length: oi.length + 1 }, () => new Array<number>(fi.length + 1).fill(0));
+  for (let a = oi.length - 1; a >= 0; a--) {
+    for (let b = fi.length - 1; b >= 0; b--) {
+      table[a][b] = key(o[oi[a]]) === key(f[fi[b]]) ? table[a + 1][b + 1] + 1 : Math.max(table[a + 1][b], table[a][b + 1]);
+    }
+  }
+  const pairs: Array<[number, number]> = [];
+  for (let a = 0, b = 0; a < oi.length && b < fi.length; ) {
+    if (key(o[oi[a]]) === key(f[fi[b]])) {
+      pairs.push([oi[a], fi[b]]);
+      a++;
+      b++;
+    } else if (table[a + 1][b] >= table[a][b + 1]) a++;
+    else b++;
+  }
+  if (pairs.length === 0) return null;
+  const out: string[] = [];
+  let restored = 0;
+  let previousO = -1;
+  let previousF = -1;
+  for (const [po, pf] of [...pairs, [o.length, f.length] as [number, number]]) {
+    const gapO = o.slice(previousO + 1, po);
+    const gapF = f.slice(previousF + 1, pf);
+    if (gapO.some((l) => key(l)) && !gapF.some((l) => key(l))) {
+      // Deleted: what is outside the region comes back
+      gapO.forEach((line, n) => {
+        const number = previousO + 1 + n + 1;
+        if (number >= region.start && number <= region.end) return;
+        out.push(line);
+        if (key(line)) restored++;
+      });
+    } else {
+      out.push(...gapF);
+    }
+    if (pf < f.length) out.push(f[pf]);
+    previousO = po;
+    previousF = pf;
+  }
+  if (restored === 0) return null;
+  const code = out.join('\n');
+  try {
+    parse(fixed, STRICT);
+  } catch {
+    return null;
+  }
+  try {
+    parse(code, STRICT);
+  } catch {
+    return null;
+  }
+  return { code, restored };
+}
+
+/**
+ * What a whole-program fix keeps of the program it fixes: the lines it deleted outside the error
+ * come back (restoreDeleted), and so do the declarations it still uses but left out
+ * (restoreDeclarations).
+ */
+export function restoreWhole(original: string, fixed: string, errorLine: number | undefined): { code: string; restored: string[]; lines: number } {
+  const deleted = restoreDeleted(original, fixed, errorRegion(original, errorLine));
+  const declared = restoreDeclarations(original, deleted?.code ?? fixed);
+  return { code: declared.code, restored: declared.restored, lines: deleted?.restored ?? 0 };
+}

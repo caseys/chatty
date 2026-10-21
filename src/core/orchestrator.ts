@@ -33,6 +33,7 @@ import {
   type TurnRouter,
 } from './phone-pipeline.ts';
 import {
+  type CanvasTrace,
   JavascriptRuntime,
   inspectExecutableCode,
   stripComments,
@@ -41,10 +42,10 @@ import {
 import { setForRecentRequests } from './recent-requests.ts';
 import { appendRunLog } from './run-log.ts';
 import { memberBlank, fillMember, blankChoices, blankRequest, choiceRequest, declareMissing, fillBlank, findBlank, type Blank } from './blank-fix.ts';
-import { madeAsWrongClass, withLibraryClassNames, type RealMember } from './method-hints.ts';
-import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest, restoreDeclarations } from './line-fix.ts';
+import { madeAsWrongClass, memberList, withLibraryClassNames, type RealMember } from './method-hints.ts';
+import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest, restoreWhole } from './line-fix.ts';
 import { missingStepsError } from './sound-setup.ts';
-import { shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
+import { addNewToClasses, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
 import { applyAssignmentFixes, moveToContext, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { LOCAL_CHAT_MODELS } from './settings.ts';
@@ -625,6 +626,54 @@ async function screenChanges(runtime: Pick<JavascriptRuntime, 'pageSignature'> &
   return !!runtime.hasScheduledWork?.();
 }
 
+/**
+ * What the drawing calls of a canvas that shows nothing say about why, from where they landed: under no
+ * transform, a kind of call whose every box is past the canvas's edge ("every arc() is drawn at x
+ * 2100–2600, outside the 390×700 canvas: what is drawn has left it"). Under a transform the
+ * coordinates are not the canvas's own: only that nothing drawn is visible. Null when there is no trace.
+ */
+export function offCanvasFact(traces: CanvasTrace[]): string | null {
+  const trace = traces.find((t) => t.kinds.length > 0);
+  if (!trace) return null;
+  if (trace.nonIdentity > 0) return 'Nothing drawn is visible on the canvas.';
+  const range = (a: number, b: number) => (Math.round(a) === Math.round(b) ? `${Math.round(a)}` : `${Math.round(a)}–${Math.round(b)}`);
+  const facts: string[] = [];
+  for (const kind of trace.kinds) {
+    const sides: string[] = [];
+    if (kind.maxX < 0 || kind.minX > trace.width) sides.push(`x ${range(kind.minX, kind.maxX)}`);
+    if (kind.maxY < 0 || kind.minY > trace.height) sides.push(`y ${range(kind.minY, kind.maxY)}`);
+    if (sides.length > 0) facts.push(`every ${kind.kind}() is drawn at ${sides.join(' and ')}, outside the ${trace.width}×${trace.height} canvas`);
+  }
+  return facts.length > 0 ? `${facts[0].charAt(0).toUpperCase()}${facts.join('; ').slice(1)}: what is drawn has left it.` : 'Nothing drawn is visible on the canvas.';
+}
+
+/**
+ * For a program that keeps drawing on a 2D canvas: whether anything is visible on it at the end of
+ * the check window (about a second after the run started), judged by its picture (a 24 × 24 look:
+ * one flat color, or nothing, is nothing seen) over a few samples. The text for the outcome check
+ * when nothing is, with where the drawing calls landed when they can say; null when something is,
+ * when the canvas isn't being drawn on any more (a drawing that is made once is judged by its
+ * drawing calls), or when the page can't say.
+ */
+async function nothingLands(runtime: Pick<JavascriptRuntime, 'canvasState' | 'seenNow' | 'traceDrawing'>): Promise<string | null> {
+  if (!runtime.canvasState || !runtime.seenNow || !runtime.traceDrawing) return null;
+  const before = runtime.canvasState();
+  if (before.length === 0) return null;
+  await settle(250);
+  const after = runtime.canvasState();
+  // (a page that isn't shown draws no frames: nothing to judge)
+  if (!after.some((canvas, i) => canvas.calls > (before[i]?.calls ?? 0))) return null;
+  // The end of the window: the things that leave in under a second have left by now
+  await settle(900);
+  for (let sample = 0; sample < 3; sample++) {
+    if (runtime.seenNow()) return null;
+    if (sample < 2) await settle(120);
+  }
+  const fact = offCanvasFact(await runtime.traceDrawing(300));
+  appendRunLog('retry', 'outcome check: the canvas is drawn on all the time but shows nothing at the end');
+  return `Nothing the program draws is visible on its canvas at the end (it is blank or one flat color), though it keeps drawing on it.${fact ? ` ${fact}` : ''}`;
+}
+
 /** A reply that left nothing to run */
 const NO_PROGRAM = 'The reply had no program in it';
 const SAID_BACK = 'The reply only said the question back to the user, with no answer';
@@ -710,6 +759,49 @@ function gaveUpText(error: string, tries = MAX_FIX_TRIES): string {
   return `I couldn't get this working after ${tries} ${tries === 1 ? 'try' : 'tries'} (the last error: ${short}). You could ask again in other words, or choose a larger model in Settings.`;
 }
 
+/**
+ * An error's text without the mark a test copy carried (`((globalThis.__chattyReached = true), root)`
+ * around a filled expression, which the browser prints in the message as part of the source): the
+ * expression alone, as it reads in the program. The mark's brackets are matched, so an expression
+ * with calls in it comes out whole.
+ */
+export function unmarkReached(text: string): string {
+  const open = '((globalThis.__chattyReached = true), ';
+  let out = text;
+  for (let at = out.indexOf(open); at >= 0; at = out.indexOf(open)) {
+    let depth = 0;
+    let end = -1;
+    for (let i = at + open.length; i < out.length; i++) {
+      const ch = out[i];
+      if (ch === '(') depth++;
+      else if (ch === ')') {
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+        depth--;
+      }
+    }
+    if (end < 0) break;
+    out = out.slice(0, at) + out.slice(at + open.length, end) + out.slice(end + 1);
+  }
+  return out;
+}
+
+/**
+ * Whether a run failed at the fill itself: its message names the expression that was put in (an
+ * element lookup that is not what was wanted: `(document.getElementById('result')).getContext is
+ * not a function`), or says the blank name it declares has no such member (`canvas.getContext is not a
+ * function`), or the same member is missing as in the failure being fixed. A fill that fails there is
+ * the wrong candidate, however far along the program the failure is.
+ */
+export function failsAtFill(error: string, expr: string, blankText: string, originalError: string): boolean {
+  const text = expr.trim();
+  if (namesCandidate(error, text) || (!/^[A-Za-z_$][\w$]*$/.test(text) && error.includes(text)) || sameMissingMember(error, originalError)) return true;
+  const name = blankText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\w$.])${name}\\.[\\w$]+ (?:is not a function|is undefined)`).test(error);
+}
+
 /** Whether an error is about the candidate itself (`Cannot access 'notes' before …` for `notes`) */
 function namesCandidate(error: string, expr: string): boolean {
   const name = /^[A-Za-z_$][\w$]*$/.test(expr.trim()) ? expr.trim() : null;
@@ -762,80 +854,111 @@ const STREAM_MARKUP = /<(?:script|canvas|html|!doctype)\b/i;
  */
 export function repairBeforeRunning(code: string, isProse: boolean, note: (text: string) => void, request = ''): { code: string; notThere: Array<{ line: number; error: string; soft?: boolean }> } {
   let executableCode = code;
-  // First, lines that go (so the line numbers below match the program that runs).
-  // Its own speak()/out/clear: taken out so the real helpers are used (error-hints.ts)
-  if (!isProse) {
-    const copies = dropHelperCopies(executableCode);
-    if (copies.dropped.length > 0 || copies.renamed.length > 0 || copies.kept.length > 0) {
-      executableCode = copies.code;
-      for (const name of copies.dropped) note(`its own ${name} → the ready-made one: corrected before running`);
-      // Its own speak() holding the whole program: renamed, the real speak() kept for what it says
-      for (const rename of copies.renamed) note(`its own ${rename}() (it held the program): corrected before running`);
-      // Its own clear(), root, out that does something of its own: kept under another name
-      for (const rename of copies.kept) note(`its own ${rename} (a helper's name, kept as the program's): corrected before running`);
+  const earlyPass = () => {
+    // First, lines that go (so the line numbers below match the program that runs).
+    // Its own speak()/out/clear: taken out so the real helpers are used (error-hints.ts)
+    if (!isProse) {
+      const copies = dropHelperCopies(executableCode);
+      if (copies.dropped.length > 0 || copies.renamed.length > 0 || copies.kept.length > 0) {
+        executableCode = copies.code;
+        for (const name of copies.dropped) note(`its own ${name} → the ready-made one: corrected before running`);
+        // Its own speak() holding the whole program: renamed, the real speak() kept for what it says
+        for (const rename of copies.renamed) note(`its own ${rename}() (it held the program): corrected before running`);
+        // Its own clear(), root, out that does something of its own: kept under another name
+        for (const rename of copies.kept) note(`its own ${rename} (a helper's name, kept as the program's): corrected before running`);
+      }
+      // The example reply's own words, copied in: taken out
+      const example = dropCopiedExample(executableCode);
+      if (example.dropped) {
+        executableCode = example.code;
+        note("the example reply's speak() copied into the program → taken out: corrected before running");
+      }
+      // The user's own words said back, in a program that does something else too: taken out
+      const echo = isInstruction(request) ? dropRequestEcho(executableCode, request) : { code: executableCode, dropped: 0 };
+      if (echo.dropped > 0) {
+        executableCode = echo.code;
+        note("a speak() of the request's own words → taken out: corrected before running");
+      }
+      // Its own requestAnimationFrame(), setTimeout() …: taken out, so the browser's runs
+      const browserCopies = dropBrowserCopies(executableCode);
+      if (browserCopies.dropped.length > 0) {
+        executableCode = browserCopies.code;
+        for (const name of browserCopies.dropped) note(`its own ${name}() → the browser's: corrected before running`);
+      }
+      // A stray quote or backtick ending a line (markdown's, kept), or a closing bracket
+      // nothing opened: removed when that alone makes the program parse
+      const stray = dropStrayCharacter(executableCode);
+      if (stray) {
+        executableCode = stray.code;
+        note(`${strayName(stray.removed)} at the end of line ${stray.line} → removed: corrected before running`);
+      }
+      // `a && b = c`: a logical expression can't be assigned to; it is `a && (b = c)`
+      const logical = wrapLogicalAssignment(executableCode);
+      if (logical) {
+        executableCode = logical.code;
+        note(`${logical.lines.length > 1 ? `lines ${logical.lines.join(', ')}` : `line ${logical.lines[0]}`}: an assignment after && / || / ?? (a logical expression can't be assigned to) → wrapped in ( ): corrected before running`);
+      }
+      // A fence's language label left on a line of its own (`javascript`): taken out
+      const labelled = dropFenceLabels(executableCode);
+      if (labelled.labels.length > 0) {
+        executableCode = labelled.code;
+        note(`${labelled.labels.map((l) => `a line of just "${l}"`).join(', ')} (a fence's label, left in the code) → removed: corrected before running`);
+      }
+      // Statements where an arrow function's body should be a block: wrapped in braces
+      const arrows = wrapBracelessArrows(executableCode);
+      if (arrows) {
+        executableCode = arrows.code;
+        note(`statements as an arrow function's body (line${arrows.lines.length > 1 ? 's' : ''} ${arrows.lines.join(', ')}) → wrapped in { }: corrected before running`);
+      }
+      // A function that calls itself with no end while a frame request already repeats it
+      const endless = dropEndlessSelfCalls(executableCode);
+      if (endless.dropped.length > 0) {
+        executableCode = endless.code;
+        for (const name of endless.dropped) note(`${name}() called itself with no end (its own frame request already repeats it) → that call removed: corrected before running`);
+      }
+      // A line of code written inside backticks (a template literal that does nothing): unwrapped
+      const ticked = unwrapBackticks(executableCode);
+      if (ticked) {
+        executableCode = ticked.code;
+        note(`code written inside backticks (line${ticked.lines.length > 1 ? 's' : ''} ${ticked.lines.join(', ')}) → the backticks taken off: corrected before running`);
+      }
+      // three.js imports: THREE is provided
+      const three = provideThree(executableCode);
+      if (three.changed) {
+        executableCode = three.code;
+        for (const name of three.provided) note(`import of '${name === 'THREE' ? 'three' : 'tone'}' → the ready-made ${name}: corrected before running`);
+      }
+      // Packages the browser doesn't have, loaded and never used: taken out
+      const packages = dropUnusedPackages(executableCode);
+      if (packages.dropped.length > 0) {
+        executableCode = packages.code;
+        for (const from of packages.dropped) note(`unused package '${from}' → removed: corrected before running`);
+      }
+      // `return` alone on a line with its value on the next (a semicolon is inserted after `return`)
+      const returns = joinSplitReturn(executableCode);
+      if (returns) {
+        executableCode = returns.code;
+        note(`return alone on line${returns.lines.length > 1 ? 's' : ''} ${returns.lines.join(', ')} (its value on the next line returned nothing) → the value returned: corrected before running`);
+      }
+      // A class of the program's own called as a function (`Ball()` for a `class Ball`): made with new
+      const ownClasses = addNewToClasses(executableCode);
+      if (ownClasses) {
+        executableCode = ownClasses.code;
+        note(`${ownClasses.count} call${ownClasses.count === 1 ? '' : 's'} of a class (${ownClasses.names.join(', ')}) → made with new (a class called as a function always throws): corrected before running`);
+      }
+      // A class used above its declaration at the top of the program: moved above its first use
+      const classes = moveClassesUp(executableCode);
+      if (classes) {
+        executableCode = classes.code;
+        for (const name of classes.names) note(`class ${name} was used above its declaration (classes are not hoisted) → declared above its first use: corrected before running`);
+      }
     }
-    // The example reply's own words, copied in: taken out
-    const example = dropCopiedExample(executableCode);
-    if (example.dropped) {
-      executableCode = example.code;
-      note("the example reply's speak() copied into the program → taken out: corrected before running");
-    }
-    // The user's own words said back, in a program that does something else too: taken out
-    const echo = isInstruction(request) ? dropRequestEcho(executableCode, request) : { code: executableCode, dropped: 0 };
-    if (echo.dropped > 0) {
-      executableCode = echo.code;
-      note("a speak() of the request's own words → taken out: corrected before running");
-    }
-    // Its own requestAnimationFrame(), setTimeout() …: taken out, so the browser's runs
-    const browserCopies = dropBrowserCopies(executableCode);
-    if (browserCopies.dropped.length > 0) {
-      executableCode = browserCopies.code;
-      for (const name of browserCopies.dropped) note(`its own ${name}() → the browser's: corrected before running`);
-    }
-    // A stray quote or backtick ending a line (markdown's, kept), or a closing bracket
-    // nothing opened: removed when that alone makes the program parse
-    const stray = dropStrayCharacter(executableCode);
-    if (stray) {
-      executableCode = stray.code;
-      note(`${strayName(stray.removed)} at the end of line ${stray.line} → removed: corrected before running`);
-    }
-    // A fence's language label left on a line of its own (`javascript`): taken out
-    const labelled = dropFenceLabels(executableCode);
-    if (labelled.labels.length > 0) {
-      executableCode = labelled.code;
-      note(`${labelled.labels.map((l) => `a line of just "${l}"`).join(', ')} (a fence's label, left in the code) → removed: corrected before running`);
-    }
-    // Statements where an arrow function's body should be a block: wrapped in braces
-    const arrows = wrapBracelessArrows(executableCode);
-    if (arrows) {
-      executableCode = arrows.code;
-      note(`statements as an arrow function's body (line${arrows.lines.length > 1 ? 's' : ''} ${arrows.lines.join(', ')}) → wrapped in { }: corrected before running`);
-    }
-    // A function that calls itself with no end while a frame request already repeats it
-    const endless = dropEndlessSelfCalls(executableCode);
-    if (endless.dropped.length > 0) {
-      executableCode = endless.code;
-      for (const name of endless.dropped) note(`${name}() called itself with no end (its own frame request already repeats it) → that call removed: corrected before running`);
-    }
-    // A line of code written inside backticks (a template literal that does nothing): unwrapped
-    const ticked = unwrapBackticks(executableCode);
-    if (ticked) {
-      executableCode = ticked.code;
-      note(`code written inside backticks (line${ticked.lines.length > 1 ? 's' : ''} ${ticked.lines.join(', ')}) → the backticks taken off: corrected before running`);
-    }
-    // three.js imports: THREE is provided
-    const three = provideThree(executableCode);
-    if (three.changed) {
-      executableCode = three.code;
-      for (const name of three.provided) note(`import of '${name === 'THREE' ? 'three' : 'tone'}' → the ready-made ${name}: corrected before running`);
-    }
-    // Packages the browser doesn't have, loaded and never used: taken out
-    const packages = dropUnusedPackages(executableCode);
-    if (packages.dropped.length > 0) {
-      executableCode = packages.code;
-      for (const from of packages.dropped) note(`unused package '${from}' → removed: corrected before running`);
-    }
-  }
+  };
+  // (a syntax repair can make the program parse where the repairs ahead of it had nothing to read:
+  // they run again then, and find only what is new)
+  const parsedAtStart = isProse || parsesAsProgram(executableCode);
+  earlyPass();
+  if (!parsedAtStart && parsesAsProgram(executableCode)) earlyPass();
   // Drawing calls and settings made on the canvas element itself: they go through its context
   if (!isProse) {
     const onCanvas = moveToContext(executableCode);
@@ -926,6 +1049,11 @@ export function repairBeforeRunning(code: string, isProse: boolean, note: (text:
       for (const change of toneCalls.fixed) note(`${change}: corrected before running`);
     }
   }
+  // The program as the runtime reads it (it trims the program, and the lines the sandbox reports for an
+  // error count from the first one that is left): the program kept and the lines named in errors are the same text
+  const leading = executableCode.match(/^\s*/)?.[0].split('\n').length ?? 1;
+  executableCode = executableCode.trim();
+  if (leading > 1) for (const issue of notThere) issue.line = Math.max(1, issue.line - (leading - 1));
   return { code: executableCode, notThere };
 }
 
@@ -1689,7 +1817,7 @@ export class ConversationOrchestrator {
             repeatedTrial = false;
             const applied = applyFixReply(original, raw, fixLine, options.fixBlock?.end, options.fixWhole);
             // (judged as it would run: a whole program with the declarations it dropped put back)
-            const program = options.fixWhole ? restoreDeclarations(original, applied).code : applied;
+            const program = options.fixWhole ? restoreWhole(original, applied, this.lastRun?.errorLine).code : applied;
             const prepared = inspectExecutableCode(program);
             // (with the repairs it gets before a real run: a test run judges what would run)
             const code = prepared.isProse ? prepared.code.trim() : repairBeforeRunning(prepared.code.trim(), false, () => {}, codeTask).code.trim();
@@ -1765,11 +1893,10 @@ export class ConversationOrchestrator {
           let fixedProgram = options?.autoFix ? applyFixReply(options.autoFix, rawContent, fixLine, options.fixBlock?.end, options.fixWhole) : rawContent;
           // A whole program that dropped declarations it still uses gets them back (line-fix.ts)
           if (options?.autoFix && options.fixWhole) {
-            const kept = restoreDeclarations(options.autoFix, fixedProgram);
-            if (kept.restored.length) {
-              fixedProgram = kept.code;
-              appendRunLog('imagined', `the fix dropped ${kept.restored.join(', ')} → kept from the program: corrected before running`);
-            }
+            const kept = restoreWhole(options.autoFix, fixedProgram, this.lastRun?.errorLine);
+            if (kept.lines > 0) appendRunLog('imagined', `the fix deleted ${kept.lines} line${kept.lines === 1 ? '' : 's'} outside the error → kept from the program: corrected before running`);
+            if (kept.restored.length) appendRunLog('imagined', `the fix dropped ${kept.restored.join(', ')} → kept from the program: corrected before running`);
+            fixedProgram = kept.code;
           }
           if (fixedProgram !== rawContent && !options?.autoFix) this.events.onRawOutput?.(turnId, fixedProgram);
           // (a fix reply cut off is judged incomplete instead: closing it could cut its program short;
@@ -1833,7 +1960,7 @@ export class ConversationOrchestrator {
               const applied = options?.autoFix ? applyFixReply(options.autoFix, rawContent, fixLine, options.fixBlock?.end, options.fixWhole) : rawContent;
               const shown = failedReplyLine(
                 options?.autoFix,
-                options?.autoFix ? changedLines(options.autoFix, options.fixWhole ? restoreDeclarations(options.autoFix, applied).code : applied) : '',
+                options?.autoFix ? changedLines(options.autoFix, options.fixWhole ? restoreWhole(options.autoFix, applied, this.lastRun?.errorLine).code : applied) : '',
                 rawContent
               );
               if (shown) {
@@ -1893,6 +2020,19 @@ export class ConversationOrchestrator {
               await this.javascriptRuntime.resetVisual();
               // The old program's canvases and sounds are freed before the new one allocates
               await settle(AFTER_HEAVY_MS);
+            }
+            // A class of a library called as a function (Tone.PolySynth(), THREE.Mesh()) always throws, in every
+            // browser, and with new it is the one form that works: the library is in the page now, so every
+            // call of a class gets it, once, before the first run
+            if (!isTalkOnly(executableCode) && /\b(?:Tone|THREE)\b/.test(executableCode)) {
+              const scope = await this.javascriptRuntime.libraryScope?.(executableCode);
+              const classed = scope ? addNewToClasses(executableCode, scope) : null;
+              if (classed) {
+                executableCode = classed.code;
+                assistantMsg.rawCode = executableCode;
+                if (options?.autoFix) this.events.onRawOutput?.(turnId, executableCode);
+                appendRunLog('imagined', `${classed.count} call${classed.count === 1 ? '' : 's'} of a class (${classed.names.join(', ')}) → made with new (a class called as a function always throws): corrected before running`);
+              }
             }
             // What the failed program already said: a fix doesn't say it again
             const fixSaid = fixedTurnId
@@ -2242,8 +2382,12 @@ export class ConversationOrchestrator {
   private async runCorrected(
     run: NonNullable<typeof this.lastRun>,
     correction: { code: string; note: string },
-    /** A blank-stage fix: already logged, and it is the model-fix attempt `fixAttempt` */
-    blankFix?: { fixAttempt: number; errorHistory: FixError[] }
+    /**
+     * A blank-stage fix: already logged, and it is the model-fix attempt `fixAttempt`. `fill` says what
+     * was put in: when the run fails where it was used, the program goes back to what it was (a fill
+     * that failed is not the model's code, and the next try must not blank it as if it were)
+     */
+    blankFix?: { fixAttempt: number; errorHistory: FixError[]; fill?: { original: string; error: string; errorLine?: number; expr: string; blankText: string } }
   ): Promise<void> {
     const code = correction.code;
     const named = correction.note;
@@ -2287,6 +2431,13 @@ export class ConversationOrchestrator {
     };
     // (a blank-stage fix is one of the model's tries; a correction by rule isn't)
     this.recordRun(this.lastRun, this.didAsked(run.task, soundBefore), !!blankFix);
+    // A fill that fails where it is used, or fails as the program did, is reverted: the next try starts from the program as it was
+    const fill = blankFix?.fill;
+    if (fill && result.error && (result.error === fill.error || failsAtFill(result.error, fill.expr, fill.blankText, fill.error))) {
+      appendRunLog('retry', `the fill \`${fill.expr}\` failed where it was used (${errorText(result.error, result.errorLine)}): back to the program as it was, for the next try`);
+      this.lastRun = { ...this.lastRun, code: fill.original, error: fill.error, errorLine: fill.errorLine };
+      this.events.onRawOutput?.(run.turnId, fill.original);
+    }
     this.events.onRunStatus?.(
       run.turnId,
       result.error
@@ -2436,7 +2587,7 @@ export class ConversationOrchestrator {
 
   /** An error with a bundle's shortened class names replaced by the library's own ("an instance of e" → "Tone.Param", "Class constructor Cu" → "Tone.PolySynth"), when the page can say */
   private namedError(error: string, code: string): string {
-    const scope = /is an instance of|Class constructor/.test(error) ? this.javascriptRuntime.pageScope?.() : null;
+    const scope = /is an instance of|Class constructor|Cannot call a class constructor/.test(error) ? this.javascriptRuntime.pageScope?.() : null;
     return scope ? withLibraryClassNames(error, code, scope) : error;
   }
 
@@ -2476,8 +2627,12 @@ export class ConversationOrchestrator {
     if (wait > 0) await settle(wait);
     try {
       // (named the way the real run's error is, so the two compare as the same error)
-      const result = await this.javascriptRuntime.trialRun!(code);
-      return result.error ? { ...result, error: this.namedError(result.error, code) } : result;
+      // (a library class called as a function is made with new here too: a test run judges what would run)
+      const scope = /\b(?:Tone|THREE)\b/.test(code) ? this.javascriptRuntime.pageScope?.() : null;
+      const classed = scope ? addNewToClasses(code, scope) : null;
+      const result = await this.javascriptRuntime.trialRun!(classed?.code ?? code);
+      // (without the mark a test copy carries in its expressions: what is logged and shown is the program's own text)
+      return result.error ? { ...result, error: this.namedError(unmarkReached(result.error), code) } : result;
     } finally {
       this.lastTrialEnd = Date.now();
     }
@@ -2736,6 +2891,9 @@ export class ConversationOrchestrator {
     // Something drawn or shown, for a request of something that moves or counts: the screen has to
     // keep changing on its own for a few seconds (when the page is watched: a hidden page's
     // animation frames stop), unless the user drives it (a click, a key, the pointer)
+    // A canvas drawn on all the time that shows nothing at the end of the window: what is drawn has left it
+    // (or hides behind a flat fill). Judged on what is visible, not on the drawing calls, which go on
+    const offCanvas = wantsVisual && !soundWaits && drawn() ? await nothingLands(this.javascriptRuntime) : null;
     const stillScreen =
       wantsVisual && MOTION_REQUEST.test(request) && !soundWaits && !MOVES_WITH_USER.test(code) && drawn() && !(await screenChanges(this.javascriptRuntime));
     // MIDI that never started a note is silent for that reason: the audio context has nothing to do with it
@@ -2764,6 +2922,8 @@ export class ConversationOrchestrator {
         ? 'The program showed nothing: what it adds to document.body appears in the card on screen.'
         : wantsVisual && !drawn()
           ? `The program put nothing visible on screen: its canvas has nothing drawn on it, or its elements are empty${emptied.length ? ` (${emptied.join(', ')} have no text and no size)` : ''}. Put text in an element (textContent, innerHTML) or give it a size (a style with width and height), or draw with the 2d context (fillRect, arc, lineTo, fill, stroke, fillText) in a function that is called.`
+          : offCanvas
+            ? offCanvas
           : noControls
             ? 'The page has nothing to press or type in: this app needs controls the user can use (button, input, select), each with a handler (onclick, an input listener) that does the work.'
             : stillScreen
@@ -2774,7 +2934,17 @@ export class ConversationOrchestrator {
       appendRunLog('retry', `outcome check: ${[wantsSound ? 'wanted sound: heard' : '', wantsVisual ? 'wanted visual: seen' : ''].filter(Boolean).join('; ')}`);
       return null;
     }
-    return missing.join(' ');
+    // Names the program wrote on its objects that they don't have (a property nothing reads): what the object does have
+    const writes = this.javascriptRuntime.unknownWrites?.() ?? [];
+    const scope = writes.length > 0 ? this.javascriptRuntime.pageScope?.() : null;
+    const facts: string[] = [];
+    for (const { type, name } of writes) {
+      const list = scope ? memberList(type, name, scope) : null;
+      if (!list || list.settings.length === 0) continue;
+      const label = type.startsWith('element:') ? `a <${type.slice(8)}> element` : type;
+      facts.push(`${name} isn't a setting of ${label}; its settings: ${list.settings.map((s) => s.name).join(', ')}.`);
+    }
+    return [...missing, ...facts].join(' ');
   }
 
   /** A fix's progress note in the chat ("Fixing (3 of 10): …"): added like a fix turn's own */
@@ -2808,7 +2978,7 @@ export class ConversationOrchestrator {
     this.blankAbort = abort;
     const provider = this.phonePipeline?.coder ?? this.llmProvider;
     const facts = [earlierErrors(run.errorHistory, error), hintText].filter(Boolean).join(' ') || undefined;
-    const page = { ids: this.javascriptRuntime.pageIds?.() ?? [], fields: this.javascriptRuntime.pageFields?.() ?? [] };
+    const page = { ids: this.javascriptRuntime.pageIds?.() ?? [], fields: this.javascriptRuntime.pageFields?.() ?? [], tags: this.javascriptRuntime.pageTags?.() };
     // (a member blank: the real members that fit and are related to the name)
     const choices = members ? members.map((m) => m.name) : blankChoices(run.code, blank, page);
 
@@ -2877,24 +3047,30 @@ export class ConversationOrchestrator {
       const probe = members ? (fillMember(run.code, blank, expr, 'globalThis.__chattyReached = true') ?? filled) : (fillBlank(run.code, blank, `((globalThis.__chattyReached = true), ${expr})`) ?? filled);
       const trial = await this.trial(probe);
       if (moved()) return;
-      // 3: ran through the blank without an error; 2: an error further on; 1: another error, no
-      // longer about the blank (the same member still missing is not another), or no error but the
-      // blank never ran. An error without a line (a value the page rejected) can't be placed after
-      // the blank: no progress
-      // (a member pick whose use the run never reached is not applied: nothing showed it works)
+      // 3: ran through the blank without an error. With an error: 0 when it is at the fill itself (the
+      // value fails where it is used: the candidate named, or its member missing), is the program's own error again, or has no line; otherwise by what ran: 2 when the run got
+      // through the blank (its mark ran) and failed somewhere else, 0 when it never reached the blank
+      // (an error that comes before it says nothing about the fill). A run that can't say whether it
+      // reached the blank is judged by the line, as before: 2 past the blank, 1 another error.
+      // (a pick whose use the run never reached, with no error, is level 1; for a member it is not applied: nothing showed it works)
+      const atFill = !!trial.error && failsAtFill(trial.error, expr, blank.text, error);
       const level = !trial.error
         ? trial.reached === false && probe !== filled
           ? members
             ? 0
             : 1
           : 3
-        : namesCandidate(trial.error, expr) || trial.errorLine === undefined
+        : atFill || trial.errorLine === undefined || trial.error === error
           ? 0
-          : trial.error !== error && trial.errorLine !== undefined && trial.errorLine > (run.errorLine ?? blank.line) + (blank.declareAt ? 1 : 0)
+          : trial.reached === true
             ? 2
-            : trial.error !== error && !mentions.test(trial.error) && !sameMissingMember(trial.error, error)
-              ? 1
-              : 0;
+            : trial.reached === false
+              ? 0
+              : trial.errorLine > (run.errorLine ?? blank.line) + (blank.declareAt ? 1 : 0)
+                ? 2
+                : !mentions.test(trial.error)
+                  ? 1
+                  : 0;
       appendRunLog('retry', `a test run: \`${expr}\` for \`${blank.text}\` gave ${trial.error ? `${errorText(trial.error, trial.errorLine)}${level ? ' (progress)' : ''}` : trial.reached === false ? `no error, but the blank never ran${members ? ' (not applied)' : ''}` : 'no error'}`);
       if (!level) return;
       const entry = { code: filled, expr, level, rank: rankOf(expr), votes: votes.get(expr) ?? 0 };
@@ -2956,7 +3132,7 @@ export class ConversationOrchestrator {
       appendRunLog('imagined', `${blank.text} → ${found.expr}: corrected by a test run (${found.level === 3 ? 'it ran' : 'it got further'}, the best of ${count})`);
       // (the test runs settle before the real one on iPhone)
       await settleOnIos(AFTER_HEAVY_MS);
-      await this.runCorrected(run, { code: found.code, note: `${blank.text} → ${found.expr}` }, { fixAttempt: attempt, errorHistory: withError(run) });
+      await this.runCorrected(run, { code: found.code, note: `${blank.text} → ${found.expr}` }, { fixAttempt: attempt, errorHistory: withError(run), fill: { original: run.code, error, errorLine: run.errorLine, expr: found.expr, blankText: blank.text } });
       return;
     }
     this.finishFixLog('unchanged');

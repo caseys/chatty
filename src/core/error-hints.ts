@@ -53,6 +53,9 @@ const PARSE_OPTIONS = {
   locations: true,
 } as const;
 
+/** Whether a program parses as the page will read it */
+export const parsesAsProgram = (code: string): boolean => tryParse(code) !== null;
+
 function tryParse(code: string): AnyNode | null {
   try {
     return parse(code, PARSE_OPTIONS) as unknown as AnyNode;
@@ -656,6 +659,274 @@ export function dropRequestEcho(code: string, request: string): { code: string; 
   for (const cut of cuts.sort((a, b) => b.start - a.start)) fixed = fixed.slice(0, cut.start) + fixed.slice(cut.end);
   const rest = tryParse(fixed);
   return rest && (rest.body as AnyNode[]).length > 0 ? { code: fixed, dropped: cuts.length } : { code, dropped: 0 };
+}
+
+/**
+ * `a && b = c` (and `||`, `??`): a logical expression cannot be assigned to, and the browser stops
+ * the whole program with "Invalid left-hand side in assignment". There is one reading that parses:
+ * the assignment is the last operand's, `a && (b = c)`. Only when the parser's own error names that
+ * left side, its last operand is something that can be assigned to (a name or a member), and the
+ * program parses once the assignment is wrapped. Repeated for every such statement.
+ */
+export function wrapLogicalAssignment(code: string): { code: string; lines: number[] } | null {
+  let current = code;
+  const lines: number[] = [];
+  for (let round = 0; round < 8; round++) {
+    let failure: { pos?: number; raisedAt?: number; message: string } | null = null;
+    try {
+      parse(current, PARSE_OPTIONS);
+      break;
+    } catch (err) {
+      failure = err as { pos?: number; raisedAt?: number; message: string };
+    }
+    if (!/^Assigning to rvalue/.test(failure.message) || typeof failure.pos !== 'number' || typeof failure.raisedAt !== 'number') break;
+    // The left side runs from where the error starts to the `=` it stopped after
+    const start = failure.pos;
+    const equals = failure.raisedAt - 1;
+    if (current[equals] !== '=') break;
+    let left: AnyNode;
+    try {
+      left = (parse(`(${current.slice(start, equals)})`, PARSE_OPTIONS) as unknown as { body: AnyNode[] }).body[0].expression as AnyNode;
+    } catch {
+      break;
+    }
+    if (left.type !== 'LogicalExpression') break;
+    let target = left;
+    while (target.type === 'LogicalExpression') target = target.right as AnyNode;
+    if (target.type !== 'Identifier' && !(target.type === 'MemberExpression' && !target.optional)) break;
+    const targetStart = start + (target.start - 1);
+    // The right side of the `=` ends at the statement's `;`, at the bracket that closes the block it is in,
+    // or at the end of its line: the first of these that makes the program parse
+    const ends: number[] = [];
+    let depth = 0;
+    let previousLine = -1;
+    let previousEnd = equals + 1;
+    try {
+      for (const token of tokenizer(current.slice(equals + 1), { ...PARSE_OPTIONS, locations: true })) {
+        const label = token.type.label;
+        const at = equals + 1 + token.start;
+        if (label === 'eof') {
+          if (!ends.includes(previousEnd)) ends.push(previousEnd);
+          break;
+        }
+        if (previousLine !== -1 && token.loc && token.loc.start.line > previousLine && depth === 0 && !ends.includes(previousEnd)) ends.push(previousEnd);
+        if (label === ';' && depth === 0) {
+          ends.push(equals + 1 + token.start);
+          break;
+        }
+        if (/^[{([]$|^\$\{$/.test(label)) depth++;
+        else if (/^[})\]]$/.test(label)) {
+          depth--;
+          if (depth < 0) {
+            ends.push(at);
+            break;
+          }
+        }
+        previousLine = token.loc ? token.loc.end.line : -1;
+        previousEnd = equals + 1 + token.end;
+      }
+      // (the program ended with it: no `;` and no closing bracket came)
+      if (ends.length === 0 && previousEnd > equals + 1) ends.push(previousEnd);
+    } catch {
+      // the rest of the program doesn't tokenize
+    }
+    let wrapped: string | null = null;
+    for (const raw of ends) {
+      let end = raw;
+      while (end > equals + 1 && /\s/.test(current[end - 1])) end--;
+      const candidate = `${current.slice(0, targetStart)}(${current.slice(targetStart, end)})${current.slice(end)}`;
+      try {
+        parse(candidate, PARSE_OPTIONS);
+        wrapped = candidate;
+        break;
+      } catch (err) {
+        // (a later statement with the same slip is the next round's: only an error past this one is let through)
+        const later = err as { message: string; pos?: number };
+        if (/^Assigning to rvalue/.test(later.message) && typeof later.pos === 'number' && later.pos > end) {
+          wrapped = candidate;
+          break;
+        }
+      }
+    }
+    // (a later statement may still have its own slip: the program as it is now goes on being read)
+    if (wrapped === null) {
+      if (lines.length === 0) return null;
+      break;
+    }
+    lines.push(current.slice(0, start).split('\n').length);
+    current = wrapped;
+  }
+  return lines.length > 0 && tryParse(current) ? { code: current, lines } : null;
+}
+
+/**
+ * `return` alone on its line, the value on the lines after it: the browser ends the statement after
+ * `return` (automatic semicolon insertion), so the function returns nothing and the value is dead
+ * code. A `return` with no semicolon and no value that is directly followed, in the same block, by
+ * an expression statement is `return (` that expression `)`, on the lines it was on. A `return;` (the
+ * author ended it), and a `return` followed by anything that can still run (a declaration, a
+ * function, a statement), are left as they are. Kept only when the result parses.
+ */
+export function joinSplitReturn(code: string): { code: string; lines: number[] } | null {
+  const ast = tryParse(code);
+  if (!ast) return null;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const lines: number[] = [];
+  walk(ast, (node) => {
+    if (node.type !== 'Program' && node.type !== 'BlockStatement') return;
+    const body = node.body as AnyNode[];
+    body.forEach((statement, i) => {
+      const next = body[i + 1];
+      if (statement.type !== 'ReturnStatement' || statement.argument || !next || next.type !== 'ExpressionStatement') return;
+      // Only the bare keyword (an ASI return): `return;` was written on purpose
+      if (code.slice(statement.start, statement.end).trim() !== 'return') return;
+      const value = code.slice(next.start, next.end).replace(/;\s*$/, '');
+      edits.push({ start: statement.start, end: next.end, text: `return (${code.slice(statement.end, next.start)}${value})${/;\s*$/.test(code.slice(next.start, next.end)) ? ';' : ''}` });
+      lines.push(lineOf(statement));
+    });
+  });
+  if (edits.length === 0) return null;
+  let fixed = code;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) fixed = fixed.slice(0, edit.start) + edit.text + fixed.slice(edit.end);
+  return tryParse(fixed) ? { code: fixed, lines: lines.sort((a, b) => a - b) } : null;
+}
+
+/**
+ * A class used before its declaration at the top of the program: `const game = new Game();` above
+ * `class Game {…}` stops with "Cannot access 'Game' before initialization", since classes (unlike
+ * functions) are not hoisted. The top-level class declaration moves above the first top-level
+ * statement that uses it (a use inside a function runs later and is no reason). Only when what runs
+ * as soon as the class is made or first constructed (its extends clause, static blocks, field
+ * initializers, computed keys and constructor) reads no name declared between the new place and the
+ * old one: the move could not be told from the author's own order, and would only move the error.
+ * Kept only when the result parses.
+ */
+export function moveClassesUp(code: string): { code: string; names: string[] } | null {
+  let current = code;
+  const names: string[] = [];
+  for (let round = 0; round < 6; round++) {
+    const moved = moveOneClassUp(current);
+    if (!moved) break;
+    current = moved.code;
+    names.push(moved.name);
+  }
+  return names.length > 0 ? { code: current, names } : null;
+}
+
+function moveOneClassUp(code: string): { code: string; name: string } | null {
+  const tree = analyse(code);
+  if (!tree) return null;
+  const body = tree.ast.body as AnyNode[];
+  for (let j = 0; j < body.length; j++) {
+    const declaration = body[j];
+    if (declaration.type !== 'ClassDeclaration' || !declaration.id) continue;
+    const name = (declaration.id as AnyNode).name as string;
+    // The first top-level statement before it that uses the class as it runs (not inside a function)
+    let first = -1;
+    for (let i = 0; i < j && first < 0; i++) {
+      walk(body[i], (node, functions) => {
+        if (first >= 0 || functions.length > 0 || node.type !== 'Identifier' || node.name !== name || !isReference(tree, node)) return;
+        if (resolve(tree, node, name) === tree.ast) first = i;
+      });
+    }
+    if (first < 0) continue;
+    // What runs when the class is made or first constructed, and the names it reads
+    const eager: AnyNode[] = [];
+    if (declaration.superClass) eager.push(declaration.superClass as AnyNode);
+    for (const member of ((declaration.body as AnyNode).body as AnyNode[]) ?? []) {
+      if (member.type === 'StaticBlock') eager.push(member);
+      else if (member.type === 'PropertyDefinition' && member.value) eager.push(member.value as AnyNode);
+      else if (member.type === 'MethodDefinition' && member.kind === 'constructor') eager.push(member.value as AnyNode);
+      if ((member.type === 'MethodDefinition' || member.type === 'PropertyDefinition') && member.computed) eager.push(member.key as AnyNode);
+    }
+    const read = new Set<string>();
+    for (const part of eager) walk(part, (node) => { if (node.type === 'Identifier' && isReference(tree, node)) read.add(node.name as string); });
+    const between = new Set<string>();
+    for (const statement of body.slice(first, j)) {
+      if (statement.type === 'ClassDeclaration' && statement.id) between.add((statement.id as AnyNode).name as string);
+      if (statement.type === 'VariableDeclaration') for (const d of statement.declarations as AnyNode[]) for (const n of tree.nodes) if (n.type === 'Identifier' && tree.bindings.has(n) && n.start >= (d.id as AnyNode).start && n.end <= (d.id as AnyNode).end) between.add(n.name as string);
+    }
+    if ([...read].some((n) => between.has(n))) continue;
+    // Moved as the lines it was on, ahead of the statement that uses it
+    const classEnd = declaration.end;
+    const lineStartOf = (offset: number) => code.lastIndexOf('\n', offset - 1) + 1;
+    const classStart = lineStartOf(declaration.start) === declaration.start || /^\s*$/.test(code.slice(lineStartOf(declaration.start), declaration.start)) ? lineStartOf(declaration.start) : declaration.start;
+    const text = code.slice(classStart, classEnd).replace(/^\n+/, '');
+    const removeTo = code[classEnd] === '\n' ? classEnd + 1 : classEnd;
+    // (a class that ended the program leaves no blank lines at its end)
+    const without = code.slice(0, classStart) + (removeTo >= code.length ? '' : code.slice(removeTo));
+    const tidy = removeTo >= code.length && !/\n$/.test(code) ? without.replace(/\s+$/, '') : without;
+    const useStart = body[first].start;
+    const at = /^\s*$/.test(code.slice(lineStartOf(useStart), useStart)) ? lineStartOf(useStart) : useStart;
+    // (the removal is after the insertion point, so the point is still where it was)
+    const moved = `${tidy.slice(0, at)}${text}\n\n${tidy.slice(at)}`;
+    if (tryParse(moved)) return { code: moved, name };
+  }
+  return null;
+}
+
+/**
+ * A method of the program's own read in a condition without being called (`game.isGameOver &&
+ * …`, `if (done.check)`): a method is always there, so the condition is always true. Said once for
+ * each, for an object made with `new` of a class the program declares or written as an object
+ * with methods. (A browser object's method read in a condition may be a feature test: not said.)
+ */
+export function methodReadFacts(code: string): string | null {
+  const tree = analyse(code);
+  if (!tree) return null;
+  const methods = new Map<string, Set<string>>();
+  const getters = new Map<string, Set<string>>();
+  const add = (map: Map<string, Set<string>>, name: string, member: string) => map.set(name, (map.get(name) ?? new Set()).add(member));
+  for (const node of tree.nodes) {
+    if (node.type === 'ClassDeclaration' && node.id) {
+      for (const member of ((node.body as AnyNode).body as AnyNode[]) ?? []) {
+        if (member.type !== 'MethodDefinition' || member.computed || member.static || (member.key as AnyNode).type !== 'Identifier') continue;
+        const keyName = (member.key as AnyNode).name as string;
+        if (member.kind === 'method') add(methods, `class ${(node.id as AnyNode).name as string}`, keyName);
+        else if (member.kind === 'get') add(getters, `class ${(node.id as AnyNode).name as string}`, keyName);
+      }
+    }
+  }
+  // What each name holds: `const game = new Game()`, or an object written out with methods
+  const kindOf = new Map<string, string>();
+  for (const node of tree.nodes) {
+    if (node.type !== 'VariableDeclarator' || (node.id as AnyNode).type !== 'Identifier' || !node.init) continue;
+    const name = (node.id as AnyNode).name as string;
+    const init = node.init as AnyNode;
+    if (init.type === 'NewExpression' && (init.callee as AnyNode).type === 'Identifier' && methods.has(`class ${(init.callee as AnyNode).name as string}`)) kindOf.set(name, `class ${(init.callee as AnyNode).name as string}`);
+    if (init.type === 'ObjectExpression') {
+      for (const property of init.properties as AnyNode[]) {
+        if (property.type !== 'Property' || property.computed || (property.key as AnyNode).type !== 'Identifier') continue;
+        const value = property.value as AnyNode;
+        if (property.kind === 'init' && (property.method || /^(?:Arrow)?FunctionExpression$/.test(value.type))) add(methods, `object ${name}`, (property.key as AnyNode).name as string);
+        else if (property.kind !== 'init') add(getters, `object ${name}`, (property.key as AnyNode).name as string);
+      }
+      if (methods.has(`object ${name}`)) kindOf.set(name, `object ${name}`);
+    }
+  }
+  const said = new Set<string>();
+  const facts: string[] = [];
+  for (const node of tree.nodes) {
+    if (node.type !== 'MemberExpression' || node.computed || (node.property as AnyNode).type !== 'Identifier' || (node.object as AnyNode).type !== 'Identifier') continue;
+    const parent = tree.parent.get(node);
+    const key = tree.key.get(node);
+    if (!parent) continue;
+    // Read as a condition: the test of an if, a loop or ?:, the left of && || ??, or under !
+    const test =
+      ((parent.type === 'IfStatement' || parent.type === 'WhileStatement' || parent.type === 'DoWhileStatement' || parent.type === 'ForStatement' || parent.type === 'ConditionalExpression') && key === 'test') ||
+      (parent.type === 'LogicalExpression' && key === 'left') ||
+      (parent.type === 'UnaryExpression' && parent.operator === '!' && key === 'argument');
+    if (!test) continue;
+    const owner = kindOf.get((node.object as AnyNode).name as string);
+    const member = (node.property as AnyNode).name as string;
+    if (!owner || !methods.get(owner)?.has(member) || getters.get(owner)?.has(member)) continue;
+    // (a name the program also declares elsewhere, or sets again, may hold something else)
+    const text = `${(node.object as AnyNode).name as string}.${member}`;
+    if (said.has(text)) continue;
+    said.add(text);
+    facts.push(`${text} is a method, so it is always true here; call it as ${text}().`);
+  }
+  return facts.length ? facts.join(' ') : null;
 }
 
 /** What a stray character is called in the run log */
@@ -1355,13 +1626,6 @@ function audioParamTime(code: string, error: string): ErrorHint | null {
   return tryParse(fixed) ? { correction: { code: fixed, note: `${named}(value) → ${named}(value, 0): a time already past sets it now` } } : null;
 }
 
-/**
- * A class called as a function (`Tone.PolySynth()`, `Ball()`): the browser's error names the class
- * ("Class constructor PolySynth cannot be invoked without 'new'"), and a class is only ever made
- * with new, so every call of that name gets it. Only a call whose callee is a plain name or a
- * chain of names (a call in the chain, `make().Ball()`, would change what `new` applies to); the
- * result must parse. Chrome's wording only: the others don't name the class.
- */
 /** Whether a value is a function made with `class` (its source says so) */
 function isEsClass(value: unknown): boolean {
   if (typeof value !== 'function') return false;
@@ -1372,43 +1636,66 @@ function isEsClass(value: unknown): boolean {
   }
 }
 
-function classCalledWithoutNew(code: string, error: string, errorLine?: number, scope?: Record<string, unknown>): ErrorHint | null {
-  // (the library's own name for the class, "Tone.PolySynth", when the error was given it: the last part is the class)
-  const named = error.match(/^Class constructor ([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*) cannot be invoked without 'new'/)?.[1]?.split('.').pop();
-  // (a bundle that minifies its classes names them `Cu`, Safari and Firefox name none: then the
-  // call on the failing line whose callee is a class in the page is the one)
-  const unnamed = !!scope && !!errorLine && /^Class constructor \S+ cannot be invoked without 'new'|Cannot call a class as a function|class constructors must be invoked with 'new'|^Class constructor/i.test(error);
-  if (!named && !unnamed) return null;
-  const ast = tryParse(code);
-  if (!ast) return null;
+/**
+ * `new` in front of every call of a class: a class called as a function (`Tone.PolySynth()`,
+ * `THREE.Mesh(…)`, the program's own `Ball()`) always throws, in every browser, and made with new
+ * is the one way it works. Every call whose callee is a plain name or a chain of names (a call in
+ * the chain, `make().Ball()`, would change what `new` applies to) and resolves to a real `class`: in
+ * the page (Tone, THREE, whatever the page has: `scope`), or declared by the program itself. A native
+ * function (Number, String, Date, Symbol) and a function written to work without `new` are not
+ * classes, and stay. All of them at once; the result must parse. Null when no call needs it.
+ */
+export function addNewToClasses(code: string, scope?: Record<string, unknown>, onlyNamed?: string): { code: string; count: number; names: string[] } | null {
+  const tree = analyse(code);
+  if (!tree) return null;
   const chainOfNames = (node: AnyNode): boolean =>
     node.type === 'Identifier' || node.type === 'ThisExpression' || (node.type === 'MemberExpression' && !node.computed && chainOfNames(node.object as AnyNode));
   const starts: number[] = [];
-  const classes = new Set<string>();
-  walk(ast, (node) => {
-    if (node.type !== 'CallExpression') return;
+  const names = new Set<string>();
+  for (const node of tree.nodes) {
+    if (node.type !== 'CallExpression') continue;
     const callee = node.callee as AnyNode;
-    if (!chainOfNames(callee)) return;
-    const last = callee.type === 'Identifier' ? callee.name : callee.type === 'MemberExpression' ? (callee.property as AnyNode).name : null;
+    if (!chainOfNames(callee)) continue;
+    const last = callee.type === 'Identifier' ? (callee.name as string) : callee.type === 'MemberExpression' ? ((callee.property as AnyNode).name as string) : null;
+    if (!last) continue;
     const text = code.slice(callee.start, callee.end).replace(/\s+/g, '');
-    const isThatClass = named !== undefined && last === named;
-    // (a real `class` only: Chrome throws this error for class syntax, and Number(), String() or Date() are called without new on purpose)
-    const isAClassHere = unnamed && lineOf(node) === errorLine && isEsClass(valueOfPath(code, text, scope));
-    // Every other call of a class the page has gets it too: a class is only ever made with new, and
-    // the next error would name the next one (a program that called five Tone classes this way
-    // failed, was corrected and run again five times). Only a real `class` (a native function such
-    // as Date() or String() is called without new on purpose).
-    const isAnotherClass = !!scope && isEsClass(valueOfPath(code, text, scope));
-    if (isThatClass || isAClassHere || isAnotherClass) {
-      starts.push(callee.start);
-      classes.add(String(last));
+    let isClass = !!scope && isEsClass(valueOfPath(code, text, scope));
+    // A class the program declares (`class Ball {}`, `const Ball = class {}`), called by its name
+    if (!isClass && callee.type === 'Identifier') {
+      const home = resolve(tree, callee, last);
+      if (home) {
+        const declaration = tree.nodes.find((n) => (n.type === 'ClassDeclaration' && (n.id as AnyNode | null)?.name === last && resolve(tree, n.id as AnyNode, last) === home) || (n.type === 'VariableDeclarator' && (n.id as AnyNode).type === 'Identifier' && (n.id as AnyNode).name === last && (n.init as AnyNode | null)?.type === 'ClassExpression' && resolve(tree, n.id as AnyNode, last) === home));
+        isClass = !!declaration;
+      }
     }
-  });
+    // (or a class the error named, when the page can't say: the Chrome wording)
+    if (!isClass && onlyNamed !== undefined && last === onlyNamed) isClass = true;
+    if (!isClass) continue;
+    starts.push(callee.start);
+    names.add(last);
+  }
   if (starts.length === 0) return null;
   let fixed = code;
-  for (const at of starts.sort((a, b) => b - a)) fixed = `${fixed.slice(0, at)}new ${fixed.slice(at)}`;
-  const label = [...classes].join(', ');
-  return tryParse(fixed) ? { correction: { code: fixed, note: `${label}() → new ${label}(): a class is made with new` } } : null;
+  for (const at of [...new Set(starts)].sort((a, b) => b - a)) fixed = `${fixed.slice(0, at)}new ${fixed.slice(at)}`;
+  return tryParse(fixed) ? { code: fixed, count: new Set(starts).size, names: [...names] } : null;
+}
+
+/**
+ * A class called as a function, after the error: "Class constructor PolySynth cannot be invoked
+ * without 'new'" (Chrome), "Cannot call a class constructor e without |new|" (Safari), "Cannot call
+ * a class as a function" and "Class constructors must be invoked with 'new'" (Firefox and others).
+ * The error may not name the class, or may name one the bundle shortened ("e"), and its line may be
+ * inside the library: none of that matters, since every call of a class gets `new` (addNewToClasses).
+ */
+function classCalledWithoutNew(code: string, error: string, _errorLine?: number, scope?: Record<string, unknown>): ErrorHint | null {
+  // (the library's own name for the class, "Tone.PolySynth", when the error was given it: the last part is the class)
+  const named = error.match(/^Class constructor ([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*) cannot be invoked without 'new'/)?.[1]?.split('.').pop();
+  const anyClass = /Cannot call a class constructor \S+ without \|new\||Cannot call a class as a function|class constructors must be invoked with 'new'|^Class constructor/i.test(error);
+  if (!named && !anyClass) return null;
+  const added = addNewToClasses(code, scope, named);
+  if (!added) return null;
+  const label = added.names.join(', ');
+  return { correction: { code: added.code, note: `${label}() → new ${label}(): a class is made with new` } };
 }
 
 /**
@@ -1966,9 +2253,12 @@ export function dropBrowserCopies(code: string): { code: string; dropped: string
 export function errorHint(code: string, error: string, errorLine?: number, page?: PageFacts): ErrorHint | null {
   const hint = generalErrorHint(code, error, errorLine, page);
   if (hint?.correction) return hint;
+  // A method read as a condition (it is always true): said with the error, whatever the error was
+  const methods = methodReadFacts(code);
+  const withMethods = methods ? { ...hint, text: [hint?.text, methods].filter(Boolean).join(' ') } : hint;
   // The library's own facts come last, after whatever the general rules found
   const facts = toneOptionFacts(code, page?.scope);
-  return facts ? { ...hint, text: [hint?.text, facts].filter(Boolean).join(' ') } : hint;
+  return facts ? { ...withMethods, text: [withMethods?.text, facts].filter(Boolean).join(' ') } : withMethods;
 }
 
 function generalErrorHint(code: string, error: string, errorLine?: number, page?: PageFacts): ErrorHint | null {

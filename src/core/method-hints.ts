@@ -397,6 +397,11 @@ export function withLibraryClassNames(error: string, code: string, scope: Record
     .replace(/\bClass constructor ([A-Za-z_$][\w$]*) cannot be invoked without 'new'/g, (whole, shortened: string) => {
       const name = libraryClassNamed(shortened, code, scope);
       return name ? `Class constructor ${name} cannot be invoked without 'new'` : whole;
+    })
+    // Safari's wording of the same: "Cannot call a class constructor e without |new|" (e: one of many the bundle shortened that way)
+    .replace(/\bCannot call a class constructor ([A-Za-z_$][\w$]*) without \|new\|/g, (whole, shortened: string) => {
+      const name = libraryClassNamed(shortened, code, scope);
+      return name ? `Cannot call a class constructor ${name} without |new|` : whole;
     });
 }
 
@@ -548,6 +553,12 @@ export function methodHint(code: string, error: string, scope?: Record<string, u
     const facts = real && !fix ? memberFacts(missing.object, missing.method, real.members, real.namespace, 'call') : '';
     if (facts) return { text: facts };
   }
+  // What an instance of a class of the library or the browser really has: one clean list (a methods line and a
+  // settings line) in place of the closest names, when the page can say
+  const list = scope && !fix ? memberListText(missing.object, type, missing.method, 'call', scope) : null;
+  if (list) {
+    return { text: `${list.replace(`${missing.object} is ${typeName};`, `${missing.object} is ${typeName}${made ? ` (made at line ${made})` : ''};`)}${owners.length ? ` ${missing.method}() belongs to ${owners.join(', ')}.` : ''}` };
+  }
   return {
     text:
       `${missing.object} is ${typeName}${made ? ` (made at line ${made})` : ''}, which has no ${missing.method}(). ` +
@@ -555,6 +566,158 @@ export function methodHint(code: string, error: string, scope?: Record<string, u
       `It has ${closest.map((n) => describeMember(type, missing.object, n, scope)).join(', ')}: use the one you meant.`,
     ...(fix ? { correction: { object: missing.object, from: missing.method, to: fix } } : {}),
   };
+}
+
+/**
+ * What an instance of a library or browser class has, as a clean list: its methods and its settings.
+ * Read from the real prototypes, level by level up the chain:
+ *  - names with an underscore, `constructor` and repeats (dispose at three levels) are left out, and so
+ *    are members whose source says they are deprecated or renamed (Tone's toMaster)
+ *  - the levels every class of the library inherits (Tone and ToneWithContext: now, toSeconds, log…; for
+ *    elements HTMLElement, Element, Node and EventTarget) are plumbing, found from what the library
+ *    exports: the prototypes most of its classes share. A member of such a level still comes
+ *    when it is the closest match to the name that was wrong (addEventListner → addEventListener)
+ *  - a function is a method; an accessor is a setting (read-only when it has no setter), and so are the
+ *    keys of getDefaults() without `context`. Accessors of the levels between that aren't in getDefaults
+ *    (channelCount, numberOfInputs) are plumbing too
+ *  - closest to the wrong name first, then the class's own members in the order it declares them, then
+ *    the inherited ones; at most 12 methods and 8 settings
+ * Null when the class can't be found in the page.
+ */
+export interface MemberList {
+  methods: string[];
+  settings: Array<{ name: string; readOnly: boolean }>;
+}
+
+/** The share of a library's classes that must inherit a prototype for it to be plumbing */
+const PLUMBING_SHARE = 0.8;
+
+function classOfType(type: string, scope: Record<string, unknown>): { ctor: ((...args: unknown[]) => unknown) & { getDefaults?: () => Record<string, unknown> }; proto: object; universe: unknown[] } | null {
+  try {
+    if (type.startsWith('element:')) {
+      const element = (scope.document as Document | undefined)?.createElement(type.slice(8));
+      const proto = element ? Object.getPrototypeOf(element) : null;
+      if (!proto || proto === Object.prototype || type === 'element:div') return null;
+      const ctor = proto.constructor;
+      return { ctor, proto, universe: htmlClasses(scope) };
+    }
+    let ctor: unknown;
+    let universe: unknown[] = [];
+    if (type.includes('.')) {
+      const [library, name] = type.split('.');
+      const exported = scope[library] as Record<string, unknown> | undefined;
+      ctor = exported?.[name];
+      universe = Object.keys(exported ?? {}).map((key) => exported![key]).filter((value) => typeof value === 'function' && !!(value as { prototype?: unknown }).prototype);
+    } else {
+      ctor = scope[type];
+      universe = /^(?:HTML|SVG)\w*Element$/.test(type) ? htmlClasses(scope) : [];
+    }
+    const proto = (ctor as { prototype?: object } | undefined)?.prototype;
+    if (typeof ctor !== 'function' || !proto) return null;
+    return { ctor: ctor as never, proto, universe };
+  } catch {
+    return null;
+  }
+}
+
+/** The browser's own element classes: what the DOM exports */
+function htmlClasses(scope: Record<string, unknown>): unknown[] {
+  try {
+    return Object.getOwnPropertyNames(scope)
+      .filter((key) => /^(?:HTML|SVG)\w*Element$/.test(key))
+      .map((key) => scope[key])
+      .filter((value) => typeof value === 'function');
+  } catch {
+    return [];
+  }
+}
+
+export function memberList(type: string, missing: string, scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>): MemberList | null {
+  const found = classOfType(type, scope);
+  if (!found) return null;
+  const { ctor, proto, universe } = found;
+  // The prototypes from the class up, not Object's
+  const levels: object[] = [];
+  for (let at: object | null = proto; at && at !== Object.prototype && levels.length < 12; at = Object.getPrototypeOf(at)) levels.push(at);
+  if (levels.length === 0) return null;
+  // Plumbing: inherited by most of what the library exports
+  const inherits = (cls: unknown, level: object) => {
+    for (let at: object | null = (cls as { prototype?: object }).prototype ?? null; at; at = Object.getPrototypeOf(at)) if (at === level) return true;
+    return false;
+  };
+  const plumbing = levels.map((level, i) => i > 0 && universe.length >= 5 && universe.filter((cls) => inherits(cls, level)).length / universe.length >= PLUMBING_SHARE);
+  const deprecated = (fn: unknown) => {
+    try {
+      return /deprecat|renamed/i.test(Function.prototype.toString.call(fn));
+    } catch {
+      return false;
+    }
+  };
+  const defaults = (() => {
+    try {
+      return Object.keys(ctor.getDefaults?.() ?? {}).filter((key) => key !== 'context' && /^[A-Za-z$][\w$]*$/.test(key));
+    } catch {
+      return [];
+    }
+  })();
+  const seen = new Set<string>();
+  const methods: Array<{ name: string; level: number; plumbing: boolean }> = [];
+  const accessors: Array<{ name: string; level: number; readOnly: boolean; plumbing: boolean }> = [];
+  levels.forEach((level, index) => {
+    for (const name of Object.getOwnPropertyNames(level)) {
+      if (name === 'constructor' || name.startsWith('_') || !/^[A-Za-z$][\w$]*$/.test(name) || seen.has(name)) continue;
+      const d = Object.getOwnPropertyDescriptor(level, name);
+      if (!d) continue;
+      if (typeof d.value === 'function') {
+        seen.add(name);
+        if (!deprecated(d.value)) methods.push({ name, level: index, plumbing: plumbing[index] });
+      } else if (d.get || d.set) {
+        seen.add(name);
+        accessors.push({ name, level: index, readOnly: !d.set, plumbing: plumbing[index] });
+      } else if ('value' in d) {
+        // (a value on the prototype itself: a setting that can be set)
+        seen.add(name);
+        accessors.push({ name, level: index, readOnly: false, plumbing: plumbing[index] });
+      }
+    }
+  });
+  const related = (name: string) => relatedness(missing, name);
+  // The methods: closest to the wrong name (from any level), then the class's own, then inherited; plumbing only when close
+  const wanted = methods
+    .filter((m) => !m.plumbing || related(m.name) >= 1)
+    .map((m, order) => ({ ...m, order, score: related(m.name) }))
+    .sort((a, b) => b.score - a.score || a.level - b.level || a.order - b.order);
+  const names = wanted.map((m) => m.name);
+  // The settings: the class's own accessors, the defaults (without context), and accessors between that the defaults name
+  const settings: Array<{ name: string; readOnly: boolean }> = [];
+  const addSetting = (name: string) => {
+    if (settings.some((s) => s.name === name)) return;
+    const accessor = accessors.find((a) => a.name === name);
+    settings.push({ name, readOnly: !!accessor?.readOnly });
+  };
+  for (const a of accessors.filter((a) => a.level === 0)) addSetting(a.name);
+  for (const key of defaults) addSetting(key);
+  for (const a of accessors.filter((a) => a.level > 0 && !a.plumbing && defaults.includes(a.name))) addSetting(a.name);
+  // (for a class with no getDefaults: the accessors of its own non-plumbing levels)
+  if (defaults.length === 0) for (const a of accessors.filter((a) => !a.plumbing)) addSetting(a.name);
+  const bad = flatName(missing);
+  const settingsOrdered = [...settings].sort((a, b) => Number(relatedness(missing, b.name) > 0 && flatName(b.name) !== bad) - Number(relatedness(missing, a.name) > 0 && flatName(a.name) !== bad));
+  if (names.length === 0 && settingsOrdered.length === 0) return null;
+  return { methods: names.slice(0, 12), settings: settingsOrdered.slice(0, 8) };
+}
+
+/**
+ * The fact for a member that isn't there, as one sentence: what the object is and what it really has.
+ * "gMinor is a Tone.PolySynth; it has no setInstruments(). Its methods: …. Its settings: …."
+ * Null for an object with no class from the library or the browser to read it from (a program's own object).
+ */
+export function memberListText(object: string, type: string, missing: string, use: MemberUse, scope: Record<string, unknown>): string | null {
+  if (type.startsWith('@')) return null;
+  const list = memberList(type, missing, scope);
+  if (!list) return null;
+  const methods = list.methods.length ? ` Its methods: ${list.methods.map((m) => `${m}()`).join(', ')}.` : '';
+  const settings = list.settings.length ? ` Its settings: ${list.settings.map((s) => (s.readOnly ? `${s.name} (read-only)` : s.name)).join(', ')}.` : '';
+  return `${object} is ${typeLabel(type, object)}; it has no ${missing}${use === 'read' ? '' : '()'}.${methods}${settings}`;
 }
 
 /** The line a name is declared on (`const loop = …`), or null when it is not declared exactly once */

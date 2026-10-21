@@ -316,7 +316,7 @@ describe('from the tip calculator log', async () => {
     const code = 'speak("Show a big ten second countdown on screen.");\nlet n = 10;\nsetInterval(() => { n--; root.textContent = n; }, 1000);';
     const notes: string[] = [];
     const out = repairBeforeRunning(code, false, (text) => notes.push(text), 'Show a big ten second countdown on screen');
-    expect(out.code).toBe('\nlet n = 10;\nsetInterval(() => { n--; root.textContent = n; }, 1000);');
+    expect(out.code).toBe('let n = 10;\nsetInterval(() => { n--; root.textContent = n; }, 1000);');
     expect(notes).toEqual(["a speak() of the request's own words → taken out: corrected before running"]);
     // A phrase to answer, not an instruction: its echo is the answer (the reviewer's probes)
     for (const phrase of ['Happy birthday to you', 'Good morning everyone', 'Hello there my friend']) {
@@ -325,7 +325,7 @@ describe('from the tip calculator log', async () => {
     }
     // A phrase with no verb of an instruction is left alone too (only a sure case is repaired); an instruction is
     expect(repairBeforeRunning('speak("A big red button on screen");\nroot.textContent = 1;', false, () => {}, 'A big red button on screen').code).toBe('speak("A big red button on screen");\nroot.textContent = 1;');
-    expect(repairBeforeRunning('speak("Flip a coin and say heads or tails");\nroot.textContent = 1;', false, () => {}, 'Flip a coin and say heads or tails').code).toBe('\nroot.textContent = 1;');
+    expect(repairBeforeRunning('speak("Flip a coin and say heads or tails");\nroot.textContent = 1;', false, () => {}, 'Flip a coin and say heads or tails').code).toBe('root.textContent = 1;');
     // No request given (or another one): the program is as it was
     expect(repairBeforeRunning(code, false, () => {}).code).toBe(code);
     expect(repairBeforeRunning(code, false, () => {}, 'Draw a cat').code).toBe(code);

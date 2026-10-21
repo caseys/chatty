@@ -11,7 +11,7 @@ const BASE = '/chatty/';
 type Handler = (event: Record<string, unknown>) => void;
 
 /** Runs public/sw.js against fake `self`, `caches` and `fetch`, served from /chatty/sw.js. */
-function loadWorker(network: (url: string) => Response | Promise<Response>, source = SW_SOURCE) {
+function loadWorker(network: (url: string) => Response | Promise<Response>, source = SW_SOURCE, script = 'sw.js') {
   const handlers: Record<string, Handler> = {};
   const stores = new Map<string, Map<string, Response>>();
   const fetched: string[] = [];
@@ -29,7 +29,7 @@ function loadWorker(network: (url: string) => Response | Promise<Response>, sour
     };
   };
   const self = {
-    location: new URL(`${ORIGIN}${BASE}sw.js`),
+    location: new URL(`${ORIGIN}${BASE}${script}`),
     addEventListener: (type: string, fn: Handler) => {
       handlers[type] = fn;
     },
@@ -101,6 +101,26 @@ describe('service worker under /chatty/', () => {
     expect(await app.match(`${BASE}assets/app-old.js`)).toBeUndefined();
     expect(await app.match(`${BASE}assets/app-new.js`)).toBeDefined();
     expect(sw.stores.has('webllm/model')).toBe(true);
+  });
+
+  it('precaches one file at a time, and only the app shell when registered as lite (iPhone)', async () => {
+    const built = SW_SOURCE.replace('/*__BUILD_ASSETS__*/ []', JSON.stringify(['a.js', 'b.js', 'c.css']));
+    let inFlight = 0;
+    let most = 0;
+    const slow = async (url: string) => {
+      most = Math.max(most, ++inFlight);
+      await new Promise((r) => setTimeout(r, 2));
+      inFlight--;
+      return network(url);
+    };
+    const full = loadWorker(slow, built);
+    await full.run('install', {});
+    expect(most).toBe(1);
+    expect(full.fetched).toContain(`${ORIGIN}${BASE}assets/b.js`);
+    const lite = loadWorker(network, built, 'sw.js?lite=1');
+    await lite.run('install', {});
+    expect(lite.fetched).toContain(`${ORIGIN}${BASE}index.html`);
+    expect(lite.fetched.some((u) => u.includes('/assets/'))).toBe(false);
   });
 
   it('precaches only paths inside the /chatty/ scope', async () => {

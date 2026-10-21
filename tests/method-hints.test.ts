@@ -46,8 +46,9 @@ describe('missing methods', () => {
   it('gives the fix request the candidates, and a correction for a slip', () => {
     const code = "const ctx = c.getContext('2d');\nctx.fillCircle(1, 2, 3);";
     const hint = methodHint(code, 'ctx.fillCircle is not a function', scope)!;
-    expect(hint.text).toMatch(/^ctx is a CanvasRenderingContext2D, which has no fillCircle\(\)\. It has .*\(a method\).*: use the one you meant\.$/);
-    expect(hint.text).toContain('fill()');
+    // One clean list of what it has, the nearest names first
+    expect(hint.text).toMatch(/^ctx is a CanvasRenderingContext2D; it has no fillCircle\(\)\. Its methods: fill\(\), /);
+    expect(hint.text).toContain('fillRect()');
     expect(hint.correction).toBeUndefined();
     const slip = methodHint("const ctx = c.getContext('2d');\nctx.fillrect(0, 0, 9, 9);", 'ctx.fillrect is not a function', scope)!;
     expect(slip.correction).toEqual({ object: 'ctx', from: 'fillrect', to: 'fillRect' });
@@ -151,7 +152,7 @@ describe('names a model reshapes rather than mistypes', async () => {
     }
     const hint = methodHint(code('ctx.getPage();'), 'ctx.getPage is not a function', { CanvasRenderingContext2D: Book } as unknown as Record<string, unknown>)!;
     expect(hint.correction).toBeUndefined();
-    expect(hint.text).toMatch(/It has ctx\.page \(a property\)/);
+    expect(hint.text).toContain('Its settings: page');
   });
 });
 
@@ -213,10 +214,10 @@ describe('the libraries a program’s page has (Tone, THREE)', () => {
       'loop.start();',
     ].join('\n');
     const hint = methodHint(code, 'loop.triggerAttackRelease is not a function', page, 2);
-    expect(hint?.text).toContain('loop is a Tone.Loop (made at line 1), which has no triggerAttackRelease().');
+    expect(hint?.text).toContain('loop is a Tone.Loop (made at line 1); it has no triggerAttackRelease().');
     expect(hint?.text).toContain('triggerAttackRelease() belongs to Tone.Synth, Tone.MembraneSynth, Tone.PolySynth.');
     // What it does have
-    expect(hint?.text).toContain('It has loop.start() (a method)');
+    expect(hint?.text).toContain('Its methods: start(), stop().');
     // No swap of one class for another: the hint corrects nothing
     expect(hint?.correction).toBeUndefined();
     expect(valueMadeAt(code, 'loop.triggerAttackRelease is not a function')).toEqual({ name: 'loop', line: 1 });

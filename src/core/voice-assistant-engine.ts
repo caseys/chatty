@@ -707,6 +707,9 @@ export class VoiceAssistantEngine {
               this.orchestrator.recordInitializationTiming(readinessMs, readinessMs);
               this.events.onStatusChange?.(null);
               this.prepareSandboxWhenIdle();
+              // The load is done: a crash from here on is named by the activity it happens in
+              // (the sandbox, the offline copy, a reply), not blamed on the load
+              clearLoadStage();
             });
           })
           .catch((err): Promise<void> | void => {

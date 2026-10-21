@@ -289,7 +289,6 @@ function undeclared(tree: Tree, code: string, name: string, errorLine?: number):
     return null;
   };
   const home = fnOf(sorted[0]);
-  const uses = reads.filter((n) => fnOf(n) === home).sort((a, b) => a.start - b.start);
   // Where a declaration of it goes: just before the statement holding its first use, in the
   // innermost block that holds every use (so what the uses need, made by earlier statements,
   // is there: the elements a page builds first)
@@ -298,19 +297,28 @@ function undeclared(tree: Tree, code: string, name: string, errorLine?: number):
     for (let at = tree.parent.get(n); at; at = tree.parent.get(at)) if (at.type === 'BlockStatement' || at.type === 'Program') out.unshift(at);
     return out;
   };
-  const chains = uses.map(blocks);
-  let shared: AnyNode | undefined;
-  for (let i = 0; chains.every((c) => c[i] && c[i] === chains[0][i]); i++) shared = chains[0][i];
-  let statement: AnyNode | undefined = uses[0];
-  while (statement && tree.parent.get(statement) !== shared) statement = tree.parent.get(statement);
-  const lineStart = statement ? code.lastIndexOf('\n', statement.start - 1) + 1 : 0;
-  const indent = statement ? code.slice(lineStart, statement.start) : '';
+  const plan = (uses: AnyNode[]) => {
+    const chains = uses.map(blocks);
+    let shared: AnyNode | undefined;
+    for (let i = 0; chains.every((c) => c[i] && c[i] === chains[0][i]); i++) shared = chains[0][i];
+    let statement: AnyNode | undefined = uses[0];
+    while (statement && tree.parent.get(statement) !== shared) statement = tree.parent.get(statement);
+    const lineStart = statement ? code.lastIndexOf('\n', statement.start - 1) + 1 : 0;
+    const indent = statement ? code.slice(lineStart, statement.start) : '';
+    return uses.length > 1 && statement && /^\s*$/.test(indent) ? { declareAt: { offset: statement.start, indent } } : {};
+  };
+  // The name is the blank, whatever function it is in: every use of it, declared once before the first
+  // (a name used in two functions, each fails in turn if only one is filled). Without a place
+  // for that declaration, the uses in the failing one's function, a name visible at each of them.
+  const every = [...reads].sort((a, b) => a.start - b.start);
+  const everywhere = plan(every);
+  const uses = everywhere.declareAt ? every : reads.filter((n) => fnOf(n) === home).sort((a, b) => a.start - b.start);
   return {
     line: startLine(sorted[0]),
     text: name,
     spans: uses.map((n) => ({ start: n.start, end: n.end })),
     why: `${name} is not declared`,
-    ...(uses.length > 1 && statement && /^\s*$/.test(indent) ? { declareAt: { offset: statement.start, indent } } : {}),
+    ...(everywhere.declareAt ? everywhere : plan(uses)),
   };
 }
 
@@ -547,6 +555,22 @@ const HELPERS = ['out', 'speak', 'clear', 'root'];
 /** Methods of Chatty's own `out` */
 const OUT_METHODS = ['send', 'play', 'playNote'];
 
+/** Whether an element of this tag has the member (a canvas has getContext, a div doesn't); null where the browser can't say */
+function tagHas(tag: string, member: string): boolean | null {
+  try {
+    if (typeof document === 'undefined') return null;
+    return member in document.createElement(tag);
+  } catch {
+    return null;
+  }
+}
+
+/** The id an element lookup asks for (`document.getElementById('board')`, `querySelector('#board')`) */
+function lookedUpId(text: string): string | null {
+  const m = text.match(/getElementById\(\s*['"`]([^'"`]+)['"`]\s*\)|querySelector\(\s*['"`]#([\w-]+)['"`]\s*\)/);
+  return m ? (m[1] ?? m[2]) : null;
+}
+
 /** Does an element type in this browser have this method or property? */
 function elementHas(member: string): boolean {
   const g = globalThis as unknown as Record<string, { prototype?: object } | undefined>;
@@ -560,9 +584,14 @@ function elementHas(member: string): boolean {
  * blank is, element lookups for the page's ids (`.value` for inputs, the element otherwise), and
  * Chatty's helpers when they fit. Deduped, best first, at most 6.
  */
-export function blankChoices(code: string, blank: Blank, page: { ids: string[]; fields?: string[] }): string[] {
+export function blankChoices(code: string, blank: Blank, page: { ids: string[]; fields?: string[]; tags?: Record<string, string> }): string[] {
   const tree = analyse(code);
   const node = tree && blank.spans[0] ? nodeAt(tree, blank.spans[0]) : null;
+  // A name declared once for the whole program is declared at the top-level statement before its first
+  // use: what is visible there (and made before it) is what can be offered, not what is inside the first function
+  const declaredAt = tree && blank.declareAt ? tree.nodes.find((n) => n.start === blank.declareAt!.offset && /Statement|Declaration/.test(n.type) && /^(?:BlockStatement|Program)$/.test(tree.parent.get(n)?.type ?? '')) : undefined;
+  const scopeFrom = (declaredAt && tree ? tree.parent.get(declaredAt) : undefined) ?? node;
+  const placed = declaredAt && blank.declareAt ? blank.declareAt.offset : (blank.spans[0]?.start ?? 0);
   // A blank that is what a name was set from: the value is used as the name is, at its first use
   const site = (tree && blank.uses?.[0] ? nodeAt(tree, blank.uses[0]) : null) ?? node;
   const parent = site && tree ? tree.parent.get(site) : undefined;
@@ -609,11 +638,22 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
   const scored: Array<{ expr: string; score: number; order: number }> = [];
   let order = 0;
   const add = (expr: string, score: number) => scored.push({ expr, score, order: order++ });
+  // The members the program uses on the blank that no plain element has (getContext, play): the page's
+  // own elements are told apart by what they are (a canvas has getContext, a div doesn't), and a new one is
+  // made only when none that is there fits
+  const special = member !== null && tagHas('div', member) === false ? [member] : [];
+  let existingFits = false;
+  const elementFits = (id: string): boolean | null => {
+    const tag = page.tags?.[id];
+    if (!tag || special.length === 0) return null;
+    const answers = special.map((m) => tagHas(tag, m));
+    return answers.includes(null) ? null : answers.every(Boolean);
+  };
 
   // Names declared where the blank is (functions and classes only where one is called or constructed)
-  if (tree && node) {
+  if (tree && scopeFrom && node) {
     const seen = new Set<string>();
-    for (let at: AnyNode | undefined = node; at; at = tree.parent.get(at)) {
+    for (let at: AnyNode | undefined = scopeFrom; at; at = tree.parent.get(at)) {
       for (const declared of tree.scopes.get(at) ?? []) {
         if (seen.has(declared) || declared === blank.text) continue;
         seen.add(declared);
@@ -622,10 +662,10 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
         // A const/let/class not yet made where the blank is (declared by the failing statement
         // itself, or later): using it there throws
         // (including names a destructuring pattern declares: `const { a } = b`)
-        if (owner?.type === 'ClassDeclaration' && owner.end >= blank.spans[0].start) continue;
+        if (owner?.type === 'ClassDeclaration' && owner.end >= placed) continue;
         let declarator: AnyNode | undefined = binding;
         while (declarator && declarator.type !== 'VariableDeclarator' && !/Function|Program/.test(declarator.type)) declarator = tree.parent.get(declarator);
-        if (declarator?.type === 'VariableDeclarator' && declarator.end >= blank.spans[0].start) {
+        if (declarator?.type === 'VariableDeclarator' && declarator.end >= placed) {
           const declaration = tree.parent.get(declarator);
           if (declaration?.type === 'VariableDeclaration' && declaration.kind !== 'var') continue;
         }
@@ -645,7 +685,13 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
         // Declared by a function or class declaration (its name), not one of its parameters
         const callable = (owner?.type === 'FunctionDeclaration' || owner?.type === 'ClassDeclaration') && owner.id === binding;
         if (callable !== (role === 'constructor' || role === 'callee')) continue;
-        add(callable && role === 'callee' ? declared : declared, closeness(word, declared) + 0.5);
+        // A name set from a lookup of a page element: what that element is decides whether it fits
+        // (a div has no getContext; the canvas the page has is what is wanted)
+        const looked = declarator?.type === 'VariableDeclarator' && declarator.init ? lookedUpId(code.slice(declarator.init.start, declarator.init.end)) : null;
+        const fits = looked ? elementFits(looked) : null;
+        if (fits === false) continue;
+        if (fits === true) existingFits = true;
+        add(declared, fits === true ? 0.1 : closeness(word, declared) + 0.5);
       }
     }
   }
@@ -682,6 +728,12 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
     const fields = new Set(page.fields ?? []);
     const wantsElement = member !== null && elementHas(member);
     for (const id of page.ids) {
+      // An element that is not what the program uses (a div where it calls getContext) is not offered
+      const fitsId = elementFits(id);
+      // (a field's text is offered for a member of text or a number: it is its value that is meant)
+      const valueMember = fields.has(id) && !wantsElement && (member === null || member in String.prototype || member in Number.prototype);
+      if (fitsId === false && !valueMember) continue;
+      if (fitsId === true) existingFits = true;
       const close = Math.min(closeness(word, id), closeness(lookupWord, id));
       const lookup = `document.getElementById('${id}')`;
       // Reading a value (`bill * 2`, `bill.toFixed(2)`) wants what is in the field; a receiver of element members wants the element
@@ -693,7 +745,7 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
         add(lookup, close + 0.2);
       } else {
         // Where a value is used (`'Total: ' + x`, `x * 2`), an element that holds no value is rarely meant
-        add(asValue ? value : lookup, close + (asValue || wantsElement ? 0 : role === 'value' && member === null ? 2.2 : 0.2));
+        add(asValue ? value : lookup, fitsId === true ? 0.15 : close + (asValue || wantsElement ? 0 : role === 'value' && member === null ? 2.2 : 0.2));
       }
     }
   }
@@ -708,14 +760,15 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
       if (up?.type === 'MemberExpression' && tree.key.get(at!) === 'object') used.add(up.computed ? '[index]' : (up.property.name as string));
     }
     const made = used.size > 0 ? MAKEABLE.find(({ type }) => [...used].every((m) => (m === '[index]' ? type === 'Array' : typeHas(type, m)))) : undefined;
-    if (made) add(made.make, 0.6);
+    // (a new one only when the page has none of that kind)
+    if (made && !existingFits) add(made.make, 0.6);
   }
 
   // Chatty's helpers
   if (role !== 'iterable') {
     for (const helper of HELPERS) {
       const close = closeness(word, helper);
-      const fits = (helper === 'out' && member !== null && OUT_METHODS.includes(member)) || (helper === 'root' && member !== null && elementHas(member));
+      const fits = (helper === 'out' && member !== null && OUT_METHODS.includes(member)) || (helper === 'root' && member !== null && (tagHas('div', member) ?? elementHas(member)));
       if (close <= 2 && word && word !== helper) add(helper, close);
       else if (fits) add(helper, 1);
     }
@@ -741,9 +794,18 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
   const required = [...reads].filter((m) => !(m in Object.prototype));
   const fitsReads = (expr: string): boolean => {
     if (required.length === 0 || !tree) return true;
+    // A page element, or a name set from a lookup of one: what the page says that element is
+    const byTag = (id: string | null): boolean | null => {
+      const tag = id ? page.tags?.[id] : undefined;
+      if (!tag) return null;
+      const answers = required.map((m) => tagHas(tag, m));
+      return answers.includes(null) ? null : answers.every(Boolean);
+    };
     if (/^[A-Za-z_$][\w$]*$/.test(expr)) {
       const declarator = tree.nodes.find((n) => n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.id.name === expr);
       const init = declarator?.init as AnyNode | undefined;
+      const fromTag = init ? byTag(lookedUpId(code.slice(init.start, init.end))) : null;
+      if (fromTag !== null) return fromTag;
       if (init?.type === 'ObjectExpression') {
         const keys = new Set<string>();
         for (const p of init.properties as AnyNode[]) if (p.type === 'Property' && !p.computed) keys.add((p.key.name ?? String(p.key.value)) as string);
@@ -757,7 +819,10 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
       return known ? required.every((m) => typeHas(type, m)) : true;
     }
     // A page element (not its .value)
-    if (/^document\.getElementById\([^)]*\)$/.test(expr)) return required.every((m) => elementHas(m));
+    if (/^document\.getElementById\([^)]*\)$/.test(expr)) {
+      const fromTag = byTag(lookedUpId(expr));
+      return fromTag !== null ? fromTag : required.every((m) => elementHas(m));
+    }
     return true;
   };
 

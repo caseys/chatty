@@ -11,6 +11,7 @@ import { FluidAudioVisualizer } from './audio/visualizer.ts';
 import { clearModelCache, getModelCacheBytes } from './core/model-cache.ts';
 import { isAppleMobile, SUPPORTED_CHAT_MODELS } from './core/settings.ts';
 import { AFTER_LOAD_MS, settle } from './core/settle.ts';
+import { withActivity } from './core/activity-breadcrumbs.ts';
 import { decodeProgramHash, encodeProgramHash } from './share-link.ts';
 import { createFrameCoalescer } from './frame-coalescer.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
@@ -1726,28 +1727,38 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         }
       });
     } else {
-      const registerSw = () => {
+      /** Registers the worker; resolves once a new one has finished installing (a minute at most) */
+      const registerSw = (query = ''): Promise<void> =>
         navigator.serviceWorker
           // The app lives under Vite's base ('/chatty/'), so the worker and its scope do too
-          .register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL })
+          .register(`${import.meta.env.BASE_URL}sw.js${query}`, { scope: import.meta.env.BASE_URL })
           .then((reg) => {
             console.debug('[Chatty PWA] Service Worker registered:', reg.scope);
+            const worker = reg.installing;
+            if (!worker) return;
+            return new Promise<void>((resolve) => {
+              worker.addEventListener('statechange', () => {
+                if (worker.state !== 'installing') resolve();
+              });
+              setTimeout(resolve, 60_000);
+            });
           })
           .catch((err) => {
             console.warn('[Chatty PWA] Service Worker registration warning:', err);
           });
-      };
 
       if (isAppleMobile()) {
-        // iPhone Safari: the worker's first install downloads and stores the app's chunks; that
-        // waits until the models have loaded and settled, so the two don't run at the same time
-        const afterModels = () => void settle(AFTER_LOAD_MS).then(registerSw);
+        // iPhone Safari: the worker installs once the models have loaded and settled, so the two
+        // don't run at the same time, and stores only the app shell (sw.js?lite=1). Recorded until
+        // it has installed, so a crash then is named on the next visit.
+        const afterModels = () =>
+          void settle(AFTER_LOAD_MS).then(() => withActivity('installing the offline copy', () => registerSw('?lite=1')));
         if ((window as unknown as { __chattyModelsReady?: boolean }).__chattyModelsReady) afterModels();
         else window.addEventListener('chatty:models-ready', afterModels, { once: true });
       } else if (document.readyState === 'complete') {
-        registerSw();
+        void registerSw();
       } else {
-        window.addEventListener('load', registerSw);
+        window.addEventListener('load', () => void registerSw());
       }
     }
   }

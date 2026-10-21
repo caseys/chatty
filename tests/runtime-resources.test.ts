@@ -376,3 +376,46 @@ describe('a program that keeps adding elements however it does it', () => {
     win.close();
   }, 10000);
 });
+
+describe('a loop that ran too long', () => {
+  it('ends the program’s frames and timers with it, so the next frame does not stop the page again', async () => {
+    const { win, posted } = loadRunner(false);
+    // The guard in every loop throws this after 1.5 seconds; the frame asked for its next frame first
+    win.postMessage(
+      {
+        type: 'execute',
+        id: 'lp1',
+        code: 'window.__frames = 0; window.__ticks = 0;\nsetInterval(() => { window.__ticks++; }, 20);\nfunction frame() { window.__frames++; requestAnimationFrame(frame); throw new Error("Loop exceeded 1500ms — possible infinite loop"); }\nrequestAnimationFrame(frame);',
+      },
+      '*'
+    );
+    await wait(150);
+    const frames = win.__frames;
+    const ticks = win.__ticks;
+    expect(frames).toBe(1);
+    await wait(150);
+    // Nothing runs any more: no more frames, no more ticks
+    expect(win.__frames).toBe(frames);
+    expect(win.__ticks).toBe(ticks);
+    expect(posted.some((m) => m.type === 'program_error' && /Loop exceeded/.test(m.message))).toBe(true);
+    win.close();
+  });
+
+  it('does the same when the program’s first run throws it, and leaves another error’s timers alone', async () => {
+    const first = loadRunner(false);
+    first.win.postMessage({ type: 'execute', id: 'lp2', code: 'window.__n = 0;\nsetInterval(() => { window.__n++; }, 20);\nthrow new Error("Loop exceeded 1500ms — possible infinite loop");' }, '*');
+    await wait(120);
+    const n = first.win.__n;
+    await wait(120);
+    expect(first.win.__n).toBe(n);
+    first.win.close();
+    // An ordinary error does not stop the program's other work
+    const other = loadRunner(false);
+    other.win.postMessage({ type: 'execute', id: 'lp3', code: 'window.__n = 0;\nsetInterval(() => { window.__n++; }, 20);\nthrow new Error("boom");' }, '*');
+    await wait(100);
+    const m = other.win.__n;
+    await wait(120);
+    expect(other.win.__n).toBeGreaterThan(m);
+    other.win.close();
+  });
+});
