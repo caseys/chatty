@@ -250,6 +250,36 @@ function fitsGlobal(uses: Array<{ node: AnyNode }>, tree: NonNullable<ReturnType
 
 const list = (all: string[], max = 10, names = [...new Set(all)]) => names.slice(0, max).join(', ') + (names.length > max ? ', …' : '');
 
+/** The library the page has that a name is the file-ending form of (ToneJS, Tone.js, THREEjs), or undefined */
+function libraryNamed(name: string, scope?: Record<string, unknown>): string | undefined {
+  return ['Tone', 'THREE'].find((lib) => !!scope?.[lib] && name !== lib && name.replace(/\.?js$/i, '').toLowerCase() === lib.toLowerCase());
+}
+
+/**
+ * The same name read off the window (`window.ToneJS.PolySynth`, `globalThis.THREEjs`), where it is
+ * undefined and the read of what is inside it fails: the library the page has, by its name.
+ */
+function libraryOnWindow(code: string, error: string, page?: PageFacts): ErrorHint | null {
+  if (!/Cannot read propert|is not a constructor|is not a function|is not an object/.test(error)) return null;
+  const scope = page?.scope as Record<string, unknown> | undefined;
+  const ast = tryParse(code);
+  if (!scope || !ast) return null;
+  const spans: Array<{ start: number; end: number; from: string; to: string }> = [];
+  const declared = new Set(declarations(ast).map((d) => d.name));
+  walk(ast, (node) => {
+    if (node.type !== 'MemberExpression' || node.computed) return;
+    const object = node.object as AnyNode;
+    const name = (node.property as AnyNode).name as string | undefined;
+    if (object.type !== 'Identifier' || !['window', 'globalThis', 'self'].includes(object.name as string) || !name) return;
+    const library = libraryNamed(name, scope);
+    if (library && scope[name] === undefined && !declared.has(object.name as string)) spans.push({ start: node.start, end: node.end, from: `${object.name}.${name}`, to: library });
+  });
+  if (spans.length === 0) return null;
+  let out = code;
+  for (const span of [...spans].sort((a, b) => b.start - a.start)) out = out.slice(0, span.start) + span.to + out.slice(span.end);
+  return tryParse(out) ? { correction: { code: out, note: `${[...new Set(spans.map((span) => `${span.from} → ${span.to}`))].join(', ')}: the library the page has` } } : null;
+}
+
 /** 1. "x is not defined" */
 function notDefined(code: string, error: string, errorLine?: number, page?: PageFacts): ErrorHint | null {
   const name = error.match(/([A-Za-z_$][\w$]*) is not defined/)?.[1] ?? error.match(/Can't find variable: ([A-Za-z_$][\w$]*)/)?.[1];
@@ -275,7 +305,7 @@ function notDefined(code: string, error: string, errorLine?: number, page?: Page
   const uses = tree ? undeclaredUses(tree, name) : [];
   // A library's name with its file's ending (ToneJS, Tone.js, THREEjs): the library the page has, by that name
   const scope = page?.scope as Record<string, unknown> | undefined;
-  const library = ['Tone', 'THREE'].find((lib) => !!scope?.[lib] && name !== lib && name.replace(/js$/i, '').toLowerCase() === lib.toLowerCase());
+  const library = libraryNamed(name, scope);
   if (tree && uses.length > 0 && library) {
     const renamed = renameUndeclared(code, name, library);
     if (renamed) return { correction: { code: renamed, note: `${name} → ${library}: the library the page has` } };
@@ -1241,7 +1271,7 @@ function isRequire(node: AnyNode | null | undefined): boolean {
   return false;
 }
 
-/** The libraries Chatty provides in a program's page, by the package name a program imports them by */
+/** The libraries Chatty provides in a program's page, by the package name a program imports them by (also with the file's ending: 'tone.js', 'threejs') */
 const PROVIDED_LIBRARIES: Record<string, string> = { three: 'THREE', tone: 'Tone' };
 
 /**
@@ -1270,9 +1300,9 @@ export function provideThree(code: string): { code: string; changed: boolean; pr
     }
     return line;
   };
-  let out = code.replace(/^[ \t]*import\s+([^;\n]+?)\s+from\s+(['"])(three|tone)\2[ \t]*;?[ \t]*$/gm, (line, clause: string, _q: string, pkg: string) => bind(clause, PROVIDED_LIBRARIES[pkg], line));
+  let out = code.replace(/^[ \t]*import\s+([^;\n]+?)\s+from\s+(['"])(three|tone)(?:\.?js)?\2[ \t]*;?[ \t]*$/gm, (line, clause: string, _q: string, pkg: string) => bind(clause, PROVIDED_LIBRARIES[pkg], line));
   // The same in CommonJS: const Tone = require('tone'), const { Synth } = require('tone')
-  out = out.replace(/^[ \t]*(?:const|let|var)\s+(\{[^}]*\}|[A-Za-z_$][\w$]*)\s*=\s*require\(\s*(['"])(three|tone)\2\s*\)[ \t]*;?[ \t]*$/gm, (line, clause: string, _q: string, pkg: string) =>
+  out = out.replace(/^[ \t]*(?:const|let|var)\s+(\{[^}]*\}|[A-Za-z_$][\w$]*)\s*=\s*require\(\s*(['"])(three|tone)(?:\.?js)?\2\s*\)[ \t]*;?[ \t]*$/gm, (line, clause: string, _q: string, pkg: string) =>
     bind(clause, PROVIDED_LIBRARIES[pkg], line)
   );
   return { code: out, changed: provided.size > 0, provided: [...provided] };
@@ -2364,7 +2394,7 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
   const methods = methodReadFacts(code);
   const withMethods = methods ? { ...hint, text: [hint?.text, methods].filter(Boolean).join(' ') } : hint;
   // The library's own facts come last, after whatever the general rules found
-  const facts = [toneOptionFacts(code, page?.scope), toneConnectFacts(code, error, errorLine, page?.scope)].filter(Boolean).join(' ');
+  const facts = [toneOptionFacts(code, page?.scope), toneConnectFacts(code, error, errorLine, page?.scope), toneValueFacts(code, error)].filter(Boolean).join(' ');
   return facts ? { ...withMethods, text: [withMethods?.text, facts].filter(Boolean).join(' ') } : withMethods;
 }
 
@@ -2399,7 +2429,7 @@ function generalErrorHint(code: string, error: string, errorLine?: number, page?
         }
       : (unknownCallDropped(code, error, errorLine) ?? { text: method.text });
   }
-  const found = argumentCountFacts(code, error, errorLine, page?.scope) ?? notDefined(code, error, errorLine, page) ?? nothingThere(code, error, errorLine, page) ?? leftOpen(code, error) ?? tooEarly(code, error, errorLine);
+  const found = argumentCountFacts(code, error, errorLine, page?.scope) ?? notDefined(code, error, errorLine, page) ?? libraryOnWindow(code, error, page) ?? nothingThere(code, error, errorLine, page) ?? leftOpen(code, error) ?? tooEarly(code, error, errorLine);
   if (found?.correction) return found;
   // A method called on undefined (not on a missing element, which is null): its maker returns,
   // or the call is made only when there is something to call
@@ -2549,6 +2579,31 @@ export function toneConnectFacts(code: string, error: string, errorLine: number 
     facts.push(`${name} is a ${type}, a sound source with no inputs: nothing can be connected into it. It sends sound onward: ${name}.toDestination(), or ${name}.connect(an effect that has inputs, such as a Tone.Reverb or Tone.Filter).`);
   });
   return facts.length ? [...new Set(facts)].slice(0, 3).join(' ') : null;
+}
+
+/**
+ * "Invalid argument(s) to setValueAtTime: "Twinkle", 0.5" (Tone, from a note, a level or a time that is a
+ * word): the arguments the library printed that are not numbers, and where the program has that text. Tone
+ * takes a pitch as a note name ("C4", "F#3": letter, optional # or b, octave) or a frequency in Hz, a
+ * time in seconds or as a Tone time ("8n", "+0.5").
+ */
+export function toneValueFacts(code: string, error: string): string | null {
+  const printed = error.match(/Invalid argument\(s\) to \w+: (.+)$/m)?.[1];
+  if (!printed) return null;
+  let values: unknown[];
+  try {
+    values = JSON.parse(`[${printed}]`);
+  } catch {
+    return null;
+  }
+  const words = values.filter((value): value is string => typeof value === 'string' && !!value.trim() && !Number.isFinite(Number(value)));
+  if (words.length === 0) return null;
+  const lines = code.split('\n');
+  const facts = words.slice(0, 2).map((word) => {
+    const at = lines.findIndex((line) => line.includes(JSON.stringify(word)) || line.includes(`'${word}'`));
+    return `${JSON.stringify(word)}${at >= 0 ? ` (line ${at + 1})` : ''} is not a number Tone can use there.`;
+  });
+  return `${facts.join(' ')} A pitch is a note name such as "C4" or "F#3" (a letter, an optional # or b, an octave number) or a frequency in Hz such as 261.63; a time is seconds such as 0.5 or a Tone time such as "8n".`;
 }
 
 export function toneOptionFacts(code: string, scope?: Record<string, unknown>): string | null {

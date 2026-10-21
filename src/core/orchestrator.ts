@@ -1949,6 +1949,7 @@ export class ConversationOrchestrator {
           if (inspected.called?.length) appendRunLog('imagined', `${inspected.called.map((n) => `${n}()`).join(', ')} declared but never called → called at the end: corrected before running`);
           if (inspected.hoistedScripts) appendRunLog('imagined', `${inspected.hoistedScripts === 1 ? 'a <script>' : `${inspected.hoistedScripts} <script>s`} in markup the program sets never runs in the browser → its code is part of the program: corrected before running`);
           if (inspected.exposed?.length) appendRunLog('imagined', `${inspected.exposed.map((n) => `${n}()`).join(', ')} made reachable from the page's inline handlers: corrected before running`);
+          if (inspected.markupBlocks) appendRunLog('imagined', `${inspected.markupBlocks === 1 ? 'a line of' : `${inspected.markupBlocks} blocks of`} markup between the code blocks said aloud → put on the page instead: corrected before running`);
           if (inspected.repeatedBlocks) appendRunLog('imagined', `the program written out again in another code block → one copy kept: corrected before running`);
           if (inspected.redeclared?.length) appendRunLog('imagined', `${inspected.redeclared.join(', ')} declared again → set again (the first declaration made let): corrected before running`);
           if (inspected.cutOff) {

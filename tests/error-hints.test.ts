@@ -903,10 +903,39 @@ describe('a library named with its file’s ending', () => {
     expect(errorHint('ThreeJS.go();', "Can't find variable: ThreeJS", 1, { ids: [], scope })?.correction?.code).toBe('THREE.go();');
   });
 
+  it('is the library the page has when it is read off the window, where the read fails', () => {
+    const code = 'const synth = new window.ToneJS.PolySynth();\nglobalThis.THREEjs.go();';
+    const hint = errorHint(code, "Cannot read properties of undefined (reading 'PolySynth')", 1, { ids: [], scope });
+    expect(hint?.correction?.code).toBe('const synth = new Tone.PolySynth();\nTHREE.go();');
+    // (a window name the page really has, or another name, is left alone)
+    expect(errorHint('window.Tone.start();', "Cannot read properties of undefined (reading 'start')", 1, { ids: [], scope })?.correction).toBeUndefined();
+    expect(errorHint('window.ToneKit.start();', "Cannot read properties of undefined (reading 'start')", 1, { ids: [], scope })?.correction).toBeUndefined();
+    expect(errorHint(code, "Cannot read properties of undefined (reading 'PolySynth')", 1, { ids: [], scope: {} })?.correction).toBeUndefined();
+    expect(errorHint('const window = {};\nwindow.ToneJS.go();', "Cannot read properties of undefined (reading 'go')", 2, { ids: [], scope })?.correction).toBeUndefined();
+  });
+
   it('is left alone without the library in the page, for another name, or when the program declares the name', () => {
     expect(errorHint('ToneJS.start();', 'ToneJS is not defined', 1, { ids: [], scope: {} })?.correction).toBeUndefined();
     expect(errorHint('ToneJS.start();', 'ToneJS is not defined', 1)?.correction).toBeUndefined();
     expect(errorHint('ToneKit.start();', 'ToneKit is not defined', 1, { ids: [], scope })?.correction).toBeUndefined();
     expect(errorHint('const ToneJS = {};\nToneJS.start(); Tone2.go();', 'Tone2 is not defined', 2, { ids: [], scope })?.correction).toBeUndefined();
+  });
+});
+
+describe('Tone: a word where a pitch or a time goes', () => {
+  // The real program and error from Qwen3 0.6B's "Play Twinkle Twinkle Little Star on the piano"
+  const code = 'const synth = new Tone.PolySynth();\nconst note = "Twinkle";\nconst duration = 0.5;\nsynth.triggerAttackRelease(note, duration, 0.5);';
+
+  it('names the word, the line it is on, and how a pitch and a time are written', () => {
+    const hint = errorHint(code, 'Error: Invalid argument(s) to setValueAtTime: "Twinkle", 0.5', undefined, { ids: [], scope: {} });
+    expect(hint?.text).toBe(
+      '"Twinkle" (line 2) is not a number Tone can use there. A pitch is a note name such as "C4" or "F#3" (a letter, an optional # or b, an octave number) or a frequency in Hz such as 261.63; a time is seconds such as 0.5 or a Tone time such as "8n".'
+    );
+  });
+
+  it('says nothing for numbers, other errors, or text it cannot read', () => {
+    expect(errorHint(code, 'Error: Invalid argument(s) to setValueAtTime: null, 0.5', undefined, { ids: [], scope: {} })?.text).toBeUndefined();
+    expect(errorHint(code, 'Error: Invalid argument(s) to setValueAtTime: 440, "0.5"', undefined, { ids: [], scope: {} })?.text).toBeUndefined();
+    expect(errorHint(code, 'Invalid argument(s) to setValueAtTime: {oops', undefined, { ids: [], scope: {} })?.text).toBeUndefined();
   });
 });

@@ -232,6 +232,8 @@ export interface PreparedExecutableCode {
   redeclared?: string[];
   /** Code blocks dropped for repeating another (withoutRepeatedBlocks) */
   repeatedBlocks?: number;
+  /** Lines of bare markup between code blocks (a <canvas> on a line of its own), put on the page instead of said aloud */
+  markupBlocks?: number;
   /** Functions its inline handlers call, made reachable from them (see exposeFunctionsToInlineHandlers) */
   exposed?: string[];
   /** Scripts in markup it sets through innerHTML, whose code now runs as part of the program (see hoistPageScripts) */
@@ -493,6 +495,20 @@ function paragraphParts(text: string): ReplyPart[] {
 }
 
 /**
+ * Talk between a reply's code blocks that is nothing but tags (`<canvas id="canvas"></canvas>`, a
+ * `<button>` and an `<input>` on their own lines) is the page's markup, not words to say: it goes on
+ * the page like an html block, where the code after it finds its elements.
+ */
+function markupAsCode(parts: ReplyPart[]): ReplyPart[] {
+  return parts.map((part) => {
+    const lines = part.text.split('\n').map((line) => line.trim()).filter(Boolean);
+    if (part.kind !== 'talk' || lines.length === 0 || !lines.every((line) => /^<\/?[A-Za-z][^]*>$/.test(line))) return part;
+    if (preparing) preparing.markup += 1;
+    return { kind: 'code', text: htmlToCode(part.text) };
+  });
+}
+
+/**
  * Pulls the program out of a reply that wraps it in markdown or explanation (small models often
  * do, despite the prompt), with the talk around it in order, to be said with speak() (withTalk).
  * Null when the reply has no code.
@@ -505,14 +521,14 @@ function extractProgram(text: string): ReplyPart[] | null {
     for (const block of blocks) {
       const [whole, lang, body] = block;
       // Outside the fences may be code too ("speak(…); clear();" before an ```html block)
-      parts.push(...paragraphParts(text.slice(at, block.index)));
+      parts.push(...markupAsCode(paragraphParts(text.slice(at, block.index))));
       at = (block.index ?? 0) + whole.length;
       const l = lang.toLowerCase();
       if (l === 'html') parts.push({ kind: 'code', text: htmlToCode(body) });
       else if (l === 'css') parts.push({ kind: 'code', text: `document.head.appendChild(Object.assign(document.createElement("style"), { textContent: ${JSON.stringify(body)} }));` });
       else if (!l || /^(?:js|javascript|jsx|mjs)$/.test(l)) parts.push({ kind: 'code', text: body.trim() });
     }
-    parts.push(...paragraphParts(text.slice(at)));
+    parts.push(...markupAsCode(paragraphParts(text.slice(at))));
     return parts.some((part) => part.kind === 'code' && part.text) ? withoutRepeatedBlocks(parts) : null;
   }
   const parts = paragraphParts(text);
@@ -1053,14 +1069,14 @@ export function withoutMarkdownLeftovers(text: string): string {
 }
 
 /** What preparing a reply added, for the run log (see inspectExecutableCode) */
-let preparing: { called: string[]; exposed: string[]; redeclared: string[]; repeats: number } | null = null;
+let preparing: { called: string[]; exposed: string[]; redeclared: string[]; repeats: number; markup: number } | null = null;
 
 /**
  * The reply as the program to run, with what preparing it added: the functions it never called,
  * called at its end, and those its inline handlers (onclick="go()") need, made reachable
  */
 export function inspectExecutableCode(rawText: string, options: { closeCutOff?: boolean; speakComment?: boolean } = {}): PreparedExecutableCode {
-  const added = { called: [] as string[], exposed: [] as string[], redeclared: [] as string[], repeats: 0 };
+  const added = { called: [] as string[], exposed: [] as string[], redeclared: [] as string[], repeats: 0, markup: 0 };
   const outer = preparing;
   preparing = added;
   try {
@@ -1079,6 +1095,7 @@ export function inspectExecutableCode(rawText: string, options: { closeCutOff?: 
       ...(added.exposed.length ? { exposed: [...new Set(added.exposed)] } : {}),
       ...(added.redeclared.length ? { redeclared: [...new Set(added.redeclared)] } : {}),
       ...(added.repeats ? { repeatedBlocks: added.repeats } : {}),
+      ...(added.markup ? { markupBlocks: added.markup } : {}),
       ...(hoisted ? { hoistedScripts: hoisted } : {}),
     };
   } finally {

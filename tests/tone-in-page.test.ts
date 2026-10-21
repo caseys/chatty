@@ -198,6 +198,14 @@ describe('an import of Tone.js', async () => {
     expect(provideThree("import x from 'lodash';").changed).toBe(false);
   });
 
+  it('under the package name with its file ending (tone.js, tonejs, three.js), which is the same library', () => {
+    expect(provideThree("import ToneJS from 'tone.js';\nconst s = new ToneJS.Synth();").code).toBe('const ToneJS = Tone;\nconst s = new ToneJS.Synth();');
+    expect(provideThree("import * as T from \"threejs\";").code).toBe('const T = THREE;');
+    expect(provideThree("const Tone = require('tonejs');").code).toBe('');
+    // (another package that starts with the name is another package)
+    expect(provideThree("import x from 'tone-extras';\nimport y from 'threeify';").changed).toBe(false);
+  });
+
   it('also when it is required, as Qwen3 0.6B wrote it for the blues loop, and not as its own name taken from itself', () => {
     // The real line: a Node-style import of the package that names Tone out of it
     expect(provideThree("const { Tone } = require('tone');\nconst tempo = 120;")).toEqual({ code: '\nconst tempo = 120;', changed: true, provided: ['Tone'] });

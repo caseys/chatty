@@ -592,3 +592,37 @@ describe('a reply cut off inside the callbacks of nested calls', () => {
     expect(closeCutOff('const list = [1, 2,\n')).toBeNull();
   });
 });
+
+describe('a line of markup between two code blocks', () => {
+  // The real reply from Qwen3 0.6B's "Play Twinkle Twinkle Little Star on the piano": a <canvas> on a line of its own
+  const reply = [
+    '```javascript',
+    'const synth = new Tone.PolySynth();',
+    'synth.triggerAttackRelease("C4", 0.5);',
+    '```',
+    '',
+    '<canvas id="canvas"></canvas>',
+    '',
+    '```javascript',
+    'const ctx = document.getElementById("canvas").getContext("2d");',
+    '```',
+  ].join('\n');
+
+  it('goes on the page like an html block, not into speak() as the word canvas', async () => {
+    const { inspectExecutableCode } = await import('../src/tools/javascript-runtime.ts');
+    const prepared = inspectExecutableCode(reply);
+    expect(prepared.code).not.toContain('speak(');
+    expect(prepared.code).toContain('insertAdjacentHTML("beforeend", "<canvas id=\\"canvas\\"></canvas>")');
+    expect(prepared.markupBlocks).toBe(1);
+    expect(() => new Function(prepared.code)).not.toThrow();
+  });
+
+  it('leaves a sentence that names a tag, and a reply with no markup, as they were', async () => {
+    const { inspectExecutableCode } = await import('../src/tools/javascript-runtime.ts');
+    const told = inspectExecutableCode(reply.replace('<canvas id="canvas"></canvas>', 'The <canvas> below shows the stars.'));
+    expect(told.code).toContain('speak("The canvas below shows the stars.");');
+    expect(told.markupBlocks).toBeUndefined();
+    const plain = inspectExecutableCode(reply.replace('<canvas id="canvas"></canvas>', 'Now the picture.'));
+    expect(plain.markupBlocks).toBeUndefined();
+  });
+});
