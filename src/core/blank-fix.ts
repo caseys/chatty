@@ -1,6 +1,7 @@
 import { parse, type Node } from 'acorn';
 import { enclosingFunction } from './line-fix.ts';
 import { methodNames } from './method-hints.ts';
+import { editDistance, flatName } from './fuzzy-match.ts';
 
 /**
  * Fill-in-the-blank fixing. A tiny model asked to rewrite a failing line copies it back; asked
@@ -373,28 +374,17 @@ function nodeAt(tree: Tree, span: { start: number; end: number }): AnyNode | nul
   return found;
 }
 
-/** Edit distance (a swap of neighbours counts once) */
-function distance(a: string, b: string): number {
-  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
-  for (let j = 1; j <= b.length; j++) d[0][j] = j;
-  for (let i = 1; i <= a.length; i++) {
-    for (let j = 1; j <= b.length; j++) {
-      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
-    }
-  }
-  return d[a.length][b.length];
-}
 
 /** 0 for the same word, up to 3 for unrelated, between a wanted word and a candidate name */
 function closeness(wanted: string | null, name: string): number {
   if (!wanted) return 3;
-  const a = wanted.toLowerCase().replace(/[-_]/g, '');
-  const b = name.toLowerCase().replace(/[-_]/g, '');
+  const a = flatName(wanted);
+  const b = flatName(name);
   if (!a || !b) return 3;
   if (a === b) return 0;
   if (a.includes(b) || b.includes(a)) return 1;
-  return distance(a, b) <= Math.max(2, Math.floor(a.length / 3)) ? 2 : 3;
+  // Close in the shared matcher's sense: at most a third of the name in edits (fuzzy-match.ts)
+  return editDistance(a, b) <= Math.max(2, Math.floor(a.length / 3)) ? 2 : 3;
 }
 
 /** The word a blank stands for: its name, or the id inside a lookup, or the last name in its path */
@@ -442,6 +432,8 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
       (/^(?:-|\*|\/|%|\*\*|<|>|<=|>=)$/.test(parent.operator as string) || (parent.operator === '+' && !textual(other)))) ||
     (parent?.type === 'UnaryExpression' && /^[-+]$/.test(parent.operator as string)) ||
     (parent?.type === 'AssignmentExpression' && /^(?:-=|\*=|\/=)$/.test(parent.operator as string));
+  // In text: inside a template literal, or added to a string
+  const inText = parent?.type === 'TemplateLiteral' || (parent?.type === 'BinaryExpression' && parent.operator === '+' && textual(other));
   const word = keyWord(blank.text);
   // A name made by a lookup (`const el = document.getElementById('volumn')` ) stands for the id in it
   let lookupWord: string | null = null;
@@ -482,11 +474,41 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
           const counter = declaration && tree.parent.get(declaration)?.type === 'ForStatement' && tree.key.get(declaration) === 'init';
           if (counter || (init?.type === 'Literal' && typeof init.value === 'number')) continue;
         }
+        // Where text goes (`${x + " and "}`, 'Total: ' + x): an element made or looked up there
+        // would show as "[object HTMLDivElement]"
+        if (inText && declarator?.type === 'VariableDeclarator' && declarator.init && /getElementById|querySelector|createElement/.test(code.slice(declarator.init.start, declarator.init.end))) continue;
         // Declared by a function or class declaration (its name), not one of its parameters
         const callable = (owner?.type === 'FunctionDeclaration' || owner?.type === 'ClassDeclaration') && owner.id === binding;
         if (callable !== (role === 'constructor' || role === 'callee')) continue;
         add(callable && role === 'callee' ? declared : declared, closeness(word, declared) + 0.5);
       }
+    }
+  }
+
+  // A name it never declared that is a key of the items it loops over (`time` inside
+  // `for (const track of tracks)` whose items have `time:`): that item's key
+  if (tree && node?.type === 'Identifier' && blank.why.endsWith('is not declared') && role !== 'callee' && role !== 'constructor') {
+    for (let at = tree.parent.get(node); at; at = tree.parent.get(at)) {
+      let item: string | null = null;
+      let list: AnyNode | null = null;
+      if (at.type === 'ForOfStatement' && at.left.type === 'VariableDeclaration' && at.left.declarations[0]?.id.type === 'Identifier') {
+        item = at.left.declarations[0].id.name;
+        list = at.right;
+      } else if (/Function/.test(at.type) && at.params?.[0]?.type === 'Identifier') {
+        const call = tree.parent.get(at);
+        if (call?.type === 'CallExpression' && call.callee.type === 'MemberExpression' && /^(?:forEach|map|filter|some|every|find)$/.test(call.callee.property?.name ?? '')) {
+          item = at.params[0].name;
+          list = call.callee.object;
+        }
+      }
+      if (!item || !list) continue;
+      const listName = list.type === 'Identifier' ? (list.name as string) : null;
+      const declared = listName ? tree.nodes.find((n) => n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.id.name === listName) : undefined;
+      const array = list.type === 'ArrayExpression' ? list : declared?.init?.type === 'ArrayExpression' ? declared.init : null;
+      const hasKey = !!array && (array.elements as AnyNode[]).some(
+        (e) => e?.type === 'ObjectExpression' && (e.properties as AnyNode[]).some((p) => p.type === 'Property' && !p.computed && (p.key.name ?? p.key.value) === blank.text)
+      );
+      if (hasKey) add(`${item}.${blank.text}`, 0);
     }
   }
 

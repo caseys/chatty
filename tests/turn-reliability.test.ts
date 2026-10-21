@@ -915,12 +915,13 @@ describe('the order of a request\'s fix questions', () => {
     const TOTAL = [
       'function show() {',
       "  const label = document.getElementById('total');",
+      '  const price = 12;',
       "  label.textContent = 'Total: ' + sumTotal;",
       '}',
       'show();',
       "speak('Done.');",
     ].join('\n');
-    const err = { error: 'sumTotal is not defined', errorLine: 3 };
+    const err = { error: 'sumTotal is not defined', errorLine: 4 };
     const names = ['a1', 'a2', 'a3', 'a4', 'a5'];
     const llm = new QueueLlm([
       TOTAL,
@@ -977,6 +978,7 @@ describe('the order of a request\'s fix questions', () => {
     const TOTAL = [
       'function show() {',
       "  const label = document.getElementById('total');",
+      '  const price = 12;',
       "  label.textContent = 'Total: ' + sumTotal;",
       '}',
       'show();',
@@ -984,7 +986,7 @@ describe('the order of a request\'s fix questions', () => {
     ].join('\n');
     const typo = (n: number) => `// Cause: typo ${n}\n  label.textContent = 'Total: ' + sumTotl${n};`;
     const fn = `// Cause: typo\nfunction show() {\n  const label = document.getElementById('total');\n  label.textContent = 'Total: ' + sumTotl;\n}`;
-    const err = { error: 'sumTotal is not defined', errorLine: 3 };
+    const err = { error: 'sumTotal is not defined', errorLine: 4 };
     const llm = new QueueLlm([TOTAL, typo(1), fn, 'A', 'z', 'z', 'z']);
     llm.modelId = 'gemma-4-e2b-it-web';
     const { runtime, executed } = fakeRuntime([err], { trials: () => ({ ...err }), ids: ['total'] });

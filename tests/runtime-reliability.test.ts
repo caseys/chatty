@@ -173,3 +173,15 @@ describe('undefined where a browser call needs a value', () => {
     win.close();
   });
 });
+
+describe('a sound the program never made', () => {
+  it('plays a note on play() instead of failing', async () => {
+    const { win, posted } = loadRunner();
+    win.postMessage({ type: 'execute', id: 's', code: 'document.getElementById("sound").play();\nspeak("Played.");', idKinds: { sound: 'media' } }, '*');
+    await wait(60);
+    const result = posted.find((m) => m.type === 'result');
+    expect(result.success).toBe(true);
+    expect(posted.some((m) => m.type === 'imagined' && /no such sound/.test(m.text))).toBe(true);
+    win.close();
+  });
+});

@@ -18,9 +18,11 @@ export function isTalkOnly(code: string): boolean {
 }
 
 /**
- * A past program as the model sees it in the chat history: what it said (as a speak() call, in the
- * reply format), then what happened when it ran: shown on screen, played sound, ran cleanly or
- * failed with which error. The code itself stays out (only a program being edited is shown).
+ * A past program as the model sees it in the chat history: what happened when it ran (shown on
+ * screen, played sound, ran cleanly or failed with which error) and what it said, as the program's
+ * output and not as a speak() call the model wrote (small models copy those lines forward). The
+ * code itself stays out (only a program being edited is shown). A talk-only reply is the model
+ * chatting and stays a speak() call.
  */
 export function pastProgramResult(msg: ConversationMessage): string {
   const code = msg.rawCode || msg.rawLlmOutput || '';
@@ -32,7 +34,8 @@ export function pastProgramResult(msg: ConversationMessage): string {
   if (/\bout\s*\.\s*send\b|AudioContext|requestMIDIAccess|playNotes|\.play\(/.test(code)) did.push('played sound');
   const error = msg.toolCall?.error || result.error;
   const outcome = error ? `it failed: ${String(error).slice(0, 140)}` : msg.toolCall ? 'it ran without an error' : 'it ran';
-  const speakLine = said ? `speak(${JSON.stringify(said.slice(0, 300))});\n` : '';
-  return `${speakLine}// (Your program ${did.length ? did.join(' and ') : 'ran'}, ${code.split('\n').length} lines; ${outcome}.)`;
+  // Chatty's own fallback text for a program that said nothing (fromProgram === false) isn't the program's
+  const output = said && msg.fromProgram !== false ? ` It said: ${JSON.stringify(said.slice(0, 300))}.` : '';
+  return `// (Your program ${did.length ? did.join(' and ') : 'ran'}, ${code.split('\n').length} lines; ${outcome}.${output})`;
 }
 

@@ -1337,8 +1337,8 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         .slice(FORMAT_TURNS.length)
         .find((m: { role: string }) => m.role === 'assistant');
       expect(assistantPromptTurn).toBeDefined();
-      // A past program is in the history as what it said and what happened, not as its code
-      expect(assistantPromptTurn.content).toContain('speak("Playing a melodic chord for you.");');
+      // A past program is in the history as what happened and what it said, not as its code
+      expect(assistantPromptTurn.content).toContain('It said: "Playing a melodic chord for you."');
       expect(assistantPromptTurn.content).toContain('(Your program played sound');
     });
 

@@ -24,9 +24,9 @@ const msg = (rawCode: string, said: string): ConversationMessage => ({
 });
 
 describe('pastProgramResult', () => {
-  it('gives what a program said and what happened when it ran, not its code', () => {
+  it('gives what happened when a program ran and what it said as its output, not its code', () => {
     const out = pastProgramResult(msg(DRAWING, 'Drawing a red circle.'));
-    expect(out).toBe('speak("Drawing a red circle.");\n// (Your program showed something on screen, 6 lines; it ran.)');
+    expect(out).toBe('// (Your program showed something on screen, 6 lines; it ran. It said: "Drawing a red circle.".)');
     const failed = pastProgramResult({ ...msg(DRAWING, 'Drawing.'), toolCall: { name: 'javascript_runtime', arguments: {}, error: 'boom is not defined' } });
     expect(failed).toContain('it failed: boom is not defined');
   });

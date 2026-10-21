@@ -7,6 +7,7 @@
  * a list instead of guessing again.
  */
 import { parseExpressionAt } from 'acorn';
+import { closestNames, sureMatch } from './fuzzy-match.ts';
 
 /** The object and the method a "not a function" error names, or null */
 export function missingMethod(error: string): { object: string; method: string } | null {
@@ -152,32 +153,13 @@ export function methodNames(type: string, scope: Record<string, unknown> = globa
   return [...names];
 }
 
-function distance(a: string, b: string): number {
-  // Edits between two names, a swap of neighbours counting as one (totla → total)
-  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
-  for (let j = 1; j <= b.length; j++) d[0][j] = j;
-  for (let i = 1; i <= a.length; i++) {
-    for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
-      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
-    }
-  }
-  return d[a.length][b.length];
-}
 
 /** Words of a camelCase name: fillCircle → fill, circle */
 const words = (name: string) => name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[\s_]+/).filter(Boolean);
 
-/** The real methods closest to the missing one, best first */
+/** The real methods closest to the missing one, best first (see fuzzy-match.ts) */
 export function closestMethods(missing: string, names: string[], count = 3): string[] {
-  const lower = missing.toLowerCase();
-  const missingWords = new Set(words(missing));
-  const score = (name: string) => {
-    const shared = words(name).filter((w) => missingWords.has(w)).length;
-    return distance(lower, name.toLowerCase()) - shared * 3;
-  };
-  return [...names].sort((a, b) => score(a) - score(b)).slice(0, count);
+  return closestNames(missing, names, count);
 }
 
 /** The methods of the browser's CanvasRenderingContext2D (a canvas's 2D drawing context) */
@@ -188,14 +170,9 @@ const CONTEXT_2D_METHODS = new Set([
   'save', 'scale', 'setTransform', 'stroke', 'strokeRect', 'strokeText', 'transform', 'translate',
 ]);
 
-/** The one real method a missing name is surely a slip of (wrong case, a typo), or null */
+/** The one real method a missing name is surely a slip of (wrong case, a typo), or null (see fuzzy-match.ts) */
 export function nearMiss(missing: string, names: string[]): string | null {
-  const lower = missing.toLowerCase();
-  const sameLetters = names.filter((name) => name.toLowerCase() === lower);
-  if (sameLetters.length === 1) return sameLetters[0];
-  if (missing.length < 5) return null;
-  const close = names.filter((name) => distance(lower, name.toLowerCase()) <= 2);
-  return close.length === 1 ? close[0] : null;
+  return sureMatch(missing, names);
 }
 
 export interface MethodHint {

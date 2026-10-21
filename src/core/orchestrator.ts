@@ -252,6 +252,21 @@ export const FORMAT_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content: 
   { role: 'assistant', content: 'speak("Hi! What would you like me to make?");' },
 ];
 
+/** What the example reply says (FORMAT_TURNS): a program that copies it into itself doesn't mean it */
+const EXAMPLE_SPOKEN = FORMAT_TURNS.flatMap((t) => (t.role === 'assistant' ? [...t.content.matchAll(/speak\((["'`])(.*?)\1\)/g)].map((m) => m[2]) : []));
+
+/**
+ * Before a program runs: a speak() of the example reply's own words, in a program that does
+ * something else too, is taken out (small models copy the example into their program)
+ */
+export function dropCopiedExample(code: string): { code: string; dropped: boolean } {
+  const lines = code.split('\n');
+  const copied = (line: string) => EXAMPLE_SPOKEN.some((text) => new RegExp(`^\\s*speak\\((["'\`])${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\1\\);?\\s*$`).test(line));
+  const kept = lines.filter((line) => !copied(line));
+  if (kept.length === lines.length || kept.join('').trim() === '') return { code, dropped: false };
+  return { code: kept.join('\n'), dropped: true };
+}
+
 export const CONCISE_VOICE_SYSTEM_PROMPT = promptRules();
 
 /** A line of a streaming reply that starts code: the reply isn't prose (shown and spoken as it comes) */
@@ -752,6 +767,7 @@ export class ConversationOrchestrator {
         interrupted: true,
         spokenTextBeforeInterrupt: preservedText,
         canonicalContent: interruptedContent,
+        fromProgram: this.activeAssistantMessage.fromProgram,
         metrics: this.activeAssistantMessage.metrics,
       });
 
@@ -1329,9 +1345,17 @@ export class ConversationOrchestrator {
           // Its own speak()/out/clear: taken out so the real helpers are used (error-hints.ts)
           if (!inspected.isProse) {
             const copies = dropHelperCopies(executableCode);
-            if (copies.dropped.length > 0) {
+            if (copies.dropped.length > 0 || copies.renamed.length > 0) {
               executableCode = copies.code;
               for (const name of copies.dropped) appendRunLog('imagined', `its own ${name} → the ready-made one: corrected before running`);
+              // Its own speak() holding the whole program: renamed, the real speak() kept for what it says
+              for (const rename of copies.renamed) appendRunLog('imagined', `its own ${rename}() (it held the program): corrected before running`);
+            }
+            // The example reply's own words, copied in: taken out
+            const example = dropCopiedExample(executableCode);
+            if (example.dropped) {
+              executableCode = example.code;
+              appendRunLog('imagined', "the example reply's speak() copied into the program → taken out: corrected before running");
             }
             // Its own requestAnimationFrame(), setTimeout() …: taken out, so the browser's runs
             const browserCopies = dropBrowserCopies(executableCode);
@@ -1598,10 +1622,14 @@ export class ConversationOrchestrator {
             if (this.scheduler.isTurnValid(turnId)) {
               let spokenText = '';
               let spokenTextsHandled = false;
+              // The reply text is what the program said (speak(), console.log(), alert()), as against
+              // Chatty's own words when the program said nothing
+              let programSaid = false;
               const spokenTexts = [...new Set((execResult.spokenTexts ?? []).map((t) => t.trim()))].filter((t) => t && !saidBefore(t));
               if (spokenTexts.length > 0) {
                 spokenText = spokenTexts.join(' ');
                 spokenTextsHandled = true;
+                programSaid = true;
                 // Only speak phrases that were not already streamed / delivered via onSpeak
                 const remaining = new Map(spokenSpeakCounts);
                 for (const t of spokenTexts) {
@@ -1627,6 +1655,7 @@ export class ConversationOrchestrator {
                   typeof execResult.output === 'object'
                     ? JSON.stringify(execResult.output)
                     : String(execResult.output);
+                programSaid = true;
               } else if (execResult.error && options?.autoFix && (options.fixAttempt ?? 0) >= MAX_FIX_TRIES) {
                 // The last fix failed too: say so, and what the user can do
                 this.gaveUp.add(fixedTurnId ?? turnId);
@@ -1645,6 +1674,9 @@ export class ConversationOrchestrator {
                 const added = assistantMsg.canonicalContent.startsWith(shown)
                   ? assistantMsg.canonicalContent.slice(shown.length)
                   : assistantMsg.canonicalContent;
+                // Tagged as the program's (not the model's chat) when it did more than talk; a
+                // talk-only reply is the model chatting and stays untagged
+                if (!isTalkOnly(executableCode)) assistantMsg.fromProgram = programSaid;
                 this.events.onTokenStream?.(turnId, added, assistantMsg.canonicalContent);
                 this.events.onMessageUpdated?.({ ...assistantMsg });
 
@@ -1699,6 +1731,7 @@ export class ConversationOrchestrator {
         phrases: assistantMsg.phrases,
         toolCall: assistantMsg.toolCall,
         fixesTurnId: assistantMsg.fixesTurnId,
+        fromProgram: assistantMsg.fromProgram,
         metrics: turnMetrics,
       });
 

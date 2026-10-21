@@ -173,6 +173,12 @@ export interface ConversationMessage {
   /** What a fix turn shows in the chat in place of its request ("Trying to fix: …") */
   fixNotice?: string;
   rawCode?: string;
+  /**
+   * Set on a reply whose chat text is what a running program said (speak(), console.log(), alert())
+   * when the program did more than talk. `false` on such a reply whose text is Chatty's own
+   * fallback ("I've rendered that on your screen."). Left unset for the model's own chat replies.
+   */
+  fromProgram?: boolean;
   /** A fix turn's reply whose program worked: it stands for this turn's broken program in later prompts */
   fixesTurnId?: string;
   rawLlmOutput?: string;

@@ -12,7 +12,8 @@
  * what was left open. Method names are in method-hints.ts.
  */
 import { parse, tokenizer, type Node } from 'acorn';
-import { applyCorrection, argumentCountFact, methodHint, missingMethod } from './method-hints.ts';
+import { sureMatch } from './fuzzy-match.ts';
+import { applyCorrection, argumentCountFact, methodHint, missingMethod, objectType } from './method-hints.ts';
 
 export interface ErrorHint {
   /** Facts for the fix request */
@@ -131,36 +132,15 @@ function declarations(ast: AnyNode): Declaration[] {
   return found;
 }
 
-function distance(a: string, b: string): number {
-  // Edits between two names, a swap of neighbours counting as one (totla → total)
-  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
-  for (let j = 1; j <= b.length; j++) d[0][j] = j;
-  for (let i = 1; i <= a.length; i++) {
-    for (let j = 1; j <= b.length; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
-      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
-    }
-  }
-  return d[a.length][b.length];
-}
-
 /** The one name that differs from the missing one only in letter case, or null */
 function caseSlip(missing: string, names: string[]): string | null {
   const sameLetters = [...new Set(names)].filter((name) => name !== missing && name.toLowerCase() === missing.toLowerCase());
   return sameLetters.length === 1 ? sameLetters[0] : null;
 }
 
-/** The one name a missing one is surely a slip of, or null */
+/** The one name a missing one is surely a slip of, or null (a plural and its singular are a list and one of its items, not a slip: see fuzzy-match.ts) */
 function slipOf(missing: string, names: string[]): string | null {
-  // A plural and its singular (balls, ball) are a list and one of its items, not a slip
-  const plural = (a: string, b: string) => a.toLowerCase() === `${b.toLowerCase()}s` || a.toLowerCase() === `${b.toLowerCase()}es`;
-  const unique = [...new Set(names)].filter((name) => name !== missing && !plural(missing, name) && !plural(name, missing));
-  const sameCase = caseSlip(missing, unique);
-  if (sameCase) return sameCase;
-  if (missing.length < 4) return null;
-  const close = unique.filter((name) => distance(missing.toLowerCase(), name.toLowerCase()) <= (missing.length >= 7 ? 2 : 1));
-  return close.length === 1 ? close[0] : null;
+  return sureMatch(missing, names);
 }
 
 /** The program with every use of the identifier `from` renamed to `to` (by position, not text) */
@@ -232,7 +212,7 @@ function nothingThere(code: string, error: string, errorLine: number | undefined
   const ids = page?.ids ?? [];
   for (const id of lookups) {
     if (ids.includes(id)) continue;
-    const slip = slipOf(id, ids) ?? (ids.find((other) => other.replace(/[-_]/g, '').toLowerCase() === id.replace(/[-_]/g, '').toLowerCase()) || null);
+    const slip = slipOf(id, ids);
     if (slip) {
       const corrected = code.replace(new RegExp(`(['"\`])#?${id.replace(/[-]/g, '\\-')}\\1`, 'g'), (m) => m.replace(id, slip));
       if (corrected !== code) return { correction: { code: corrected, note: `id '${id}' → '${slip}'` } };
@@ -426,9 +406,33 @@ export function fixCaseSlips(code: string): { code: string; fixed: Array<{ from:
  * console.log(text) }`, `const out = …`) are taken out, so the real helper is used. A function
  * declaration applies to the whole program, so one such definition silently swallows every call.
  */
-export function dropHelperCopies(code: string): { code: string; dropped: string[] } {
+export function dropHelperCopies(code: string): { code: string; dropped: string[]; renamed: string[] } {
   const ast = tryParse(code);
-  if (!ast) return { code, dropped: [] };
+  if (!ast) return { code, dropped: [], renamed: [] };
+  // A copy that takes nothing and holds several statements is the program itself, written as
+  // `const speak = () => { … }`: it is renamed (and its calls without arguments with it), not
+  // dropped; calls that pass something go to the real helper
+  const holdsProgram = (fn: AnyNode | null | undefined) =>
+    !!fn && /Function/.test(fn.type) && ((fn.params as AnyNode[]) ?? []).length === 0 && (fn.body as AnyNode)?.type === 'BlockStatement' && ((fn.body as AnyNode).body as AnyNode[]).length >= 3;
+  for (const statement of ast.body as AnyNode[]) {
+    const declared = statement.type === 'FunctionDeclaration' ? statement : statement.type === 'VariableDeclaration' ? ((statement.declarations as AnyNode[])[0] as AnyNode) : null;
+    const id = declared ? ((declared.id as AnyNode | undefined) ?? null) : null;
+    const fn = statement.type === 'FunctionDeclaration' ? statement : ((declared?.init as AnyNode | undefined) ?? null);
+    if (!id || id.type !== 'Identifier' || !HELPERS.includes(id.name as string) || !holdsProgram(fn)) continue;
+    const name = id.name as string;
+    let main = 'main';
+    for (let i = 2; new RegExp(`(?<![\\w$])${main}(?![\\w$])`).test(code); i++) main = `main${i}`;
+    const edits: Array<{ start: number; end: number }> = [{ start: id.start, end: id.end }];
+    walk(ast, (node) => {
+      const callee = node.callee as AnyNode | undefined;
+      if (node.type === 'CallExpression' && callee?.type === 'Identifier' && callee.name === name && ((node.arguments as AnyNode[]) ?? []).length === 0) edits.push({ start: callee.start, end: callee.end });
+    });
+    let out = code;
+    for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + main + out.slice(e.end);
+    if (!tryParse(out)) break;
+    const rest = dropHelperCopies(out);
+    return { code: rest.code, dropped: rest.dropped, renamed: [`${name} → ${main}`, ...rest.renamed] };
+  }
   const spans: Array<{ start: number; end: number; name: string }> = [];
   for (const statement of ast.body as AnyNode[]) {
     if (statement.type === 'FunctionDeclaration' && HELPERS.includes(((statement.id as AnyNode)?.name as string) ?? '')) {
@@ -451,7 +455,7 @@ export function dropHelperCopies(code: string): { code: string; dropped: string[
     const after = out.slice(end).match(/^[ \t]*\n?/)?.[0].length ?? 0;
     out = out.slice(0, start) + out.slice(end + after);
   }
-  return { code: out, dropped: spans.map((s) => s.name).reverse() };
+  return { code: out, dropped: spans.map((s) => s.name).reverse(), renamed: [] };
 }
 
 /** Names a declaration binds (`x`, `{ a, b: c }` → a, c, `[d, ...e]`) */
@@ -771,6 +775,38 @@ function propertyCalled(code: string, error: string): ErrorHint | null {
   return tryParse(fixed) ? { correction: { code: fixed, note: `${object}.${prop}(value) → ${object}.${prop} = value` } } : null;
 }
 
+/**
+ * A method a browser type doesn't have, with no real method close to it, named like a property
+ * (`gl.shaderType()`), in a statement whose result is unused: it can never do anything, so it is
+ * taken out and the rest runs
+ */
+function unknownCallDropped(code: string, error: string, errorLine?: number): ErrorHint | null {
+  const missing = missingMethod(error);
+  if (!missing || !errorLine) return null;
+  // Only a name that reads like a property (shaderType, getSize, isReady), not like an action
+  // (fillCircle, vanish): an action was meant to happen, and is the model's to fix
+  if (!/^(?:get|is|has)[A-Z]|(?:Type|Name|Size|Count|Length|Id|Value|Data|Info|Mode|State|Status|Index|Width|Height|Color|Format|Kind)$/.test(missing.method)) return null;
+  const type = objectType(code, missing.object);
+  if (!type || type.startsWith('@')) return null;
+  const ast = tryParse(code);
+  if (!ast) return null;
+  let target: AnyNode | null = null;
+  walk(ast, (node) => {
+    if (target || node.type !== 'ExpressionStatement' || (node.loc as { start: { line: number } } | undefined)?.start.line !== errorLine) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const call = node.expression as any;
+    if (call.type !== 'CallExpression' || call.callee.type !== 'MemberExpression' || call.callee.computed) return;
+    if (call.callee.property.name !== missing.method || code.slice(call.callee.object.start, call.callee.object.end) !== missing.object) return;
+    target = node;
+  });
+  if (!target) return null;
+  const { start, end } = target as AnyNode;
+  const fixed = code.slice(0, start) + code.slice(end);
+  return tryParse(fixed)
+    ? { correction: { code: fixed, note: `${missing.object}.${missing.method}() doesn't exist and its result isn't used → taken out` } }
+    : null;
+}
+
 /** `setValueAtTime(value)` without its time (the browser needs two): 0, a time already past, sets it now */
 function audioParamTime(code: string, error: string): ErrorHint | null {
   if (!/'setValueAtTime' on 'AudioParam': 2 arguments required/.test(error)) return null;
@@ -886,15 +922,11 @@ export function fixKeySlips(code: string): { code: string; fixed: Array<{ object
   visit(ast, null, '');
   const keyOf = (p: { type: string; key?: { type: string; name?: string; value?: unknown }; computed?: boolean }) =>
     p.type === 'Property' && !p.computed ? (p.key!.type === 'Identifier' ? p.key!.name! : typeof p.key!.value === 'string' ? (p.key!.value as string) : null) : null;
-  const norm = (k: string) => k.toLowerCase().replace(/[_-]/g, '');
-  const close = (wanted: string, keys: string[]) =>
-    keys.filter(
-      (k) =>
-        norm(k) === norm(wanted) ||
-        k === `${wanted}s` ||
-        wanted === `${k}s` ||
-        (wanted.length >= 4 && distance(wanted.toLowerCase(), k.toLowerCase()) <= (wanted.length >= 7 ? 2 : 1))
-    );
+  // An object's keys: a plural for its singular counts as a slip (sounds.drum for drums)
+  const close = (wanted: string, keys: string[]) => {
+    const match = sureMatch(wanted, keys, { plural: true });
+    return match ? [match] : [];
+  };
   const edits: Array<{ start: number; end: number; text: string }> = [];
   const fixed: Array<{ object: string; from: string; to: string }> = [];
   for (const { node: decl } of nodes) {
@@ -999,7 +1031,7 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
             note: `${method.correction.object}.${method.correction.from}() → ${method.correction.object}.${method.correction.to}()`,
           },
         }
-      : { text: method.text };
+      : (unknownCallDropped(code, error, errorLine) ?? { text: method.text });
   }
   const found = argumentCountFacts(code, error, errorLine) ?? notDefined(code, error, errorLine, page) ?? nothingThere(code, error, errorLine, page) ?? leftOpen(code, error) ?? tooEarly(code, error, errorLine);
   if (found?.correction) return found;

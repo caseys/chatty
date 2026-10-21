@@ -776,7 +776,8 @@ export class MinimalVoiceApp {
     target: HTMLElement,
     content: string,
     toolCall?: ConversationMessage['toolCall'],
-    isStreaming = false
+    isStreaming = false,
+    fromProgram = false
   ): void {
     target.innerHTML = '';
 
@@ -822,6 +823,13 @@ export class MinimalVoiceApp {
     }
 
     if (displayText) {
+      // What a running program said (not the chat model) is marked as the program's
+      if (fromProgram) {
+        const source = document.createElement('div');
+        source.className = 'bubble-source';
+        source.textContent = 'program';
+        target.appendChild(source);
+      }
       const textDiv = document.createElement('div');
       textDiv.className = 'assistant-text-content';
       textDiv.textContent = displayText;
@@ -937,7 +945,7 @@ export class MinimalVoiceApp {
   private renderAssistantMessage(msg: ConversationMessage): void {
     const bubble = this.bubbles.get(msg.id) ?? this.bubbleForTurn(msg.turnId);
     this.bubbles.set(msg.id, bubble);
-    this.renderAssistantOutput(bubble, msg.canonicalContent, msg.toolCall);
+    this.renderAssistantOutput(bubble, msg.canonicalContent, msg.toolCall, false, msg.fromProgram);
   }
 
   /**

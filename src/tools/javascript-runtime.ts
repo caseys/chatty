@@ -10,6 +10,7 @@ import { loopProtect } from './loop-protect.ts';
 import { playNotesHelper } from './music-tool.ts';
 import { fetchWikipediaSummary } from './web-tools.ts';
 import { closeCutOff, type StandIn } from '../core/error-hints.ts';
+import { sureMatch } from '../core/fuzzy-match.ts';
 import { elementKinds } from './element-kinds.ts';
 
 /**
@@ -2249,21 +2250,11 @@ export class JavascriptRuntime {
     const KIND_STAND_IN = { canvas: 'canvas', field: 'input', dialog: 'dialog' };
     // An id one slip from an id on the page ('startbutton' for 'startButton', 'start_btn' for
     // 'start-btn') means that element, not a new empty one
-    function sameIdLetters(id) { return id.replace(/[-_]/g, '').toLowerCase(); }
-    function oneEditApart(a, b) {
-      if (Math.abs(a.length - b.length) > 1) return false;
-      let i = 0;
-      while (i < a.length && i < b.length && a[i] === b[i]) i++;
-      return a.slice(i + 1) === b.slice(i + 1) || a.slice(i) === b.slice(i + 1) || a.slice(i + 1) === b.slice(i) ||
-        (a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2));
-    }
+    // (Chatty's shared name matcher, the same rules as every repair: fuzzy-match.ts)
+    const sureMatch = ${sureMatch.toString()};
     function slipOfId(id) {
       const ids = [...document.querySelectorAll('[id]')].map((el) => el.id).filter((other) => other && other !== 'root' && !placeholders.has(other));
-      const same = ids.filter((other) => sameIdLetters(other) === sameIdLetters(id));
-      if (same.length === 1) return same[0];
-      if (id.length < 5) return null;
-      const close = ids.filter((other) => oneEditApart(other.toLowerCase(), id.toLowerCase()));
-      return close.length === 1 ? close[0] : null;
+      return sureMatch(id, ids);
     }
     document.getElementById = (id) => {
       const found = findElementById(id);
@@ -2297,6 +2288,17 @@ export class JavascriptRuntime {
         made.setAttribute('height', '300');
       }
       made.id = id;
+      // A sound it never made (an <audio> with no file): play() plays a short note instead of
+      // failing, pause() and load() do nothing
+      if (kind === 'media') {
+        made.play = () => {
+          imagined("getElementById('" + id + "').play(): no such sound → a short note");
+          try { forgivingOut.send({ notes: 'C5', duration: 300 }); } catch {}
+          return Promise.resolve();
+        };
+        made.pause = () => {};
+        made.load = () => {};
+      }
       document.body.appendChild(made);
       placeholders.set(id, made);
       return made;

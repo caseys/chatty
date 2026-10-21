@@ -240,8 +240,8 @@ describe("Fable's repairs from the logs", async () => {
   it('leaves a literal alone once it is changed or handed elsewhere', () => {
     expect(fixKeySlips("const s = { drums: 1 };\ns.drum = 2;\nplay(s.drum);").fixed).toEqual([]);
     expect(fixKeySlips("const s = { drums: 1 };\nfill(s);\nplay(s.drum);").fixed).toEqual([]);
-    // Two close keys: not sure which
-    expect(fixKeySlips("const s = { drums: 1, drumz: 2 };\nplay(s.drum);").fixed).toEqual([]);
+    // Two keys equally close: not sure which
+    expect(fixKeySlips("const s = { tone: 1, bone: 2 };\nplay(s.cone);").fixed).toEqual([]);
   });
 
   it('setValueAtTime without a time gets 0', () => {
@@ -268,5 +268,74 @@ describe("Fable's repairs from the logs", async () => {
     const code = 'let sound;\nsound.stop();';
     const hint = errorHint(code, "Cannot read properties of undefined (reading 'stop')", 2)!;
     expect(hint.correction!.code.split('\n')[1]).toBe('sound?.stop?.();');
+  });
+});
+
+describe('from the tip calculator log', async () => {
+  const { dropCopiedExample } = await import('../src/core/orchestrator.ts');
+  it("takes the example reply's words out of a program that copied them", () => {
+    const code = 'document.body.innerHTML = "<p>Tip</p>";\nspeak("Hi! What would you like me to make?");\nspeak("Enter the bill.");';
+    const { code: out, dropped } = dropCopiedExample(code);
+    expect(dropped).toBe(true);
+    expect(out).toBe('document.body.innerHTML = "<p>Tip</p>";\nspeak("Enter the bill.");');
+    // A reply that is only the greeting stays (a greeting gets a greeting)
+    expect(dropCopiedExample('speak("Hi! What would you like me to make?");').dropped).toBe(false);
+  });
+
+  it('offers no element where text goes', () => {
+    const code = 'const bill = document.getElementById("bill");\nconst total = 5;\nresult.innerHTML = `${input + " and "}`;';
+    const blank = findBlank(code, 'input is not defined', 3)!;
+    const choices = blankChoices(code, blank, { ids: ['bill'] });
+    expect(choices).not.toContain('bill');
+    expect(choices).toContain('total');
+  });
+});
+
+describe("Fable's smaller repairs", async () => {
+  const { errorHint, dropHelperCopies } = await import('../src/core/error-hints.ts');
+
+  it('offers the looped item’s key for a name it never declared', () => {
+    const code = "const tracks = [{ note: 'C4', time: 0 }, { note: 'E4', time: 500 }];\nfor (const track of tracks) {\n  play(track.note, time);\n}";
+    const blank = findBlank(code, "Can't find variable: time", 3)!;
+    expect(blankChoices(code, blank, { ids: [] })[0]).toBe('track.time');
+  });
+
+  it('renames a helper copy that holds the whole program, keeping the real helper for what it says', () => {
+    const code = 'const speak = () => {\n  const bpm = 100;\n  play(bpm);\n  speak("Playing.");\n};\nspeak();';
+    const out = dropHelperCopies(code);
+    expect(out.renamed).toEqual(['speak → main']);
+    expect(out.code).toContain('const main = () => {');
+    expect(out.code).toContain('speak("Playing.");');
+    expect(out.code.trim().endsWith('main();')).toBe(true);
+  });
+
+  it('takes out a call to a method a browser type lacks, when nothing uses its result', () => {
+    const code = 'const gl = document.createElement("canvas").getContext("webgl");\ngl.shaderType(1);\nspeak("Ready.");';
+    const hint = errorHint(code, 'gl.shaderType is not a function', 2)!;
+    expect(hint.correction!.code).not.toContain('shaderType');
+    // A name that says it does something stays with the model
+    const draw = 'const ctx = document.createElement("canvas").getContext("2d");\nctx.fillCircle(5, 5, 3);';
+    expect(errorHint(draw, 'ctx.fillCircle is not a function', 2)?.correction).toBeUndefined();
+  });
+});
+
+describe('the shared name matcher', async () => {
+  const { sureMatch, closestNames } = await import('../src/core/fuzzy-match.ts');
+  it('is sure of case, _ and - slips, words in another order, and close spellings with the same first letter', () => {
+    expect(sureMatch('getcontext', ['getContext', 'getImageData'])).toBe('getContext');
+    expect(sureMatch('fill_rect', ['fillRect', 'fillText'])).toBe('fillRect');
+    expect(sureMatch('colorBg', ['bgColor', 'color'])).toBe('bgColor');
+    expect(sureMatch('totla', ['total', 'title'])).toBe('total');
+    expect(sureMatch('oclor', ['color'])).toBe('color');
+  });
+  it('is not sure of a different first letter, a 3-letter word, a tie, or a list for its item', () => {
+    expect(sureMatch('hello', ['jello'])).toBeNull();
+    expect(sureMatch('zap', ['Map'])).toBeNull();
+    expect(sureMatch('cone', ['cane', 'core'])).toBeNull();
+    expect(sureMatch('balls', ['ball'])).toBeNull();
+    expect(sureMatch('drum', ['drums'], { plural: true })).toBe('drums');
+  });
+  it('ranks hints by spelling, shared words and the first letter', () => {
+    expect(closestNames('fillCircle', ['arc', 'fillRect', 'clearRect', 'fill'])[0]).toMatch(/^fill/);
   });
 });
