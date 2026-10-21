@@ -140,14 +140,18 @@ export function repetitionCutIndex(text: string): number {
   if (inline && inline.index !== undefined && /[A-Za-z]/.test(inline[1])) {
     return start + inline.index + inline[1].length;
   }
-  // A block of 2–12 lines written three times in a row (the same few lines of code, a paragraph)
-  const blockStart = Math.max(0, text.length - 2400);
+  // A block of lines written again and again in a row (the same few lines of code, a paragraph):
+  // three times for a short block, twice for one of 8 lines or more (up to 40, two functions taking
+  // turns), which ordinary code never repeats line for line
+  const blockStart = Math.max(0, text.length - 8000);
   const done = text.slice(blockStart).split('\n').slice(0, -1); // the last line may still be arriving
-  for (let k = 2; k <= 12 && done.length >= k * 3; k++) {
+  for (let k = 2; k <= 40; k++) {
+    const copies = k >= 8 ? 2 : 3;
+    if (done.length < k * copies) break;
     // Where the lines start repeating every k lines
     let p = done.length - k;
     while (p > 0 && done[p - 1] === done[p - 1 + k]) p--;
-    if (done.length - p < k * 3) continue;
+    if (done.length - p < k * copies) continue;
     const block = done.slice(p, p + k).join('\n');
     if (block.replace(/\s/g, '').length < 20 || !/[A-Za-z]/.test(block)) continue;
     // Keep the first copy
@@ -400,6 +404,17 @@ async function unusableFix(
   if (stripComments(fixedProgram).replace(/\s+/g, '') === stripComments(original).replace(/\s+/g, '')) return 'unchanged';
   if ((await syntaxErrorLine(code)) !== undefined) return 'incomplete';
   return null;
+}
+
+/**
+ * How long a fix reply may be: about twice what it replaces, plus room for its Cause line (a
+ * small model can otherwise ramble or repeat until the output limit, a minute on a phone)
+ */
+export function fixReplyTokens(program: string, line: number | undefined, block: { start: number; end: number } | undefined, max: number): number {
+  const lines = program.split('\n');
+  const replaced = block ? lines.slice(block.start - 1, block.end).join('\n') : line ? (lines[line - 1] ?? '') : program;
+  // About 3 characters a token for code
+  return Math.min(max, Math.max(160, Math.round((replaced.length / 3) * 2) + 120));
 }
 
 /** A reply that left nothing to run */
@@ -1073,7 +1088,9 @@ export class ConversationOrchestrator {
           systemPrompt,
           messages,
           temperature: 0.1,
-          maxOutputTokens: generationProvider.maxOutputTokens,
+          maxOutputTokens: options?.autoFix && options.autoFix !== NO_PROGRAM_YET
+            ? fixReplyTokens(options.autoFix, fixLine, options.fixBlock, generationProvider.maxOutputTokens)
+            : generationProvider.maxOutputTokens,
           // A first fix wants the one most likely line; each later attempt samples differently
           ...(options?.autoFix
             ? reask
@@ -1106,8 +1123,9 @@ export class ConversationOrchestrator {
             }
             const currentFull = rawAccumulatedTokens;
             // The code panel shows only code: the fenced part once a fence starts. A fix's reply
-            // stays out of it: the panel keeps the program until a fix is used
-            if (!options?.autoFix) this.events.onRawOutput?.(turnId, codeView(currentFull));
+            // shows there too while it comes (a slow fix would look stalled otherwise); the program
+            // comes back if the fix isn't used
+            this.events.onRawOutput?.(turnId, codeView(currentFull));
             // In speech mode, a reply that turns out to be a program (more than talk) says so once
             if (!announcedCoding && !options?.autoFix && (CODING_LINE.test(currentFull) || STREAM_MARKUP.test(currentFull))) {
               announcedCoding = true;
@@ -1299,7 +1317,12 @@ export class ConversationOrchestrator {
             }
           }
           if (fixedProgram !== rawContent && !options?.autoFix) this.events.onRawOutput?.(turnId, fixedProgram);
-          const inspected = inspectExecutableCode(fixedProgram);
+          // (a fix reply cut off is judged incomplete instead: closing it could cut its program short)
+          const inspected = inspectExecutableCode(fixedProgram, { closeCutOff: !options?.autoFix });
+          if (inspected.cutOff) {
+            const { dropped, closed } = inspected.cutOff;
+            appendRunLog('imagined', `the reply was cut off: ${dropped ? `its unfinished last ${dropped === 1 ? 'line' : `${dropped} lines`} removed and ` : ''}${closed} open block${closed === 1 ? '' : 's'} closed: corrected before running`);
+          }
           // Comments go before it runs (and before it enters the history); a fix's program
           // already came without them
           // Trimmed like the runtime trims it, so error lines match the program kept here
@@ -1377,6 +1400,7 @@ export class ConversationOrchestrator {
 
           if (lostProgram || unchangedProgram || incompleteProgram || repeatedProgram) {
             if (options?.autoFix) this.finishFixLog(lostProgram ? 'lost' : unchangedProgram || repeatedProgram ? 'unchanged' : 'incomplete');
+            if (options?.autoFix && options.autoFix !== NO_PROGRAM_YET) this.events.onRawOutput?.(turnId, options.autoFix);
             const failed = this.lastRun;
             const why = UNUSABLE_WHY[problem!];
             appendRunLog('discarded', `// ${why}, so it was not run. The model replied:\n${rawContent}`);

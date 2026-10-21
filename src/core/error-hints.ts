@@ -53,6 +53,41 @@ function tryParse(code: string): AnyNode | null {
   }
 }
 
+/**
+ * A reply cut off before its end (stopped for repeating itself, or at the output limit): the
+ * unfinished last lines go and the blocks still open are closed, when that makes it parse. Only
+ * for a program that fails in its last line; anything else is the fix's to judge.
+ */
+export function closeCutOff(code: string): { code: string; dropped: number; closed: number } | null {
+  try {
+    parse(code, PARSE_OPTIONS);
+    return null;
+  } catch (err) {
+    const pos = (err as { pos?: number }).pos;
+    // At the end, or inside its last line (a string or comment cut off there)
+    if (typeof pos !== 'number' || code.slice(pos).trim().includes('\n')) return null;
+  }
+  const lines = code.replace(/\s+$/, '').split('\n');
+  for (let dropped = 0; dropped <= 8 && dropped < lines.length; dropped++) {
+    const kept = lines.slice(0, lines.length - dropped).join('\n');
+    const open: string[] = [];
+    try {
+      for (const token of tokenizer(kept, PARSE_OPTIONS)) {
+        const label = token.type.label;
+        if (label === '{' || label === '(' || label === '[' || label === '${') open.push(label);
+        else if (label === '}' || label === ')' || label === ']') open.pop();
+      }
+    } catch {
+      continue; // cut inside a string or comment: drop another line
+    }
+    // Only blocks are closed: a cut call or array (`ctx.arc(100, 100`) loses its line instead
+    if (open.length === 0 || open.some((o) => o !== '{')) continue;
+    const closed = `${kept}\n${open.map(() => '}').join('\n')}`;
+    if (tryParse(closed)) return { code: closed, dropped, closed: open.length };
+  }
+  return null;
+}
+
 /** Every node, with the functions it is inside (innermost last) */
 function walk(node: AnyNode, visit: (node: AnyNode, functions: AnyNode[]) => void, functions: AnyNode[] = []): void {
   visit(node, functions);

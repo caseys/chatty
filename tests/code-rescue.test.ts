@@ -50,8 +50,9 @@ describe('running code the model wrapped or forgot to call', () => {
   it('runs a cut-off fenced program whole, blank lines and all', () => {
     const body = 'const ctx = 1;\n\nfunction play(note) {\n    const o = 1;\n\n    o.type = 2;\n}\n\nfunction loop() {\n    play();\n\n    id = setInterval(loop, 1000); // Loop';
     const code = inspectExecutableCode('speak("Here is a loop.");\n```javascript\n' + body).code;
-    // Never empty, and none of the program is said aloud: the syntax error goes to the fix
-    expect(code).toBe('speak("Here is a loop.");\n' + body);
+    // Never empty, and none of the program is said aloud. Cut inside loop() after a whole line:
+    // its block is closed
+    expect(code).toBe('speak("Here is a loop.");\n' + body + '\n}');
   });
 
   it('runs a page written into innerHTML whose template string was never closed', () => {

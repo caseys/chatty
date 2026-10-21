@@ -9,7 +9,7 @@ import type { LlmRuntimeProvider, ToolDefinition } from '../types/index.ts';
 import { loopProtect } from './loop-protect.ts';
 import { playNotesHelper } from './music-tool.ts';
 import { fetchWikipediaSummary } from './web-tools.ts';
-import type { StandIn } from '../core/error-hints.ts';
+import { closeCutOff, type StandIn } from '../core/error-hints.ts';
 import { elementKinds } from './element-kinds.ts';
 
 /**
@@ -126,6 +126,8 @@ export function parseCodingAgentOutput(text: string): {
 export interface PreparedExecutableCode {
   code: string;
   isProse: boolean;
+  /** The reply was cut off before its end: its unfinished last lines removed, its open blocks closed */
+  cutOff?: { dropped: number; closed: number };
 }
 
 /**
@@ -650,7 +652,7 @@ export function withoutMarkdownLeftovers(text: string): string {
     .join('\n');
 }
 
-export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
+export function inspectExecutableCode(rawText: string, options: { closeCutOff?: boolean } = {}): PreparedExecutableCode {
   let cleaned = normalizeFences((rawText || '').trim());
 
   // HTML instead of JavaScript (a whole page for "an app", or bare <canvas> + <script>): its
@@ -725,7 +727,18 @@ export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
   // out, what is left is already the program: it runs whole, and a syntax error goes to the fix
   const program = hadFences ? [{ kind: 'code' as const, text: cleaned }] : extractProgram(cleaned);
   if (program) {
-    return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(withTalk(program))), isProse: false };
+    // A reply cut off before its end (stopped repeating, or the output limit) is closed first, so
+    // its functions are called after it, not inside its last open block
+    let cutOff: PreparedExecutableCode['cutOff'];
+    for (const part of program) {
+      if (part.kind !== 'code' || options.closeCutOff === false) continue;
+      const closed = closeCutOff(part.text);
+      if (closed) {
+        part.text = closed.code;
+        cutOff = { dropped: closed.dropped, closed: closed.closed };
+      }
+    }
+    return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(withTalk(program))), isProse: false, ...(cutOff ? { cutOff } : {}) };
   }
 
   // 5. If it's a simple arithmetic expression or number (e.g. 42 or 3 * 7), compute and speak it
