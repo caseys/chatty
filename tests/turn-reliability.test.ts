@@ -682,7 +682,7 @@ describe('a reply that only talks', () => {
     await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
     expect(llm.turns.length).toBe(2);
     expect(llm.turns[1].retry).toBe(1);
-    expect(llm.turns[1].messages.at(-1)!.content).toBe('Play a music loop\n(Write the JavaScript program that does this, then one speak() sentence about it.)');
+    expect(llm.turns[1].messages.at(-1)!.content).toBe('Play a music loop\n(Write a simple, complete JavaScript program that does this, then one speak() sentence telling the user what it does.)');
     expect(executed).toEqual(['const x = 1;\nspeak("Here it is.");']);
   });
 

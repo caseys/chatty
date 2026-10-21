@@ -219,11 +219,11 @@ const FACTS_REQUEST = { test: (request: string) => FACTS_WORDS.test(request) && 
  * same prompt each turn.
  */
 const PROMPT_RULES: ReadonlyArray<{ text: string; when?: { test(request: string): boolean } }> = [
-  { text: '- ONLY return executable JavaScript: the shortest program that fully does what was asked (draw, build, play, compute, look up).' },
+  { text: '- ONLY return executable JavaScript: a simple, elegant program that does what was asked (draw, build, play, compute, look up) with minimal code and complete functionality.' },
   { text: '- All messages to the user go through speak(text). Calculate all results using JavaScript logic and put them in its template string.' },
   { text: '- What you add to document.body appears in a card on screen.', when: VISUAL_REQUEST },
   { text: '- Use HTML and CSS for interfaces: buttons, forms, tables, dashboards and widgets.', when: INTERFACE_REQUEST },
-  { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations.', when: DRAWING_REQUEST },
+  { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations. For motion, keep each thing\'s position and speed in variables, and move and redraw it in one requestAnimationFrame loop.', when: DRAWING_REQUEST },
   { text: '- For 3D, THREE (three.js) is ready to use: render with a THREE.WebGLRenderer, whose canvas you add to document.body.', when: THREE_D_REQUEST },
   { text: '- <svg> works for diagrams and icons.', when: DIAGRAM_REQUEST },
   { text: "- Sound: music and instruments play through Web MIDI. Get an output with const midi = await navigator.requestMIDIAccess() and const output = [...midi.outputs.values()][0]. Choose a General MIDI instrument for a channel with output.send([0xC0 + channel, program]) (0 piano, 19 organ, 24 guitar, 32 bass, 40 violin, 48 strings, 56 trumpet, 65 sax, 73 flute). Play a note with output.send([0x90 + channel, note, velocity], time) and end it with output.send([0x80 + channel, note, 0], time + length) (note 60 is middle C; times are performance.now() ms). Drums are channel 9: note 36 kick, 38 snare, 42 hi-hat. At the top, declare const bpm (beats per minute: 60 to 180), beat = 60000 / bpm (one beat in ms) and start = performance.now() + 100. To loop, put one pass of notes in a function that schedules them from a start time, call it, then call it again with setInterval every pass, moving the start time on by the pass length. Beeps, tones and sound effects use Web Audio (new AudioContext(), oscillators, gain, each connected to its destination).", when: SOUND_REQUEST },
@@ -268,7 +268,7 @@ function codeView(text: string): string {
 const ACTION_REQUEST =
   /\b(?:play|draw|make|build|create|animate|code|program|design|generate|paint|sketch|render|chart|plot|graph|count ?down|timer|stopwatch|calculator|converter|simulate|game|app)\b/i;
 /** Goes with the retry only (not into history) */
-const TALK_RETRY_NOTE = '\n(Write the JavaScript program that does this, then one speak() sentence about it.)';
+const TALK_RETRY_NOTE = '\n(Write a simple, complete JavaScript program that does this, then one speak() sentence telling the user what it does.)';
 
 /** How many times the model may try to fix one request's program */
 /**
@@ -2505,7 +2505,7 @@ export class ConversationOrchestrator {
     // The format, restated after everything else
     const tail = this.phonePipeline
       ? []
-      : ['Reply with one JavaScript program: the code that does the request, then one speak() sentence about it.'];
+      : ['Reply with one simple, complete JavaScript program for the request, then one speak() sentence telling the user what it does.'];
     return { head, tail };
   }
 
