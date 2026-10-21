@@ -787,6 +787,8 @@ export class ConversationOrchestrator {
       fixAttempt?: number;
       /** Errors of the earlier programs for this request (see earlierErrors) */
       errorHistory?: FixError[];
+      /** The program asked for after a reply that only talked: not one of the tries, no note */
+      freeRetry?: boolean;
     }
   ): Promise<ConversationMessage | null> {
     // Stage 1: Capture and normalize input
@@ -845,7 +847,7 @@ export class ConversationOrchestrator {
       canonicalContent: normalized,
       rawTranscript: options?.isVoiceTranscript ? rawTranscript : undefined,
       ...(options?.autoFix
-        ? { autoFix: true, fixNotice: fixNote(options.fixAttempt ?? 1, this.lastRun?.error ?? 'the error') }
+        ? { autoFix: true, ...(options.freeRetry ? {} : { fixNotice: fixNote(options.fixAttempt ?? 1, this.lastRun?.error ?? 'the error') }) }
         : {}),
       timestamp: Date.now(),
     };
@@ -1835,6 +1837,13 @@ export class ConversationOrchestrator {
     if (!run || run.turnId !== turnId || !run.error || run.fixRequested) return;
     if (this.scheduler.getActiveTurnId()) return; // the user has already moved on
     if (this.gaveUp.has(this.requestKey(run))) return; // Chatty has said it gave up: nothing follows
+    // The reply to the request only talked (or had nothing to run): the program is asked for once
+    // more, reminded what speak() is for, outside the tries
+    if (!run.isAutoFix && (!run.code.trim() || isTalkOnly(run.code))) {
+      run.fixRequested = true;
+      this.askForProgram(run);
+      return;
+    }
     // A line past the program's end came from somewhere else (the sandbox's own code): no line
     if (run.errorLine && run.errorLine > run.code.split('\n').length) run.errorLine = undefined;
     // A sure slip (a method's wrong case, a typo of a declared name, an element id one slip
@@ -1928,6 +1937,26 @@ export class ConversationOrchestrator {
     } finally {
       this.lastTrialEnd = Date.now();
     }
+  }
+
+  /** After a reply that only talked: the program, asked for once, as none of the tries */
+  private askForProgram(run: NonNullable<typeof this.lastRun>): void {
+    appendRunLog('retry', 'the reply only talked: asking for the program (not one of the tries)');
+    const ask = [
+      'ONLY OUTPUT JAVASCRIPT. USE speak() TO CHAT WITH THE USER, AND WRITE THE PROGRAM THAT DOES THE REQUEST.',
+      `Write the complete JavaScript program for: ${run.task}`,
+      'Reply with the complete program, then one speak() sentence telling the user what it does.',
+    ].join('\n');
+    void settle(AFTER_HEAVY_MS).then(() => {
+      if (this.scheduler.getActiveTurnId()) return;
+      return this.submitUserInput(ask, {
+        autoFix: NO_PROGRAM_YET,
+        fixAttempt: 0,
+        errorHistory: withError(run),
+        fixWhole: true,
+        freeRetry: true,
+      });
+    });
   }
 
   /**

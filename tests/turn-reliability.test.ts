@@ -1342,7 +1342,7 @@ describe('speech mode says what is happening', () => {
 });
 
 describe('a reply with no program in it', () => {
-  it('asks for the whole program again, as a fix turn (never shown as the user’s words)', async () => {
+  it('asks for the whole program again, reminded to output only JavaScript, outside the tries and never shown as the user’s words', async () => {
     const llm = new QueueLlm(['```js\n// Plays a loop\n```', '// Cause: no program\nconst ctx = new AudioContext();\nconst osc = ctx.createOscillator();\nosc.connect(ctx.destination);\nosc.start();\nspeak("Done.");']);
     llm.modelId = 'qwen3-0.6b';
     const { runtime, executed } = fakeRuntime([{}, {}]);
@@ -1351,7 +1351,9 @@ describe('a reply with no program in it', () => {
     await vi.waitFor(() => expect(llm.turns.length).toBe(2), { timeout: 10000 });
     const ask = llm.turns[1].messages.at(-1)!.content;
     expect(ask).toContain('Write the complete JavaScript program for: Play a looped melody');
-    expect(ask).toContain('The last reply had no program that does it');
+    expect(ask.split('\n')[0]).toBe('ONLY OUTPUT JAVASCRIPT. USE speak() TO CHAT WITH THE USER, AND WRITE THE PROGRAM THAT DOES THE REQUEST.');
+    // Not one of the five tries, and no "Fixing" note in the chat
+    expect(orchestrator.memoryStore.getMessages().some((m) => m.fixNotice)).toBe(false);
     expect(llm.turns[1].systemPrompt).not.toBe(FIX_SYSTEM_PROMPT);
     expect(ask).not.toContain('```');
     const asked = orchestrator.memoryStore.getMessages().filter((m) => m.role === 'user');
