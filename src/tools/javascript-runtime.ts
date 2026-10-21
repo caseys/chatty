@@ -2254,6 +2254,33 @@ export class JavascriptRuntime {
         noteRejected(label + '.' + key + '(' + args.map((a) => (typeof a === 'number' ? String(a) : typeof a === 'string' ? shown(a.slice(0, 40)) : a === undefined ? 'undefined' : '…')).join(', ') + ') got ' + (bad === undefined ? 'undefined' : shown(typeof bad === 'string' ? bad.slice(0, 40) : bad)) + ': almost surely a bug');
       }
     }
+    // A browser call that throws often says little (Safari: "Type error"): the error gets what the
+    // call was given ("element.appendChild(a string 'Buy milk') failed: …"), so a fix can see it.
+    // The same error, so its line still points at the program
+    function describeValue(v) {
+      if (v === null) return 'null';
+      if (v === undefined) return 'undefined';
+      if (typeof v === 'string') return 'a string ' + shown(v.slice(0, 30));
+      if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+      if (typeof v === 'function') return 'a function';
+      if (Array.isArray(v)) return 'a list of ' + v.length;
+      try {
+        if (v instanceof Element) return 'a <' + v.tagName.toLowerCase() + '> element';
+        const name = v.constructor && v.constructor.name;
+        return name && name !== 'Object' ? 'a ' + name : 'an object';
+      } catch {
+        return 'an object';
+      }
+    }
+    function explained(err, call) {
+      try {
+        const kind = err && (err instanceof TypeError || (typeof DOMException !== 'undefined' && err instanceof DOMException));
+        if (!kind || err.__chattyExplained) return err;
+        Object.defineProperty(err, 'message', { value: call + ' failed: ' + err.message, configurable: true, writable: true });
+        Object.defineProperty(err, '__chattyExplained', { value: true });
+      } catch {}
+      return err;
+    }
     function watchSetters(proto, label) {
       if (!proto) return;
       for (const key of Object.getOwnPropertyNames(proto)) {
@@ -2266,7 +2293,11 @@ export class JavascriptRuntime {
               checkSet(label, key, value);
               value = checkTook(label, key, d, this, value);
             }
-            return d.set.call(this, value);
+            try {
+              return d.set.call(this, value);
+            } catch (err) {
+              throw explained(err, label + '.' + key + ' = ' + describeValue(value));
+            }
           },
         });
       }
@@ -2280,7 +2311,11 @@ export class JavascriptRuntime {
         // arguments, not a rest parameter: past the checking window a call allocates nothing
         proto[key] = function () {
           if (checking) checkCall(label, key, fn.length, Array.prototype.slice.call(arguments));
-          return fn.apply(this, arguments);
+          try {
+            return fn.apply(this, arguments);
+          } catch (err) {
+            throw explained(err, label + '.' + key + '(' + Array.prototype.map.call(arguments, describeValue).join(', ') + ')');
+          }
         };
       }
     }

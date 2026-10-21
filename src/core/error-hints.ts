@@ -14,6 +14,7 @@
 import { parse, tokenizer, type Node } from 'acorn';
 import { sureMatch } from './fuzzy-match.ts';
 import { analyse, isReference, resolve } from './blank-fix.ts';
+import { onlySendsLists, usedAs } from './value-use.ts';
 import { applyCorrection, argumentCountFact, methodHint, missingMethod, objectType } from './method-hints.ts';
 
 export interface ErrorHint {
@@ -764,6 +765,56 @@ function argumentCountFacts(code: string, error: string, errorLine?: number): Er
   return text ? { text } : null;
 }
 
+/** Browser errors that name nothing about the values (Safari's bare "Type error"; Chrome's overloads) */
+const VAGUE_ERROR = /^(?:TypeError:\s*)?Type error\.?$|Overload resolution failed|is not of type '|could not be converted|The provided value is not of type/i;
+
+/**
+ * For an error that names nothing: what each value in the failing call is, from where the
+ * program made it ("Line 40 calls gain.connect(output): output is a page element
+ * (document.getElementById('output')), which never existed")
+ */
+function vagueCallFacts(code: string, error: string, errorLine?: number, page?: PageFacts): string | null {
+  if (!errorLine || !VAGUE_ERROR.test(error)) return null;
+  const ast = tryParse(code);
+  if (!ast) return null;
+  const inits = new Map<string, AnyNode[]>();
+  walk(ast, (node) => {
+    if (node.type === 'VariableDeclarator' && (node.id as AnyNode).type === 'Identifier' && node.init) {
+      const name = (node.id as AnyNode).name as string;
+      inits.set(name, [...(inits.get(name) ?? []), node.init as AnyNode]);
+    }
+  });
+  const missingIds = new Set((page?.standIns ?? []).map((s) => s.id));
+  const describe = (init: AnyNode): string | null => {
+    const text = code.slice(init.start, init.end);
+    const lookup = text.match(/(?:getElementById\(\s*['"`]([^'"`]+)|querySelector\(\s*['"`]#([^'"`]+))/);
+    if (lookup && init.type === 'CallExpression') {
+      const id = lookup[1] ?? lookup[2];
+      return `a page element (${text})${missingIds.has(id) ? ', which never existed' : ''}`;
+    }
+    if (init.type === 'NewExpression') return `a new ${code.slice((init.callee as AnyNode).start, (init.callee as AnyNode).end)}`;
+    if (init.type === 'CallExpression') return `what ${text.length > 60 ? `${text.slice(0, 57)}…` : text} returns`;
+    if (init.type === 'Literal') return `${text} (a ${typeof (init as AnyNode).value})`;
+    if (init.type === 'ArrayExpression') return 'a list';
+    if (init.type === 'ObjectExpression') return 'a plain object';
+    if (/Function/.test(init.type)) return 'a function';
+    return null;
+  };
+  let found: string | null = null;
+  walk(ast, (node) => {
+    if (found || node.type !== 'CallExpression' || lineOf(node) !== errorLine || (node.callee as AnyNode).type !== 'MemberExpression') return;
+    const parts: string[] = [];
+    for (const arg of node.arguments as AnyNode[]) {
+      if (arg.type !== 'Identifier') continue;
+      const made = inits.get(arg.name as string) ?? [];
+      const kinds = [...new Set(made.map(describe))];
+      if (kinds.length === 1 && kinds[0]) parts.push(`${arg.name} is ${kinds[0]}`);
+    }
+    if (parts.length > 0) found = `Line ${errorLine} calls ${code.slice(node.start, node.end)}: ${parts.join('; ')}.`;
+  });
+  return found;
+}
+
 /** Help for a failed program: a correction, or facts for the fix request */
 /** Media members: a program reaching for them wanted sound */
 const SOUND_MEMBER = /^(?:play|pause|load|volume|currentTime|src|muted|loop)$/;
@@ -784,7 +835,24 @@ function standInElement(code: string, error: string, errorLine: number | undefin
     const member = error.match(/\.([A-Za-z_$][\w$]*)'? is (?:not a function|undefined)/)?.[1];
     const call = !!member && /is not a function/.test(error);
     const stoodIn = made === 'empty' ? `an empty <${tag}> stood in for it` : `the <${tag}> it made last stood in for it`;
-    let text = `#${id} was never created: the program has no element with that id, so ${stoodIn}${member ? ` (a <${tag}> has no ${member}${call ? '()' : ''})` : ''}. Create the element it needs with document.createElement and give it id "${id}".`;
+    const missing = `#${id} was never created: the program has no element with that id, so ${stoodIn}${member ? ` (a <${tag}> has no ${member}${call ? '()' : ''})` : ''}.`;
+    // Looked up as an element but used as something else (a MIDI output, an audio node, a
+    // drawing context): that is the mistake, not a missing element (value-use.ts)
+    const uses = holders.map((h) => usedAs(code, h)).filter((u): u is NonNullable<typeof u> => !!u);
+    if (uses.length > 0) {
+      // Used only as send([…]): surely the MIDI output, and Chatty has one ready (out)
+      if (holders.length > 0 && holders.every((h) => onlySendsLists(code, h))) {
+        const swapped = code.replace(
+          new RegExp(`((?:const|let|var)\\s+(?:${holders.join('|')})\\s*=\\s*)(?:document\\s*\\.\\s*)?${lookup}`, 'g'),
+          '$1out'
+        );
+        if (swapped !== code && parseErrorLine(swapped) === 0) {
+          return { correction: { code: swapped, note: `#${id} was used only as a MIDI output (send) → the ready MIDI output, out` } };
+        }
+      }
+      return { text: `${missing} ${uses[0].text}` };
+    }
+    let text = `${missing} Create the element it needs with document.createElement and give it id "${id}".`;
     if (member && SOUND_MEMBER.test(member)) text += ' Notes play through a Web MIDI output: output.send([0x90 + channel, note, velocity], time), from (await navigator.requestMIDIAccess()).outputs.';
     return { text };
   }
@@ -1292,7 +1360,9 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
   const method = methodHint(code, error);
   // A sure slip of a real member (getcontext) is corrected; otherwise a stand-in explains the error
   const standIn = method?.correction ? null : standInElement(code, error, errorLine, page);
-  if (standIn) return standIn;
+  // An error that names nothing gets what the failing call was given
+  const vague = vagueCallFacts(code, error, errorLine, page);
+  if (standIn) return standIn.text && vague ? { text: `${standIn.text} ${vague}` } : standIn;
   if (method) {
     return method.correction
       ? {
@@ -1311,6 +1381,6 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
   if (nothingToCall) return nothingToCall;
   // Calls of the failing function that pass too few values, added to whatever else was found
   const calls = shortCalls(code, errorLine);
-  const text = [found?.text, calls].filter(Boolean).join(' ');
+  const text = [found?.text, vague, calls].filter(Boolean).join(' ');
   return text ? { text } : null;
 }

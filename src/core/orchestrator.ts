@@ -417,6 +417,48 @@ export function normalizedError(error: string): string {
 type FixError = { attempt: number; error: string; line?: number };
 
 /**
+ * What a request needs a program to go on doing, each with the browser calls that do it. A fix
+ * that takes out every call of a kind the request asks for, and the program had, can't be what
+ * was asked: it makes the error go away by deleting the part that failed (a music program
+ * "fixed" into a <div>). A fix that keeps any of them is judged by running it, as before.
+ */
+const CAPABILITIES: ReadonlyArray<{ name: string; asks: (request: string) => boolean; calls: RegExp }> = [
+  {
+    name: 'sound',
+    asks: (r) => SOUND_WORDS_REQUEST.test(r),
+    calls: /\.send\s*\(|\bAudioContext\b|\.createOscillator\s*\(|\brequestMIDIAccess\b|\bplayNotes\s*\(|\.play\s*\(|\bnew\s+Audio\s*\(|\bspeechSynthesis\b/,
+  },
+  {
+    name: 'drawing',
+    asks: (r) => DRAWING_REQUEST.test(r) || THREE_D_REQUEST.test(r) || DIAGRAM_REQUEST.test(r),
+    calls: /\bgetContext\s*\(|\.(?:fillRect|strokeRect|fillText|strokeText|arc|lineTo|drawImage|ellipse|rect)\s*\(|<svg|\bcreateElementNS\s*\(|\bTHREE\b/,
+  },
+  {
+    name: 'page',
+    asks: (r) => INTERFACE_THING.test(r),
+    calls: /\bcreateElement\s*\(|\binnerHTML\b|\binsertAdjacentHTML\b|\.(?:append|appendChild|prepend|replaceChildren)\s*\(/,
+  },
+  {
+    name: 'controls',
+    asks: (r) => INTERFACE_THING.test(r) || /\bgames?\b/i.test(r),
+    calls: /\baddEventListener\s*\(|\.on(?:click|dblclick|input|change|submit|keydown|keyup|pointerdown|pointermove|mousedown|mousemove|touchstart|touchmove)\s*=|\son(?:click|input|change|submit)\s*=/,
+  },
+  {
+    name: 'motion',
+    asks: (r) => /\b(?:animat\w*|bounc\w*|moving|spin\w*|rotat\w*|orbit\w*|games?|count ?down|timer|clock|stopwatch)\b/i.test(r),
+    calls: /\brequestAnimationFrame\s*\(|\bsetInterval\s*\(|\bsetTimeout\s*\(|\.animate\s*\(|@keyframes|\btransition\b/,
+  },
+];
+
+/** The kinds of thing the request asks for that the original program did and the fix no longer does at all */
+export function droppedCapabilities(request: string, original: string, fixed: string): string[] {
+  if (!request || !asksForOutcome(request)) return [];
+  const before = stripComments(original);
+  const after = stripComments(fixed);
+  return CAPABILITIES.filter((c) => c.asks(request) && c.calls.test(before) && !c.calls.test(after)).map((c) => c.name);
+}
+
+/**
  * Why a fix can't be used, or null: it lost the program (became chat or a bare speak(), stopped
  * drawing what the program drew, or dropped the function it was asked for), changed nothing (edits
  * that matched nothing would only repeat the error), or came back cut off (doesn't parse)
@@ -425,12 +467,15 @@ async function unusableFix(
   original: string,
   fixedProgram: string,
   code: string,
-  functionName?: string
+  functionName?: string,
+  request = ''
 ): Promise<'lost' | 'unchanged' | 'incomplete' | null> {
   const dropped = !!functionName && !new RegExp(`\\bfunction\\s+${functionName.replace(/\$/g, '\\$')}(?![\\w$])`).test(code);
   // Judged without its comments: a reply of only comments (`// Solution: append a <div>…`) is no program
   const program = stripComments(code).trim();
   if (!program || isTalkOnly(program) || (programDraws(original) && !programDraws(program)) || dropped) return 'lost';
+  // It took out everything of a kind the request needs (all the sound of a song): see CAPABILITIES
+  if (droppedCapabilities(request, original, code).length > 0) return 'lost';
   if (stripComments(fixedProgram).replace(/\s+/g, '') === stripComments(original).replace(/\s+/g, '')) return 'unchanged';
   if ((await syntaxErrorLine(code)) !== undefined) return 'incomplete';
   return null;
@@ -1276,7 +1321,7 @@ export class ConversationOrchestrator {
             // (judged as it would run: a whole program with the declarations it dropped put back)
             const program = options.fixWhole ? restoreDeclarations(original, applied).code : applied;
             const code = inspectExecutableCode(program).code.trim();
-            const problem = await unusableFix(original, program, code, options.fixBlock?.name);
+            const problem = await unusableFix(original, program, code, options.fixBlock?.name, codeTask);
             if (problem) return UNUSABLE_WHY[problem];
             if (failedError && typeof this.javascriptRuntime.trialRun === 'function') {
               // (the reply's generation and the hidden test run don't follow each other at once on iPhone)
@@ -1485,7 +1530,7 @@ export class ConversationOrchestrator {
           // stays the current program (lastRun, lastAction) and the status says why.
           const originalCode = options?.autoFix;
           const problem = originalCode
-            ? ((await unusableFix(originalCode, fixedProgram, executableCode, options?.fixBlock?.name)) ?? (repeatedTrial ? ('repeated' as const) : null))
+            ? ((await unusableFix(originalCode, fixedProgram, executableCode, options?.fixBlock?.name, codeTask)) ?? (repeatedTrial ? ('repeated' as const) : null))
             : null;
           const lostProgram = problem === 'lost';
           const unchangedProgram = problem === 'unchanged';

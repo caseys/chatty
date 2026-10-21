@@ -271,3 +271,14 @@ describe('misspelt writes and refused keywords, repaired while running', () => {
     other.win.close();
   });
 });
+
+describe('errors from browser calls', () => {
+  it('say what the call was given', async () => {
+    const { win, posted } = loadRunner(false);
+    win.postMessage({ type: 'execute', id: 'x1', code: 'const list = document.createElement("ul");\ndocument.body.append(list);\nlist.appendChild("Buy milk");' }, '*');
+    await wait(30);
+    const error = posted.find((m) => m.type === 'program_error' || (m.type === 'result' && m.error));
+    expect(JSON.stringify(error)).toMatch(/appendChild\(a string 'Buy milk'\) failed: /);
+    win.close();
+  });
+});
