@@ -604,6 +604,7 @@ describe('the optional rules follow the request', () => {
   const facts = 'en.wikipedia.org/api/rest_v1';
   const cases: Array<[string, { canvas?: boolean; sound?: boolean; facts?: boolean }]> = [
     ['Draw a beach sunset with rainbow sky and deep purple ocean', { canvas: true }],
+    ['Build a blues music loop with piano, bass, and drums in G minor, 120 bpm, 4 measures', { sound: true }],
     ['Play a music loop with a G major chord on piano, a walking bass line and a boom-chuck drum track', { sound: true }],
     ['Animate 10 colored balls bouncing around the screen', { canvas: true }],
     ['Code a tip calculator app with a UI for the bill and tip %', {}],
