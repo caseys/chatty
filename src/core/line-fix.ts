@@ -58,7 +58,9 @@ export function brokenLines(code: string): { start: number; end: number } | null
   }
   let program: { body: Array<{ start: number; end: number; loc: { start: { line: number }; end: { line: number } } }> };
   try {
-    program = parseLoose(code, { ecmaVersion: 'latest', locations: true }) as unknown as typeof program;
+    // (the same options as the strict parse: without them a top-level await splits its statement
+    // in two, and a program's `const midi = await …` is marked as the line that doesn't parse)
+    program = parseLoose(code, { ...STRICT, locations: true }) as unknown as typeof program;
   } catch {
     return null;
   }

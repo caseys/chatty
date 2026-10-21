@@ -9,7 +9,7 @@ import type { LlmRuntimeProvider, ToolDefinition } from '../types/index.ts';
 import { loopProtect } from './loop-protect.ts';
 import { playNotesHelper } from './music-tool.ts';
 import { fetchWikipediaSummary } from './web-tools.ts';
-import { closeCutOff, type StandIn } from '../core/error-hints.ts';
+import { closeCutOff, declareOnce, type StandIn } from '../core/error-hints.ts';
 import { sureMatch } from '../core/fuzzy-match.ts';
 import { elementKinds } from './element-kinds.ts';
 
@@ -153,6 +153,10 @@ export interface PreparedExecutableCode {
   spokeComment?: string;
   /** Functions it declared but never called, called at its end (see callUncalledFunctions) */
   called?: string[];
+  /** Names declared again in one block, whose later declarations now set the value (declareOnce) */
+  redeclared?: string[];
+  /** Code blocks dropped for repeating another (withoutRepeatedBlocks) */
+  repeatedBlocks?: number;
   /** Functions its inline handlers call, made reachable from them (see exposeFunctionsToInlineHandlers) */
   exposed?: string[];
 }
@@ -425,7 +429,7 @@ function extractProgram(text: string): ReplyPart[] | null {
       else if (!l || /^(?:js|javascript|jsx|mjs)$/.test(l)) parts.push({ kind: 'code', text: body.trim() });
     }
     parts.push(...paragraphParts(text.slice(at)));
-    return parts.some((part) => part.kind === 'code' && part.text) ? parts : null;
+    return parts.some((part) => part.kind === 'code' && part.text) ? withoutRepeatedBlocks(parts) : null;
   }
   const parts = paragraphParts(text);
   const firstCode = parts.findIndex((part) => part.kind === 'code');
@@ -435,6 +439,35 @@ function extractProgram(text: string): ReplyPart[] | null {
   const code = parts.filter((part) => part.kind === 'code').map((part) => part.text).join('\n');
   if (!parsesAsJs(code) && parts.slice(firstCode).some((part) => part.kind === 'talk')) return null;
   return parts;
+}
+
+/**
+ * A reply that writes its program out twice (once, then again "corrected" or just repeated) runs
+ * both copies one after the other: every name is declared twice and nothing runs. Of two code
+ * blocks that are mostly the same lines, one is kept: the fuller, or the later when they are as
+ * full (a second block is often the corrected one). Blocks that differ are kept, in order.
+ */
+function withoutRepeatedBlocks(parts: ReplyPart[]): ReplyPart[] {
+  const lines = (text: string) => text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('//'));
+  const dropped = new Set<ReplyPart>();
+  const code = parts.filter((p) => p.kind === 'code');
+  for (let i = 0; i < code.length; i++) {
+    for (let j = i + 1; j < code.length; j++) {
+      const a = code[i];
+      const b = code[j];
+      if (dropped.has(a) || dropped.has(b)) continue;
+      const la = lines(a.text);
+      const lb = lines(b.text);
+      const [small, large] = la.length <= lb.length ? [la, lb] : [lb, la];
+      if (small.length < 3) continue;
+      const inLarge = new Set(large);
+      if (small.filter((l) => inLarge.has(l)).length / small.length < 0.6) continue;
+      dropped.add(la.length > lb.length ? b : a);
+    }
+  }
+  if (dropped.size === 0) return parts;
+  if (preparing) preparing.repeats += dropped.size;
+  return parts.filter((p) => !dropped.has(p));
 }
 
 /** A sentence about the code itself ("Here's the JavaScript code:"): nothing the user needs to hear */
@@ -817,14 +850,14 @@ export function withoutMarkdownLeftovers(text: string): string {
 }
 
 /** What preparing a reply added, for the run log (see inspectExecutableCode) */
-let preparing: { called: string[]; exposed: string[] } | null = null;
+let preparing: { called: string[]; exposed: string[]; redeclared: string[]; repeats: number } | null = null;
 
 /**
  * The reply as the program to run, with what preparing it added: the functions it never called,
  * called at its end, and those its inline handlers (onclick="go()") need, made reachable
  */
 export function inspectExecutableCode(rawText: string, options: { closeCutOff?: boolean; speakComment?: boolean } = {}): PreparedExecutableCode {
-  const added = { called: [] as string[], exposed: [] as string[] };
+  const added = { called: [] as string[], exposed: [] as string[], redeclared: [] as string[], repeats: 0 };
   const outer = preparing;
   preparing = added;
   try {
@@ -833,6 +866,8 @@ export function inspectExecutableCode(rawText: string, options: { closeCutOff?: 
       ...prepared,
       ...(added.called.length ? { called: [...new Set(added.called)] } : {}),
       ...(added.exposed.length ? { exposed: [...new Set(added.exposed)] } : {}),
+      ...(added.redeclared.length ? { redeclared: [...new Set(added.redeclared)] } : {}),
+      ...(added.repeats ? { repeatedBlocks: added.repeats } : {}),
     };
   } finally {
     preparing = outer;
@@ -876,6 +911,16 @@ function prepareProgram(rawText: string, options: { closeCutOff?: boolean; speak
   if (!parsesAsJs(cleaned)) {
     const tidy = withoutMarkdownLeftovers(cleaned);
     if (tidy !== cleaned && parsesAsJs(tidy)) cleaned = tidy;
+  }
+
+  // 2c. A name declared again in the same block stops the program before it starts: the later
+  // declarations set the value instead (error-hints.ts declareOnce)
+  if (!parsesAsJs(cleaned)) {
+    const once = declareOnce(cleaned);
+    if (once) {
+      cleaned = once.code;
+      preparing?.redeclared.push(...once.names);
+    }
   }
 
   // 3. If empty, speak a polite ready message

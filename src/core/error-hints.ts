@@ -12,6 +12,7 @@
  * what was left open. Method names are in method-hints.ts.
  */
 import { parse, tokenizer, type Node } from 'acorn';
+import { parse as parseLoose } from 'acorn-loose';
 import { sureMatch } from './fuzzy-match.ts';
 import { analyse, isReference, resolve } from './blank-fix.ts';
 import { onlySendsLists, usedAs } from './value-use.ts';
@@ -1458,4 +1459,53 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
   const calls = shortCalls(code, errorLine);
   const text = [found?.text, vague, calls].filter(Boolean).join(' ');
   return text ? { text } : null;
+}
+
+/**
+ * Before a program runs: a name declared again with const or let in the same block (`const
+ * velocity = 100;` three times, or a program written out twice) stops the whole program before
+ * it starts. The first declaration becomes let and each later one a plain assignment, so every
+ * line still sets the value where it did. Every such name at once (the error names only the
+ * first); only single-name declarations; kept only when the result parses. Null when there is
+ * nothing to do.
+ */
+export function declareOnce(code: string): { code: string; names: string[] } | null {
+  if (tryParse(code)) return null;
+  let ast: AnyNode;
+  try {
+    ast = parseLoose(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true }) as unknown as AnyNode;
+  } catch {
+    return null;
+  }
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const names = new Set<string>();
+  const madeLet = new Set<AnyNode>();
+  walk(ast, (node) => {
+    if (node.type !== 'Program' && node.type !== 'BlockStatement' && node.type !== 'StaticBlock') return;
+    const first = new Map<string, AnyNode>();
+    for (const statement of node.body as AnyNode[]) {
+      if (statement.type !== 'VariableDeclaration' || (statement.kind !== 'const' && statement.kind !== 'let')) continue;
+      const declarators = statement.declarations as AnyNode[];
+      const id = declarators[0]?.id as AnyNode | undefined;
+      if (declarators.length !== 1 || id?.type !== 'Identifier') continue;
+      const name = id.name as string;
+      const earlier = first.get(name);
+      if (!earlier) {
+        first.set(name, statement);
+        continue;
+      }
+      names.add(name);
+      // The later one sets the value (or, without one, goes)
+      const init = declarators[0].init as AnyNode | null;
+      edits.push(init ? { start: statement.start, end: id.start, text: '' } : { start: statement.start, end: statement.end, text: '' });
+      if (earlier.kind === 'const' && !madeLet.has(earlier)) {
+        madeLet.add(earlier);
+        edits.push({ start: earlier.start, end: earlier.start + 'const'.length, text: 'let' });
+      }
+    }
+  });
+  if (edits.length === 0) return null;
+  let out = code;
+  for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + e.text + out.slice(e.end);
+  return tryParse(out) ? { code: out, names: [...names] } : null;
 }

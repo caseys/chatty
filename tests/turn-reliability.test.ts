@@ -745,7 +745,8 @@ describe('more than one fix attempt', () => {
     const program = 'const a = 1;\nboom();\nconst canvas = 2;\nspeak("Done.");';
     const llm = new QueueLlm([
       program,
-      '// Cause: remove it\nconst canvas = 2;',
+      // (a line that doesn't parse; a second declaration of canvas would be repaired before running)
+      '// Cause: remove it\nconst canvas = (2;',
       '// Cause: remove it\nconst a = 1;\nconsole.log(a);\nconst canvas = 2;\nspeak("Done.");',
     ]);
     const { executed, runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 2 }, {}]);

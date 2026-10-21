@@ -1440,6 +1440,8 @@ export class ConversationOrchestrator {
           if (inspected.spokeComment) appendRunLog('imagined', `its closing comment → speak(${JSON.stringify(inspected.spokeComment.slice(0, 80))}): corrected before running`);
           if (inspected.called?.length) appendRunLog('imagined', `${inspected.called.map((n) => `${n}()`).join(', ')} declared but never called → called at the end: corrected before running`);
           if (inspected.exposed?.length) appendRunLog('imagined', `${inspected.exposed.map((n) => `${n}()`).join(', ')} made reachable from the page's inline handlers: corrected before running`);
+          if (inspected.repeatedBlocks) appendRunLog('imagined', `the program written out again in another code block → one copy kept: corrected before running`);
+          if (inspected.redeclared?.length) appendRunLog('imagined', `${inspected.redeclared.join(', ')} declared again → set again (the first declaration made let): corrected before running`);
           if (inspected.cutOff) {
             const { dropped, closed } = inspected.cutOff;
             appendRunLog('imagined', `the reply was cut off: ${dropped ? `its unfinished last ${dropped === 1 ? 'line' : `${dropped} lines`} removed and ` : ''}${closed} open block${closed === 1 ? '' : 's'} closed: corrected before running`);
