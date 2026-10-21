@@ -1324,3 +1324,21 @@ describe('speech mode says what is happening', () => {
     expect(spoken.join(' ')).toContain('Generating');
   }, 20000);
 });
+
+describe('a reply with no program in it', () => {
+  it('asks for the whole program again, as a fix turn (never shown as the user’s words)', async () => {
+    const llm = new QueueLlm(['```js\n// Plays a loop\n```', '// Cause: no program\nconst ctx = new AudioContext();\nconst osc = ctx.createOscillator();\nosc.connect(ctx.destination);\nosc.start();\nspeak("Done.");']);
+    llm.modelId = 'qwen3-0.6b';
+    const { runtime, executed } = fakeRuntime([{}, {}]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Play a looped melody');
+    await vi.waitFor(() => expect(llm.turns.length).toBe(2), { timeout: 10000 });
+    const ask = llm.turns[1].messages.at(-1)!.content;
+    expect(ask).toContain('Write the complete JavaScript program for: Play a looped melody');
+    expect(ask).toContain('The last reply had no program in it');
+    expect(ask).not.toContain('```');
+    const asked = orchestrator.memoryStore.getMessages().filter((m) => m.role === 'user');
+    expect(asked.at(-1)!.autoFix).toBe(true);
+    await vi.waitFor(() => expect(executed.at(-1)).toContain('speak("Done.")'), { timeout: 5000 });
+  }, 20000);
+});

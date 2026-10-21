@@ -388,6 +388,11 @@ async function unusableFix(
   return null;
 }
 
+/** A reply that left nothing to run */
+const NO_PROGRAM = 'The reply had no program in it';
+/** The program a fix turn starts from when there was none (a fix turn is known by its program) */
+const NO_PROGRAM_YET = '// (no program yet)';
+
 const UNUSABLE_WHY = {
   lost: 'The fix lost the program',
   unchanged: "The fix didn't change the program",
@@ -1467,6 +1472,11 @@ export class ConversationOrchestrator {
             // It ran, but did nothing the request asked for: no sound at all for a sound request,
             // nothing on screen for a drawing or an app. What the sandbox saw, not a guess from the
             // code; a program that starts a moment late gets 1.5 seconds.
+            // A reply with nothing left to run is that, not a program that "played nothing"
+            if (!execResult.error && !executableCode.trim()) {
+              execResult.error = NO_PROGRAM;
+              appendRunLog('error', NO_PROGRAM);
+            }
             if (!execResult.error) {
               const missing = await this.missingOutcome(codeTask, soundMark);
               if (missing) {
@@ -1474,6 +1484,8 @@ export class ConversationOrchestrator {
                 appendRunLog('error', missing);
               }
             }
+            // Failed here, after the sandbox saw no error: nothing to download
+            if (execResult.error) this.javascriptRuntime.withdrawDownload?.();
             this.lastRun = {
               turnId,
               code: executableCode,
@@ -1876,6 +1888,27 @@ export class ConversationOrchestrator {
       kind: 'error',
       text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
+    // No program to fix: the request is asked for again, as a whole program
+    if (!run.code.trim()) {
+      this.startFixLog(run);
+      appendRunLog('retry', `the reply had no program: asking the model for the whole program (try ${attempt} of ${MAX_FIX_TRIES})`);
+      const ask = [
+        `Write the complete JavaScript program for: ${run.task}`,
+        `The last reply had no program in it (${run.error.replace(/\.+$/, '')}).`,
+        'Reply with the complete program.',
+      ].join('\n');
+      void settle(AFTER_HEAVY_MS).then(() => {
+        if (this.scheduler.getActiveTurnId()) return;
+        return this.submitUserInput(ask, {
+          // A fix turn is known by the program it fixes, so an empty one gets a stand-in
+          autoFix: NO_PROGRAM_YET,
+          fixAttempt: attempt,
+          errorHistory: withError(run),
+          fixWhole: true,
+        });
+      });
+      return;
+    }
     const broken = kind === 'program' ? null : brokenLines(run.code);
     const fn = kind === 'function' ? enclosingFunction(run.code, run.errorLine) : null;
     const block = broken

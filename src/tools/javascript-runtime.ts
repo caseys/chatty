@@ -2504,6 +2504,11 @@ export class JavascriptRuntime {
     this.onDownloadableChange?.(false);
   }
 
+  /** The program ran but failed a check made outside the sandbox (it played or showed nothing) */
+  withdrawDownload(): void {
+    this.spoilDownload();
+  }
+
   isDownloadReady(): boolean {
     return this.downloadReady;
   }
