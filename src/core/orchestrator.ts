@@ -268,7 +268,6 @@ function codeView(text: string): string {
 const ACTION_REQUEST =
   /\b(?:play|draw|make|build|create|animate|code|program|design|generate|paint|sketch|render|chart|plot|graph|count ?down|timer|stopwatch|calculator|converter|simulate|game|app)\b/i;
 /** Goes with the retry only (not into history) */
-const TALK_RETRY_NOTE = '\n(Write a simple, complete JavaScript program that does this, then one speak() sentence telling the user what it does.)';
 
 /** How many times the model may try to fix one request's program */
 /**
@@ -1221,30 +1220,8 @@ export class ConversationOrchestrator {
           );
         }
         let genResult = await generateReply(promptMessages);
-        // A request to make something that got only talk back ("Starting the loop now.") is
-        // written again once, cooler: the same prompt alone would give the same reply
-        const firstReply = rawAccumulatedTokens || genResult.text;
-        if (
-          !options?.autoFix &&
-          !this.phonePipeline &&
-          this.scheduler.isTurnValid(turnId) &&
-          !signal.aborted &&
-          !genResult.aborted &&
-          ACTION_REQUEST.test(normalized) &&
-          isTalkOnly(inspectExecutableCode(firstReply).code)
-        ) {
-          appendRunLog('retry', 'the reply only talked, but the request asks for something to be made: writing it again, cooler');
-          appendRunLog('discarded', firstReply);
-          rawAccumulatedTokens = '';
-          lastSpokenTextEmitted = '';
-          processedSpeakMatches = 0;
-          streamMode = forceProse ? 'prose' : 'unknown';
-          stoppedRepeating = false;
-          repeatCheckedAt = 0;
-          generationAbort = new AbortController();
-          const last = promptMessages[promptMessages.length - 1];
-          genResult = await generateReply([...promptMessages.slice(0, -1), { ...last, content: `${last.content}${TALK_RETRY_NOTE}` }], 1);
-        }
+        // A request to make something that got only talk back goes to the chat as it is (it may be a
+        // question); after it runs, a statement is followed by a request for the program (askFix)
 
         // A fix reply that is unchanged, lost or incomplete is asked for again at once, warmer: a
         // one-line reply takes about 2 seconds, so a whole attempt is not spent on it
@@ -1544,7 +1521,10 @@ export class ConversationOrchestrator {
               execResult.error = NO_PROGRAM;
               appendRunLog('error', NO_PROGRAM);
             }
-            if (!execResult.error) {
+            // Only talk that asks the user something: their answer comes next, nothing is missing
+            const asksUser = isTalkOnly(executableCode) && /\?\s*["'`]\s*\)/.test(executableCode);
+            if (asksUser) appendRunLog('retry', 'the reply asks the user a question: waiting for the answer');
+            if (!execResult.error && !asksUser) {
               const missing = await this.missingOutcome(codeTask, soundMark);
               if (missing) {
                 execResult.error = missing;

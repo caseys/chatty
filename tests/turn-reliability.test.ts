@@ -674,17 +674,28 @@ describe('missing methods', () => {
 });
 
 describe('a reply that only talks', () => {
-  it('is written again once, cooler, when the request asks for something to be made', async () => {
-    const llm = new QueueLlm(['speak("Starting the loop now.");', 'const x = 1;\nspeak("Here it is.");']);
-    const { executed, runtime } = fakeRuntime([]);
-    const orchestrator = orchestratorFor(llm, { javascriptRuntime: runtime });
-    await orchestrator.submitUserInput('Play a music loop');
-    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
-    expect(llm.turns.length).toBe(2);
-    expect(llm.turns[1].retry).toBe(1);
-    expect(llm.turns[1].messages.at(-1)!.content).toBe('Play a music loop\n(Write a simple, complete JavaScript program that does this, then one speak() sentence telling the user what it does.)');
-    expect(executed).toEqual(['const x = 1;\nspeak("Here it is.");']);
-  });
+  it('goes to the chat; a question waits for the answer, a statement is followed by a request for the program', async () => {
+    // A question: said, and nothing more is asked of the model
+    const asking = new QueueLlm(['speak("Should the ball be red or blue?");']);
+    const asked = fakeRuntime([{}]);
+    (asked.runtime as unknown as { hasVisualContent: () => boolean }).hasVisualContent = () => false;
+    const one = orchestratorFor(asking, { autoFixErrors: true, javascriptRuntime: asked.runtime });
+    await one.submitUserInput('Animate a ball bouncing around the screen');
+    await vi.waitFor(() => expect(asked.executed.length).toBe(1));
+    await new Promise((r) => setTimeout(r, 2500));
+    expect(asking.turns.length).toBe(1);
+    expect(asked.executed[0]).toBe('speak("Should the ball be red or blue?");');
+
+    // A statement: said, then the program is asked for (not retried out of sight)
+    const telling = new QueueLlm(['speak("Starting the loop now.");', 'const x = 1;\nspeak("Here it is.");']);
+    const told = fakeRuntime([{}, {}]);
+    (told.runtime as unknown as { soundUseCount: () => number }).soundUseCount = () => 0;
+    const two = orchestratorFor(telling, { autoFixErrors: true, javascriptRuntime: told.runtime });
+    await two.submitUserInput('Play a music loop');
+    await vi.waitFor(() => expect(telling.turns.length).toBe(2), { timeout: 10000 });
+    expect(told.executed[0]).toBe('speak("Starting the loop now.");');
+    expect(telling.turns[1].messages.at(-1)!.content).toContain('Write the complete JavaScript program for: Play a music loop');
+  }, 20000);
 
   it('is left alone for plain conversation', async () => {
     const llm = new QueueLlm(['speak("Doing well, thanks!");']);
