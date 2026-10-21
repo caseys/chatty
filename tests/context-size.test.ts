@@ -58,4 +58,11 @@ describe('the context a model gets', () => {
     expect(workingMemoryBudget({ appleMobile: false, phone: true, memoryGb: 8 })).toBeGreaterThan(workingMemoryBudget({ appleMobile: false, phone: true, memoryGb: 4 }));
     expect(iphone).toBeLessThan(workingMemoryBudget({ appleMobile: false, phone: true }));
   });
+
+  it('takes a phone budget set by hand for testing, and ignores it elsewhere or when unusable', () => {
+    expect(workingMemoryBudget({ appleMobile: true, phone: false }, '256')).toBe(256 * MB);
+    expect(workingMemoryBudget({ appleMobile: false, phone: true }, '192')).toBe(192 * MB);
+    expect(workingMemoryBudget({ appleMobile: false, phone: false }, '256')).toBe(desktop);
+    for (const set of [null, '', 'lots', '0', '10', '99999']) expect(workingMemoryBudget({ appleMobile: true, phone: false }, set)).toBe(iphone);
+  });
 });

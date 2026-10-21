@@ -64,7 +64,25 @@ describe('a reply cut off before its end', async () => {
 
   it('removes an unfinished last line first', () => {
     const cut = closeCutOff('function a() {\n  const x = 1;\n  const y = "unfinish');
-    expect(cut).toEqual({ code: 'function a() {\n  const x = 1;\n}', dropped: 1, closed: 1 });
+    expect(cut).toEqual({ code: 'function a() {\n  const x = 1;\n}', dropped: 1, closed: 1, template: false });
+  });
+
+  it('closes a template string the reply was cut inside (the to-do list Qwen3 0.6B wrote), and the blocks after it', () => {
+    // The real reply: markup being written into the page, stopped for repeating itself
+    const reply = 'document.body.innerHTML = `\n  <div id="todo-app">\n    <h2>Make a to-do list</h2>\n    <div class="todo-container">\n      <div class="todo-item">Today\'s Tasks</div>';
+    const cut = closeCutOff(reply);
+    expect(cut).toEqual({ code: `${reply}\n\`;`, dropped: 0, closed: 0, template: true });
+    const inFunction = 'function show() {\n  panel.innerHTML = `\n    <ul>\n      <li>one</li>';
+    expect(closeCutOff(inFunction)).toEqual({ code: `${inFunction}\n\`;\n}`, dropped: 0, closed: 1, template: true });
+    // A backtick missing in the middle (the reviewer's probe): lines of code follow the markup, so this is no cut-off
+    const missing = "document.body.innerHTML = `<h1>Hi</h1>\n<button id=\"b\">Go</button>;\nconst btn = document.getElementById('b');\nbtn.onclick = () => speak('hi');";
+    expect(closeCutOff(missing)).toBeNull();
+    expect(closeCutOff("document.body.innerHTML = `<p>one</p>\nlet n = 0;")).toBeNull();
+    // Words that parse as a program, and markup, are not code
+    expect(closeCutOff('document.body.innerHTML = `\n<p>\nHello\n  world.</p>\n<hr>')).toEqual({ code: 'document.body.innerHTML = `\n<p>\nHello\n  world.</p>\n<hr>\n`;', dropped: 0, closed: 0, template: true });
+    // A cut inside an expression of the template is not closed by guessing
+    const inExpression = 'const html = `\n  <p>${items.map((i) => {';
+    expect(closeCutOff(inExpression)).toBeNull();
   });
 
   it('leaves alone a program whose error is not at its end', () => {
@@ -280,6 +298,37 @@ describe('from the tip calculator log', async () => {
     expect(out).toBe('document.body.innerHTML = "<p>Tip</p>";\nspeak("Enter the bill.");');
     // A reply that is only the greeting stays (a greeting gets a greeting)
     expect(dropCopiedExample('speak("Hi! What would you like me to make?");').dropped).toBe(false);
+  });
+
+  it('also takes the question without its greeting, as Qwen3 0.6B wrote it for 15 percent of 84', () => {
+    // The real program: the example's question, then the answer
+    const code = 'speak("What would you like me to make?");\nvar result = (84 * 15) / 100;\nspeak("15 percent of 84 is " + result);';
+    expect(dropCopiedExample(code)).toEqual({ code: 'var result = (84 * 15) / 100;\nspeak("15 percent of 84 is " + result);', dropped: true });
+    // Other case and punctuation
+    expect(dropCopiedExample('speak("what would you like me to make");\nroot.textContent = 1;').dropped).toBe(true);
+    // Short likenesses and sentences of its own stay
+    expect(dropCopiedExample('speak("What would you like?");\nroot.textContent = 1;').dropped).toBe(false);
+    expect(dropCopiedExample('speak("What would you like me to make with the 3 blocks?");\nroot.textContent = 1;').dropped).toBe(false);
+  });
+
+  it('takes the request said back out of the program before it runs, logged, when told the request', async () => {
+    const { repairBeforeRunning } = await import('../src/core/orchestrator.ts');
+    const code = 'speak("Show a big ten second countdown on screen.");\nlet n = 10;\nsetInterval(() => { n--; root.textContent = n; }, 1000);';
+    const notes: string[] = [];
+    const out = repairBeforeRunning(code, false, (text) => notes.push(text), 'Show a big ten second countdown on screen');
+    expect(out.code).toBe('\nlet n = 10;\nsetInterval(() => { n--; root.textContent = n; }, 1000);');
+    expect(notes).toEqual(["a speak() of the request's own words → taken out: corrected before running"]);
+    // A phrase to answer, not an instruction: its echo is the answer (the reviewer's probes)
+    for (const phrase of ['Happy birthday to you', 'Good morning everyone', 'Hello there my friend']) {
+      const greeting = `speak("${phrase}!");\ndocument.body.innerHTML = '<h1>:)</h1>';`;
+      expect(repairBeforeRunning(greeting, false, () => {}, phrase).code, phrase).toBe(greeting);
+    }
+    // A phrase with no verb of an instruction is left alone too (only a sure case is repaired); an instruction is
+    expect(repairBeforeRunning('speak("A big red button on screen");\nroot.textContent = 1;', false, () => {}, 'A big red button on screen').code).toBe('speak("A big red button on screen");\nroot.textContent = 1;');
+    expect(repairBeforeRunning('speak("Flip a coin and say heads or tails");\nroot.textContent = 1;', false, () => {}, 'Flip a coin and say heads or tails').code).toBe('\nroot.textContent = 1;');
+    // No request given (or another one): the program is as it was
+    expect(repairBeforeRunning(code, false, () => {}).code).toBe(code);
+    expect(repairBeforeRunning(code, false, () => {}, 'Draw a cat').code).toBe(code);
   });
 
   it('offers no element where text goes', () => {

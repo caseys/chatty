@@ -48,6 +48,8 @@ export type WebLlmRequest =
   | { kind: 'chat'; id: number; request: WebLlmChatRequest }
   /** A reply not streamed: 'done' with a WebLlmCompletion */
   | { kind: 'complete'; id: number; request: WebLlmChatRequest }
+  /** The first, tiny run after a load, run and caught in the worker: always 'done' (a failure is only logged there) */
+  | { kind: 'warm-up'; id: number; request: WebLlmChatRequest }
   /** Stops the reply being generated (it ends as it would at its limit); no reply of its own */
   | { kind: 'interrupt' }
   /** Frees the model's GPU memory; 'done' */

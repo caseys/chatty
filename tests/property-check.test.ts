@@ -156,3 +156,167 @@ describe('a slipped member is renamed where the parser found it', () => {
     expect(renamed).toBe(canvasCode("ctx.fillStyle = 'red';\nspeak('ctx.fillstyle');\nctx.fillStyle = 'blue';"));
   });
 });
+
+describe('JavaScript written inside a color string', () => {
+  // The browser's rule for colors, as far as these programs go: numbers in rgb(), or a named color
+  const isColor = (value: string) => /^rgba?\(\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?\s*(?:,\s*[\d.]+\s*)?\)$/.test(value) || ['red', 'white', 'yellow'].includes(value);
+  const CSS = { supports: (property: string, value: string) => (value === 'inherit' ? true : property === 'color' || property === 'background-color' ? isColor(value) : false) };
+  class FakeCtx {}
+  const scope = { CSS, CanvasRenderingContext2D: FakeCtx, document: { createElement: () => ({ style: {} }) } } as unknown as Record<string, unknown>;
+  const program = (body: string) => `const canvas = document.createElement("canvas");\nconst ctx = canvas.getContext("2d");\n${body}`;
+
+  it('becomes a template literal, as in the color Qwen3 0.6B wrote for a sunset sky', () => {
+    // The real line: the math is inside the quotes
+    const code = program('for (let i = 0; i < 60; i++) {\n  ctx.fillStyle = "rgb(255, 255, 255 - 255 * (i / 60))";\n  ctx.fillRect(0, i * 10, 800, 10);\n}');
+    const issues = unusableAssignments(code, scope);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].fix?.note).toContain('JavaScript in a color needs a template literal');
+    expect(applyAssignmentFixes(code, issues)).toBe(code.replace('"rgb(255, 255, 255 - 255 * (i / 60))"', '`rgb(255, 255, ${255 - 255 * (i / 60)})`'));
+  });
+
+  it('also for a style color, with several computed arguments and the names of the program', () => {
+    const code = "const el = document.getElementById('box');\nlet level = 3;\nel.style.backgroundColor = 'rgb(level * 20, Math.round(level / 2), 40)';";
+    const fixed = applyAssignmentFixes(code, unusableAssignments(code, scope));
+    expect(fixed).toContain('el.style.backgroundColor = `rgb(${level * 20}, ${Math.round(level / 2)}, 40)`;');
+  });
+
+  it('leaves valid colors, names the program lacks, and other invalid colors alone', () => {
+    // Valid; a template already; a name nothing declares; words that are no expression; not a color function
+    for (const line of [
+      'ctx.fillStyle = "rgb(255, 255, 255)";',
+      'ctx.fillStyle = `rgb(255, 255, ${255 - i})`;',
+      'ctx.fillStyle = "rgb(255, 255, 255 - shade)";',
+      'ctx.fillStyle = "rgb(red, green, blue)";',
+      'ctx.fillStyle = "lavenderblues";',
+    ]) {
+      const issues = unusableAssignments(program(`let i = 1;\n${line}`), scope);
+      expect(issues.filter((issue) => issue.fix), line).toEqual([]);
+    }
+  });
+});
+
+describe('drawing calls made on the canvas element itself', () => {
+  // The real program from Qwen3 0.6B's beach sunset: the element is used where its context belongs
+  const sunset = [
+    'const canvas = document.createElement("canvas");',
+    'document.body.appendChild(canvas);',
+    'canvas.width = 800;',
+    'canvas.fillStyle = "orange";',
+    'canvas.beginPath();',
+    'canvas.arc(400, 300, 100, 0, Math.PI * 2);',
+    'canvas.fill();',
+    'canvas.stroke();',
+  ].join('\n');
+  // The shapes of the browser's two types: the context has the drawing names, the element has width and height
+  class FakeElement {
+    width = 0;
+    height = 0;
+    getContext() {}
+  }
+  class FakeContext {
+    beginPath() {}
+    arc() {}
+    fill() {}
+    stroke() {}
+    fillRect() {}
+  }
+  // (the browser's settings are accessors on the prototype)
+  Object.defineProperty(FakeContext.prototype, 'fillStyle', { get: () => '', set: () => {}, configurable: true });
+  Object.defineProperty(FakeElement.prototype, 'width', { get: () => 0, set: () => {}, configurable: true });
+  const scope = { HTMLCanvasElement: FakeElement, CanvasRenderingContext2D: FakeContext } as unknown as Record<string, unknown>;
+
+  it('goes through its context at every use at once, writes too', async () => {
+    const { moveToContext } = await import('../src/core/property-check.ts');
+    const fixed = moveToContext(sunset, scope);
+    expect(fixed.code).toBe(
+      [
+        'const canvas = document.createElement("canvas");',
+        'document.body.appendChild(canvas);',
+        'canvas.width = 800;',
+        'canvas.getContext("2d").fillStyle = "orange";',
+        'canvas.getContext("2d").beginPath();',
+        'canvas.getContext("2d").arc(400, 300, 100, 0, Math.PI * 2);',
+        'canvas.getContext("2d").fill();',
+        'canvas.getContext("2d").stroke();',
+      ].join('\n')
+    );
+    expect(fixed.moved).toEqual([{ object: 'canvas', members: ['fillStyle', 'beginPath', 'arc', 'fill', 'stroke'] }]);
+    // Without the browser's types, the methods every context has
+    expect((await import('../src/core/property-check.ts')).moveToContext(sunset, {}).code).toContain('canvas.getContext("2d").beginPath();');
+  });
+
+  it('moves a call only for a context method, and a read or write only for a context setting', async () => {
+    const { moveToContext } = await import('../src/core/property-check.ts');
+    // A number kept on the element, named like a method (the reviewer's case): no context is meant
+    const kept = 'const canvas = document.createElement("canvas");\nconst ctx = canvas.getContext("2d");\ncanvas.scale = devicePixelRatio;\nctx.scale(canvas.scale, canvas.scale);';
+    expect(moveToContext(kept, scope).code).toBe(kept);
+    expect(moveToContext(kept, {}).code).toBe(kept);
+    // A setting written as a call, and a method written as a setting, stay as they are
+    const mixed = 'const canvas = document.createElement("canvas");\ncanvas.fillStyle("red");\ncanvas.arc = 3;';
+    expect(moveToContext(mixed, scope).code).toBe(mixed);
+    // The right use of each is still moved
+    expect(moveToContext('const canvas = document.createElement("canvas");\ncanvas.fillStyle = "red";\ncanvas.fill();', scope).code).toBe('const canvas = document.createElement("canvas");\ncanvas.getContext("2d").fillStyle = "red";\ncanvas.getContext("2d").fill();');
+  });
+
+  it('leaves the context itself, the element’s own members, and objects that are not canvas elements alone', async () => {
+    const { moveToContext } = await import('../src/core/property-check.ts');
+    const right = 'const canvas = document.createElement("canvas");\nconst ctx = canvas.getContext("2d");\nctx.fillStyle = "red";\nctx.beginPath();\ncanvas.width = 10;\nctx.fill();';
+    expect(moveToContext(right, scope).code).toBe(right);
+    // A made-up object of the program's own with a method of that name
+    const own = 'const game = { fill() {}, beginPath() {} };\ngame.fill();\nconst canvas = document.createElement("canvas");';
+    expect(moveToContext(own, scope).code).toBe(own);
+    // A program that does not parse
+    expect(moveToContext('const canvas = document.createElement("canvas");\ncanvas.fill(;', scope).code).toBe('const canvas = document.createElement("canvas");\ncanvas.fill(;');
+  });
+});
+
+describe('a color name one slip away', () => {
+  const NAMES = new Set(['white', 'lavenderblush', 'purple', 'violet', 'red', 'blue']);
+  const CSS = { supports: (property: string, value: string) => (value === 'inherit' ? true : /color$/.test(property) || /^(?:color|fill|stroke|background)$/.test(property) ? NAMES.has(value) : false) };
+  class FakeCtx {}
+  const scope = { CSS, CanvasRenderingContext2D: FakeCtx, document: { createElement: () => ({ style: {} }) } } as unknown as Record<string, unknown>;
+  const program = (body: string) => `const canvas = document.createElement("canvas");\nconst ctx = canvas.getContext("2d");\n${body}`;
+
+  it('is corrected, as the colors Qwen3 0.6B misspelt in its beach sunset', () => {
+    // The real lines: "whit", and "lavenderblues" from an earlier run
+    const code = program('ctx.strokeStyle = "whit";\nctx.fillStyle = \'lavenderblues\';');
+    expect(applyAssignmentFixes(code, unusableAssignments(code, scope))).toBe(program('ctx.strokeStyle = \'white\';\nctx.fillStyle = \'lavenderblush\';'));
+    const el = "const el = document.getElementById('box');\nel.style.backgroundColor = 'purpel';";
+    expect(applyAssignmentFixes(el, unusableAssignments(el, scope))).toContain("el.style.backgroundColor = 'purple';");
+  });
+
+  it('is corrected for SVG fill and stroke, a setAttribute of one, and a single-word background', () => {
+    const svg = "const el = document.getElementById('dot');\nel.style.fill = 'purpel';\nel.setAttribute('stroke', 'whit');\nel.setAttribute('fill', 'blu');\nel.style.background = 'viollet';";
+    const fixed = applyAssignmentFixes(svg, unusableAssignments(svg, scope));
+    expect(fixed).toContain("el.style.fill = 'purple';");
+    expect(fixed).toContain("el.setAttribute('stroke', 'white');");
+    expect(fixed).toContain("el.style.background = 'violet';");
+    // 'blu' is too short a name to be sure of
+    expect(fixed).toContain("el.setAttribute('fill', 'blu');");
+    // Other attributes, valid colors, and a background that is more than a word, stay
+    const alone = "el.setAttribute('class', 'whit');\nel.setAttribute('fill', 'red');\nel.style.background = 'url(a.png) no-repeat';";
+    expect(unusableAssignments(`const el = document.getElementById('x');\n${alone}`, scope).filter((issue) => issue.fix)).toEqual([]);
+  });
+
+  it('is the color alone when a shade word was put in front of one CSS has no such shade of (the deep purple ocean of the beach sunset)', () => {
+    // The real line, in every one of the eight tries: CSS has purple and darkviolet, no deeppurple
+    const code = program('ctx.fillStyle = "deeppurple";\nctx.fillRect(0, 0, 10, 10);');
+    expect(applyAssignmentFixes(code, unusableAssignments(code, scope))).toBe(program('ctx.fillStyle = \'purple\';\nctx.fillRect(0, 0, 10, 10);'));
+    // Case, spaces and hyphens do not matter, in a style, a setAttribute and a canvas
+    const spelt = "const el = document.getElementById('box');\nel.style.backgroundColor = 'Deep Purple';\nel.setAttribute('fill', 'light-red');\nctx.strokeStyle = 'bright_blue';";
+    const fixed = applyAssignmentFixes(program(spelt), unusableAssignments(program(spelt), scope));
+    expect(fixed).toContain("el.style.backgroundColor = 'purple';");
+    expect(fixed).toContain("el.setAttribute('fill', 'red');");
+    expect(fixed).toContain("ctx.strokeStyle = 'blue';");
+    // Not when the rest is no color the browser knows (the page's CSS here has no 'green'), nor for a word that is no shade
+    for (const line of ['ctx.fillStyle = "deepgreen";', 'ctx.fillStyle = "fancypurple";', 'ctx.fillStyle = "deeppurplish";']) {
+      expect(unusableAssignments(program(line), scope).filter((issue) => issue.fix), line).toEqual([]);
+    }
+  });
+
+  it('leaves valid colors, names nothing is close to, and two equally close, alone', () => {
+    for (const line of ['ctx.fillStyle = "white";', 'ctx.fillStyle = "deepSparkle";', 'ctx.fillStyle = "rainbow";', 'ctx.fillStyle = "blu";', 'ctx.fillStyle = "deep";', 'ctx.fillStyle = "mauve";']) {
+      expect(unusableAssignments(program(line), scope).filter((issue) => issue.fix), line).toEqual([]);
+    }
+  });
+});

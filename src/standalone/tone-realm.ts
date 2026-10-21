@@ -120,7 +120,22 @@ export function sharedContextForTone(real: AudioContext, output: AudioNode): Aud
       if (prop === 'destination') return output;
       if (prop === 'close' || prop === 'suspend') return () => Promise.resolve();
       const value = Reflect.get(target, prop, target);
-      return typeof value === 'function' ? value.bind(target) : value;
+      if (typeof value !== 'function') return value;
+      const bound = value.bind(target);
+      // The sources Tone makes on the app's context (its oscillators, players, noise) are told to the
+      // page, which stops what still plays when it throws the page away (see __chattyTeardown in the sandbox runner)
+      if (typeof prop === 'string' && /^create(?:Oscillator|BufferSource|ConstantSource)$/.test(prop)) {
+        return (...args: unknown[]) => {
+          const node = bound(...args);
+          try {
+            (window as unknown as { __chattyRememberSource?: (node: unknown) => void }).__chattyRememberSource?.(node);
+          } catch {
+            // the page keeps no list
+          }
+          return node;
+        };
+      }
+      return bound;
     },
     set(_target, prop, value) {
       local[prop] = value;

@@ -40,10 +40,12 @@ import {
 } from '../tools/javascript-runtime.ts';
 import { setForRecentRequests } from './recent-requests.ts';
 import { appendRunLog } from './run-log.ts';
-import { blankChoices, blankRequest, choiceRequest, declareMissing, fillBlank, findBlank, type Blank } from './blank-fix.ts';
+import { memberBlank, fillMember, blankChoices, blankRequest, choiceRequest, declareMissing, fillBlank, findBlank, type Blank } from './blank-fix.ts';
+import { madeAsWrongClass, withLibraryClassNames, type RealMember } from './method-hints.ts';
 import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest, restoreDeclarations } from './line-fix.ts';
-import { shareDeclarations, dropBrowserCopies, dropHelperCopies, dropStrayQuote, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
-import { applyAssignmentFixes, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
+import { missingStepsError } from './sound-setup.ts';
+import { shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
+import { applyAssignmentFixes, moveToContext, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { LOCAL_CHAT_MODELS } from './settings.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
@@ -214,6 +216,21 @@ function soundKinds(request: string): { music: boolean; effects: boolean } {
 const SOUND_WORDS_REQUEST = new RegExp(SOUND_WORDS, 'i');
 const DRAWING_REQUEST =
   /\b(?:draw|paint|sketch|picture|image|art\b|animat|game|simulat|bounc|canvas|scene|shape|circle|square|triangle|stars?\b|sky|rainbow|landscape|pattern|fractal|particle|mov(?:e|ing)|getContext)/i;
+/** What is made to be used: an app the user presses or types in (not a display, a clock or a drawing) */
+const USED_WORDS = 'calculator|converter|form(?!\\s+of\\b)|quiz|to-?do|checklist|stopwatch|picker|toggle|sliders?|tracker|planner|editor|generator|roller|mixer|buttons?';
+/**
+ * Asked to make one of those: the verb, an article, up to two words, then the app word ("Code a tip
+ * calculator", "Build a unit converter"). Not an app word after "about", "of" or "for" ("Write a poem
+ * about a calculator", "Make a list of quiz questions"), which is something else made of it.
+ */
+export const MAKES_USED_THING = new RegExp(
+  `\\b(?:make|build|create|code|write|design|develop|generate|program|implement)\\s+(?:(?:me|us)\\s+)?(?:(?:a|an|the|my|our|some)\\s+)?(?:(?!about\\b|of\\b|for\\b|on\\b|with\\b)[\\w'-]+\\s+){0,2}(?:${USED_WORDS})\\b`,
+  'i'
+);
+/** What asks for something that changes by itself on screen */
+const MOTION_REQUEST = /\b(?:animat\w*|bounc\w*|mov(?:ing|es)|spinn?(?:ing)?|rotating|orbit\w*|pulsing|blinking|flashing|falling|floating|flying|scrolling|count ?down|ticking)\b/i;
+/** A program driven by the pointer or keys: what moves is up to the user */
+const MOVES_WITH_USER = /\baddEventListener\s*\(\s*['"`](?:mouse|pointer|touch|key|wheel)\w*['"`]|\bon(?:mouse|pointer|touch|key|wheel)\w*\s*=/i;
 const THREE_D_REQUEST = /(?:\b3d\b|\bthree[- ]?d\b|\bgames?\b|\brender|\bscene|\bcube|\bsphere|\bwebgl|\brotat|\bspin|\borbit|THREE\.)/i;
 const DIAGRAM_REQUEST = /\b(?:svg|diagram|icon|chart|graph|logo|vector|flowchart|map)/i;
 /** Things that must appear on screen: an app, a form, a to-do list, a timer */
@@ -290,7 +307,14 @@ const EXAMPLE_SPOKEN = FORMAT_TURNS.flatMap((t) => (t.role === 'assistant' ? [..
  */
 export function dropCopiedExample(code: string): { code: string; dropped: boolean } {
   const lines = code.split('\n');
-  const copied = (line: string) => EXAMPLE_SPOKEN.some((text) => new RegExp(`^\\s*speak\\((["'\`])${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\1\\);?\\s*$`).test(line));
+  // A line that says the example's words, or most of them in a row (the greeting dropped: "What
+  // would you like me to make?"), in other case or punctuation
+  const copied = (line: string) => {
+    const spoken = line.match(/^\s*speak\((["'`])(.*)\1\);?\s*$/)?.[2];
+    if (spoken === undefined) return false;
+    const said = flatText(spoken);
+    return !!said && EXAMPLE_SPOKEN.some((text) => flatText(text) === said || (` ${flatText(text)} `.includes(` ${said} `) && said.split(' ').length >= flatText(text).split(' ').length * 0.6));
+  };
   const kept = lines.filter((line) => !copied(line));
   if (kept.length === lines.length || kept.join('').trim() === '') return { code, dropped: false };
   return { code: kept.join('\n'), dropped: true };
@@ -322,6 +346,11 @@ const LISTENS_FOR_USER =
  */
 const asksForOutcome = (request: string) =>
   (ACTION_REQUEST.test(request) || /\b(?:show|display)\b/i.test(request)) && !QUESTION_WORDS.test(request);
+/** A request that begins with an imperative verb: the user is asking for something to be done ("Flip a coin", "Roll two dice") */
+const STARTS_WITH_ACTION =
+  /^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:play|draw|make|build|create|animate|code|program|design|generate|paint|sketch|render|chart|plot|graph|show|display|simulate|write|calculate|compute|convert|flip|roll|pick|choose|list|count|start|set|run|open|find|give|tell|add|remove|clear|change|turn|sort|shuffle|spin|throw)\b/i;
+/** Whether a request is an instruction (something to make or do), not a phrase whose spoken echo is the answer ("Happy birthday to you") */
+export const isInstruction = (request: string): boolean => asksForOutcome(request) || STARTS_WITH_ACTION.test(request.trim());
 /** Goes with the retry only (not into history) */
 
 /** How many times the model may try to fix one request's program */
@@ -363,12 +392,14 @@ export function runScore(error: string | null, didAsked: boolean): number {
 const LINE_FIX_REASKS = 2;
 /**
  * The questions a fix can ask, in the order each try takes the next one that fits: the blank
- * (fill in the failing expression), the marked line, the whole function, the whole program, and
- * the line once more, told the replies that didn't work. A large model starts with the line.
+ * (fill in the failing expression; the member blank first, a choice among the real members of an
+ * object that lacks the one used), the marked line, the line that makes the value the error is
+ * about (when that is another line), the whole function, the whole program, and the line once
+ * more, told the replies that didn't work. A large model starts with the line.
  */
-type FixKind = 'blank' | 'line' | 'function' | 'program' | 'different';
-const FIX_ORDER_SMALL: ReadonlyArray<FixKind> = ['blank', 'line', 'function', 'program', 'different'];
-const FIX_ORDER_LARGE: ReadonlyArray<FixKind> = ['line', 'function', 'blank', 'program', 'different'];
+type FixKind = 'member' | 'blank' | 'line' | 'made' | 'function' | 'program' | 'different';
+const FIX_ORDER_SMALL: ReadonlyArray<FixKind> = ['member', 'blank', 'line', 'made', 'function', 'program', 'different'];
+const FIX_ORDER_LARGE: ReadonlyArray<FixKind> = ['line', 'made', 'function', 'member', 'blank', 'program', 'different'];
 /** The progress note a try adds to the chat */
 const fixNote = (n: number, text: string) => `Fixing (${n} of ${MAX_FIX_TRIES}): ${text}`;
 
@@ -461,6 +492,22 @@ export function changedLines(original: string, program: string, max = 100): stri
   return changed.join(' ').slice(0, max);
 }
 
+/**
+ * A reply that didn't work, as the one short line the fix request lists ("Write a fix different
+ * from these"): what it changed, else its first line of code. A reply that began with the
+ * program's own first line, unchanged, says nothing about what was tried (a whole program sent
+ * back as it was), so it is no entry. A line is cut to about 100 characters (one of escaped HTML
+ * is far more than the model needs to avoid repeating it).
+ */
+export function failedReplyLine(original: string | undefined, changed: string, reply: string): string {
+  const cut = (line: string) => (line.length > FAILED_LINE_MAX ? `${line.slice(0, FAILED_LINE_MAX - 1)}…` : line);
+  if (changed) return cut(changed);
+  const first = reply.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('//') && !l.startsWith('```'));
+  if (!first || (original !== undefined && first === original.split('\n').map((l) => l.trim()).find((l) => l))) return '';
+  return cut(first);
+}
+const FAILED_LINE_MAX = 100;
+
 /** An error message as one key: the same error with other line numbers or values is the same */
 export function normalizedError(error: string): string {
   return error.toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().slice(0, 120);
@@ -526,7 +573,9 @@ async function unusableFix(
   const dropped = !!functionName && !new RegExp(`\\bfunction\\s+${functionName.replace(/\$/g, '\\$')}(?![\\w$])`).test(code);
   // Judged without its comments: a reply of only comments (`// Solution: append a <div>…`) is no program
   const program = stripComments(code).trim();
-  if (!program || isTalkOnly(program) || (programDraws(original) && !programDraws(program)) || dropped) return 'lost';
+  // (a question's answer is talk alone, when the reply it replaces had no program to lose either)
+  const answers = isQuestion(request) && !asksForOutcome(request) && isTalkOnly(stripComments(original).trim()) && !saysQuestionBack(program, request);
+  if (!program || (isTalkOnly(program) && !answers) || (programDraws(original) && !programDraws(program)) || dropped) return 'lost';
   // It took out everything of a kind the request needs (all the sound of a song): see CAPABILITIES
   if (droppedCapabilities(request, original, code).length > 0) return 'lost';
   if (stripComments(fixedProgram).replace(/\s+/g, '') === stripComments(original).replace(/\s+/g, '')) return 'unchanged';
@@ -552,8 +601,77 @@ export function fixReplyTokens(program: string, line: number | undefined, block:
 const ADDS_TO_PAGE =
   /\b(?:appendChild|append|prepend|insertAdjacent(?:HTML|Element|Text)|replaceChildren|replaceWith|innerHTML|outerHTML|textContent|innerText|getContext|THREE)\b|document\.write|\broot\b/;
 
+/**
+ * Whether the card keeps changing by itself: its text, its markup or a canvas's pixels (see
+ * pageSignature) differ at least twice within about four seconds. A card that did not, with a timer,
+ * an interval or an animation frame still pending, is not shown to be wrong (a countdown of days
+ * ticks every second and the text stays; a light blinks every two seconds; "count down from 2"
+ * ends): the pending work counts as updating. A page that can't be read, or isn't watched
+ * (hidden), counts as moving too: the check says only what it saw.
+ */
+async function screenChanges(runtime: Pick<JavascriptRuntime, 'pageSignature'> & { hasScheduledWork?: () => boolean }): Promise<boolean> {
+  const read = () => runtime.pageSignature?.() ?? null;
+  let last = read();
+  if (last === null) return true;
+  let changes = 0;
+  for (let waited = 0; waited < 3600; waited += 300) {
+    await settle(300);
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return true;
+    const now = read();
+    if (now === null) return true;
+    if (now !== last && ++changes >= 2) return true;
+    last = now;
+  }
+  return !!runtime.hasScheduledWork?.();
+}
+
 /** A reply that left nothing to run */
 const NO_PROGRAM = 'The reply had no program in it';
+const SAID_BACK = 'The reply only said the question back to the user, with no answer';
+
+/** Text as its words only: case, punctuation and spacing aside */
+const flatText = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/** A real question: it ends in ? or begins with a question word, and has three words or more ("hello" is a greeting) */
+export function isQuestion(request: string): boolean {
+  const words = flatText(request);
+  return words.split(' ').length >= 3 && (/\?\s*$/.test(request.trim()) || /^(?:who|what|when|where|why|how|which|whose|is|are|was|were|do|does|did|can|could|will|would|should)\b/.test(words));
+}
+
+const COPIED_QUESTION = "The reply only asked the example's question again (what would you like me to make?) instead of doing the request";
+
+/**
+ * Whether a program that only talks asks the example reply's own question (FORMAT_TURNS) in one of
+ * its sentences, alone or after the request's words: speak("Play a simple drum beat. What would
+ * you like me to make?"). Asked of a user who has just said what they want (three words or more:
+ * a greeting is answered with the example's own), that question asks nothing.
+ */
+export function onlyAsksExample(code: string, request: string): boolean {
+  if (flatText(request).split(' ').length < 3) return false;
+  const says = /(?:speak|alert|console\.log)\(\s*(["'`])((?:\\.|(?!\1)[\s\S])*)\1\s*\)\s*;?/g;
+  const body = stripComments(code);
+  const said = Array.from(body.matchAll(says), (m) => flatText(m[2]));
+  if (said.length === 0 || body.replace(says, '').trim() !== '') return false;
+  const questions = EXAMPLE_SPOKEN.map((text) => flatText(text.replace(/^[^?.!]*[.!]\s*/, '')));
+  return said.some((text) => questions.some((question) => question.split(' ').length >= 4 && text.includes(question)));
+}
+
+/**
+ * Whether a program that only talks says nothing but the user's own question back (speak("Who was
+ * Ada Lovelace?") for "Who was Ada Lovelace?"): that asks nothing of the user, it answers nothing.
+ * Sure only for a real question (it ends in ? or begins with a question word, three words or more:
+ * "hello" answered "hello" is a greeting), and when everything the program does is say the
+ * question itself, whatever its case and punctuation.
+ */
+export function saysQuestionBack(code: string, request: string): boolean {
+  const asked = flatText(request);
+  if (!isQuestion(request)) return false;
+  // What a program says: speak(), and console.log() or alert(), which the sandbox speaks too
+  const says = /(?:speak|alert|console\.log)\(\s*(["'`])((?:\\.|(?!\1)[\s\S])*)\1\s*\)\s*;?/g;
+  const body = stripComments(code);
+  const said = Array.from(body.matchAll(says), (m) => flatText(m[2]));
+  return said.length > 0 && body.replace(says, '').trim() === '' && said.every((text) => text === asked);
+}
 /** The program a fix turn starts from when there was none (a fix turn is known by its program) */
 const NO_PROGRAM_YET = '// (no program yet)';
 
@@ -598,6 +716,21 @@ function namesCandidate(error: string, expr: string): boolean {
   return !!name && new RegExp(`['"\\s(]${name.replace(/\$/g, '\\$')}['"\\s).]`).test(` ${error} `);
 }
 
+/**
+ * Whether two errors are the same member missing, whatever object was put in front of it. The
+ * browser words the object as the expression's own text (`(…, document.getElementById(...)).start
+ * is not a function`), so a swapped-in expression changes the message while the failure stays; and
+ * one that came out undefined turns "x.m is not a function" into "reading 'm'" of undefined.
+ */
+export function sameMissingMember(a: string, b: string): boolean {
+  const member = (error: string) =>
+    error.match(/\.([A-Za-z_$][\w$]*) is not a function\s*$/)?.[1] ??
+    error.match(/\(reading '([A-Za-z_$][\w$]*)'\)\s*$/)?.[1] ??
+    error.match(/undefined is not an object \(evaluating '[^']*\.([A-Za-z_$][\w$]*)'\)\s*$/)?.[1];
+  const first = member(a);
+  return !!first && first === member(b);
+}
+
 /** A run's error history with its own error added */
 function withError(run: { errorHistory?: FixError[]; error: string | null; errorLine?: number; fixAttempt?: number }): FixError[] {
   const history = run.errorHistory ?? [];
@@ -619,6 +752,182 @@ export function earlierErrors(history: FixError[] | undefined, current: string):
 
 /** Markup in a streaming reply */
 const STREAM_MARKUP = /<(?:script|canvas|html|!doctype)\b/i;
+
+/**
+ * The repairs a program gets before it runs, by rule and without the model: the lines that go,
+ * the slipped names and members, the declarations it forgot, and then the library-specific group
+ * (Tone.js) last. `note` is told each one (the run log). The same repairs go over a fix's test
+ * run, so what is judged is what would run. `notThere` is what its objects lack, reported after
+ * the run if the program did nothing asked.
+ */
+export function repairBeforeRunning(code: string, isProse: boolean, note: (text: string) => void, request = ''): { code: string; notThere: Array<{ line: number; error: string; soft?: boolean }> } {
+  let executableCode = code;
+  // First, lines that go (so the line numbers below match the program that runs).
+  // Its own speak()/out/clear: taken out so the real helpers are used (error-hints.ts)
+  if (!isProse) {
+    const copies = dropHelperCopies(executableCode);
+    if (copies.dropped.length > 0 || copies.renamed.length > 0 || copies.kept.length > 0) {
+      executableCode = copies.code;
+      for (const name of copies.dropped) note(`its own ${name} → the ready-made one: corrected before running`);
+      // Its own speak() holding the whole program: renamed, the real speak() kept for what it says
+      for (const rename of copies.renamed) note(`its own ${rename}() (it held the program): corrected before running`);
+      // Its own clear(), root, out that does something of its own: kept under another name
+      for (const rename of copies.kept) note(`its own ${rename} (a helper's name, kept as the program's): corrected before running`);
+    }
+    // The example reply's own words, copied in: taken out
+    const example = dropCopiedExample(executableCode);
+    if (example.dropped) {
+      executableCode = example.code;
+      note("the example reply's speak() copied into the program → taken out: corrected before running");
+    }
+    // The user's own words said back, in a program that does something else too: taken out
+    const echo = isInstruction(request) ? dropRequestEcho(executableCode, request) : { code: executableCode, dropped: 0 };
+    if (echo.dropped > 0) {
+      executableCode = echo.code;
+      note("a speak() of the request's own words → taken out: corrected before running");
+    }
+    // Its own requestAnimationFrame(), setTimeout() …: taken out, so the browser's runs
+    const browserCopies = dropBrowserCopies(executableCode);
+    if (browserCopies.dropped.length > 0) {
+      executableCode = browserCopies.code;
+      for (const name of browserCopies.dropped) note(`its own ${name}() → the browser's: corrected before running`);
+    }
+    // A stray quote or backtick ending a line (markdown's, kept), or a closing bracket
+    // nothing opened: removed when that alone makes the program parse
+    const stray = dropStrayCharacter(executableCode);
+    if (stray) {
+      executableCode = stray.code;
+      note(`${strayName(stray.removed)} at the end of line ${stray.line} → removed: corrected before running`);
+    }
+    // A fence's language label left on a line of its own (`javascript`): taken out
+    const labelled = dropFenceLabels(executableCode);
+    if (labelled.labels.length > 0) {
+      executableCode = labelled.code;
+      note(`${labelled.labels.map((l) => `a line of just "${l}"`).join(', ')} (a fence's label, left in the code) → removed: corrected before running`);
+    }
+    // Statements where an arrow function's body should be a block: wrapped in braces
+    const arrows = wrapBracelessArrows(executableCode);
+    if (arrows) {
+      executableCode = arrows.code;
+      note(`statements as an arrow function's body (line${arrows.lines.length > 1 ? 's' : ''} ${arrows.lines.join(', ')}) → wrapped in { }: corrected before running`);
+    }
+    // A function that calls itself with no end while a frame request already repeats it
+    const endless = dropEndlessSelfCalls(executableCode);
+    if (endless.dropped.length > 0) {
+      executableCode = endless.code;
+      for (const name of endless.dropped) note(`${name}() called itself with no end (its own frame request already repeats it) → that call removed: corrected before running`);
+    }
+    // A line of code written inside backticks (a template literal that does nothing): unwrapped
+    const ticked = unwrapBackticks(executableCode);
+    if (ticked) {
+      executableCode = ticked.code;
+      note(`code written inside backticks (line${ticked.lines.length > 1 ? 's' : ''} ${ticked.lines.join(', ')}) → the backticks taken off: corrected before running`);
+    }
+    // three.js imports: THREE is provided
+    const three = provideThree(executableCode);
+    if (three.changed) {
+      executableCode = three.code;
+      for (const name of three.provided) note(`import of '${name === 'THREE' ? 'three' : 'tone'}' → the ready-made ${name}: corrected before running`);
+    }
+    // Packages the browser doesn't have, loaded and never used: taken out
+    const packages = dropUnusedPackages(executableCode);
+    if (packages.dropped.length > 0) {
+      executableCode = packages.code;
+      for (const from of packages.dropped) note(`unused package '${from}' → removed: corrected before running`);
+    }
+  }
+  // Drawing calls and settings made on the canvas element itself: they go through its context
+  if (!isProse) {
+    const onCanvas = moveToContext(executableCode);
+    if (onCanvas.moved.length > 0) {
+      executableCode = onCanvas.code;
+      for (const { object, members } of onCanvas.moved) note(`${members.map((m) => `${object}.${m}`).join(', ')} → ${object}.getContext("2d")…: a canvas element draws through its context: corrected before running`);
+    }
+  }
+  // Members its objects don't have (ctx.fillstyle, style.backgroundColour): a sure slip is
+  // corrected now; anything else is reported after the run as its error (property-check.ts)
+  const unknown = isProse ? [] : unknownMembers(executableCode);
+  const slips = unknown.filter((issue) => issue.slip);
+  if (slips.length > 0) {
+    executableCode = renameMembers(executableCode, slips.map((issue) => ({ object: issue.object, from: issue.member, to: issue.slip!, spans: issue.spans })));
+    for (const issue of slips) note(`${issue.object}.${issue.member} → ${issue.object}.${issue.slip}: corrected before running`);
+  }
+  // (soft: a member this browser lacks may be one a newer browser has, ctx.filter on
+  // Safari: on a run that works it is noted, not made the error)
+  const notThere: Array<{ line: number; error: string; soft?: boolean }> = unknown
+    .filter((issue) => !issue.slip)
+    .map((issue) => ({ line: issue.line, error: unknownMemberError(issue), soft: true }));
+  if (!isProse) {
+    // Writes to read-only properties and invalid style values (property-check.ts): a sure
+    // answer is corrected, the rest reported after the run
+    const unusable = unusableAssignments(executableCode);
+    if (unusable.some((issue) => issue.fix)) {
+      executableCode = applyAssignmentFixes(executableCode, unusable);
+      for (const issue of unusable) if (issue.fix) note(`${issue.fix.note}: corrected before running`);
+    }
+    for (const issue of unusable) if (!issue.fix) notThere.push({ line: issue.line, error: issue.message });
+    // A name in the wrong letter case (mycount for myCount): the declared one
+    const cased = fixCaseSlips(executableCode);
+    if (cased.fixed.length > 0) {
+      executableCode = cased.code;
+      for (const { from, to } of cased.fixed) note(`${from} → ${to}: corrected before running`);
+    }
+    // A key its own object literal doesn't have, one slip from one it does (sounds.drum for drums)
+    const keys = fixKeySlips(executableCode);
+    if (keys.fixed.length > 0) {
+      executableCode = keys.code;
+      for (const { object, from, to } of keys.fixed) note(`${object}.${from} → ${object}.${to} (the key it has): corrected before running`);
+    }
+    // An iterator's result kept instead of its item (outputs.values().next()): its value
+    const iterated = fixIteratorResults(executableCode);
+    if (iterated.fixed.length > 0) {
+      executableCode = iterated.code;
+      // (an iterator read with [n] comes back as its own `from → to`; a .next() result as the name that kept it)
+      for (const name of iterated.fixed) {
+        note(name.includes(' → ') ? `${name}: corrected before running` : `${name} = ….next() is { value, done } → ….next().value: corrected before running`);
+      }
+    }
+    // An audio node read as a property of an AudioContext: the create…() that makes it
+    const nodes = fixAudioNodeProperties(executableCode);
+    if (nodes.fixed.length > 0) {
+      executableCode = nodes.code;
+      for (const change of nodes.fixed) note(`audio context ${change}: corrected before running`);
+    }
+    // An animation that moves things but asks for one frame only: it asks for the next too
+    const frames = loopOneFrameAnimations(executableCode);
+    if (frames.looped.length > 0) {
+      executableCode = frames.code;
+      for (const issue of notThere) issue.line += frames.atLines.filter((at) => at < issue.line).length;
+      for (const name of frames.looped) note(`${name}() moved things for one frame only → it asks for the next frame: corrected before running`);
+    }
+    // A variable declared inside one function and used in another: declared for the whole program
+    const sharing = shareDeclarations(executableCode);
+    if (sharing.shared.length > 0) {
+      executableCode = sharing.code;
+      for (const { name, from, line } of sharing.shared) {
+        // (each adds one line before its function)
+        for (const issue of notThere) if (issue.line >= line) issue.line += 1;
+        note(`${name} was declared inside ${from}() but used outside it → declared for the whole program, set in ${from}(): corrected before running`);
+      }
+    }
+    // A drawing context, canvas or audio context it uses but never made: made at its top
+    const missing = declareMissing(executableCode);
+    if (missing.declared.length > 0) {
+      executableCode = missing.code;
+      // (its lines moved down by the declarations put at its top)
+      for (const issue of notThere) issue.line += missing.declared.length;
+      for (const { name, make } of missing.declared) note(`${name} was never made → const ${name} = ${make}: corrected before running`);
+    }
+    // ---- Library-specific repairs (Tone.js): after every general one above ----
+    // Notes added to a time, and a pitch given to a NoiseSynth (error-hints.ts)
+    const toneCalls = fixToneCalls(executableCode);
+    if (toneCalls.fixed.length > 0) {
+      executableCode = toneCalls.code;
+      for (const change of toneCalls.fixed) note(`${change}: corrected before running`);
+    }
+  }
+  return { code: executableCode, notThere };
+}
 
 /** A program run, as the fix loop knows it */
 type RunRecord = {
@@ -1378,10 +1687,12 @@ export class ConversationOrchestrator {
           const failedError = this.lastRun?.error ?? null;
           const unusableWhy = async (raw: string): Promise<string | undefined> => {
             repeatedTrial = false;
-            const applied = applyFixReply(original, raw, fixLine, options.fixBlock?.end);
+            const applied = applyFixReply(original, raw, fixLine, options.fixBlock?.end, options.fixWhole);
             // (judged as it would run: a whole program with the declarations it dropped put back)
             const program = options.fixWhole ? restoreDeclarations(original, applied).code : applied;
-            const code = inspectExecutableCode(program).code.trim();
+            const prepared = inspectExecutableCode(program);
+            // (with the repairs it gets before a real run: a test run judges what would run)
+            const code = prepared.isProse ? prepared.code.trim() : repairBeforeRunning(prepared.code.trim(), false, () => {}, codeTask).code.trim();
             const problem = await unusableFix(original, program, code, options.fixBlock?.name, codeTask);
             if (problem) return UNUSABLE_WHY[problem];
             if (failedError && typeof this.javascriptRuntime.trialRun === 'function') {
@@ -1399,13 +1710,16 @@ export class ConversationOrchestrator {
           // The same question again (line fixes only, within the same try), the last sampled far
           // from the one before
           const reasks = options.fixWhole || options.fixBlock ? 0 : LINE_FIX_REASKS;
+          // An unchanged line for an error about a value made on another line: asking the same
+          // question at other temperatures gets the same line (the next try marks where it is made)
+          const madeElsewhere = (madeAsWrongClass(original, failedError ?? '', this.javascriptRuntime.pageScope?.() ?? undefined)?.line ?? fixLine) !== fixLine;
           let lastSampling = fixSampling(options.fixAttempt ?? 1) ?? SAMPLING_SWINGS[0];
           const usedSamplings = [lastSampling];
           // The last reply is judged too (it is not asked for again)
           for (let extra = 0; extra <= reasks; extra++) {
             if (!this.scheduler.isTurnValid(turnId) || signal.aborted || (genResult.aborted && !stoppedRepeating)) break;
             const why = await unusableWhy(rawAccumulatedTokens || assistantMsg.canonicalContent || genResult.text);
-            if (!why || extra === reasks) break;
+            if (!why || extra === reasks || (madeElsewhere && why === UNUSABLE_WHY.unchanged)) break;
             const sampling = extra + 1 === reasks ? contrastSampling(lastSampling, usedSamplings) : reaskSampling(options.fixAttempt ?? 1, extra + 1);
             lastSampling = sampling;
             usedSamplings.push(sampling);
@@ -1448,7 +1762,7 @@ export class ConversationOrchestrator {
         if (this.scheduler.isTurnValid(turnId)) {
           // A fix reply is search/replace edits to the failed program: they're applied, and the
           // code panel shows the whole program that runs
-          let fixedProgram = options?.autoFix ? applyFixReply(options.autoFix, rawContent, fixLine, options.fixBlock?.end) : rawContent;
+          let fixedProgram = options?.autoFix ? applyFixReply(options.autoFix, rawContent, fixLine, options.fixBlock?.end, options.fixWhole) : rawContent;
           // A whole program that dropped declarations it still uses gets them back (line-fix.ts)
           if (options?.autoFix && options.fixWhole) {
             const kept = restoreDeclarations(options.autoFix, fixedProgram);
@@ -1467,136 +1781,22 @@ export class ConversationOrchestrator {
           });
           if (inspected.spokeComment) appendRunLog('imagined', `its closing comment → speak(${JSON.stringify(inspected.spokeComment.slice(0, 80))}): corrected before running`);
           if (inspected.called?.length) appendRunLog('imagined', `${inspected.called.map((n) => `${n}()`).join(', ')} declared but never called → called at the end: corrected before running`);
+          if (inspected.hoistedScripts) appendRunLog('imagined', `${inspected.hoistedScripts === 1 ? 'a <script>' : `${inspected.hoistedScripts} <script>s`} in markup the program sets never runs in the browser → its code is part of the program: corrected before running`);
           if (inspected.exposed?.length) appendRunLog('imagined', `${inspected.exposed.map((n) => `${n}()`).join(', ')} made reachable from the page's inline handlers: corrected before running`);
           if (inspected.repeatedBlocks) appendRunLog('imagined', `the program written out again in another code block → one copy kept: corrected before running`);
           if (inspected.redeclared?.length) appendRunLog('imagined', `${inspected.redeclared.join(', ')} declared again → set again (the first declaration made let): corrected before running`);
           if (inspected.cutOff) {
-            const { dropped, closed } = inspected.cutOff;
-            appendRunLog('imagined', `the reply was cut off: ${dropped ? `its unfinished last ${dropped === 1 ? 'line' : `${dropped} lines`} removed and ` : ''}${closed} open block${closed === 1 ? '' : 's'} closed: corrected before running`);
+            const { dropped, closed, template } = inspected.cutOff;
+            const closes = [template ? 'its open template string' : '', closed ? `${closed} open block${closed === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ');
+            appendRunLog('imagined', `the reply was cut off: ${dropped ? `its unfinished last ${dropped === 1 ? 'line' : `${dropped} lines`} removed and ` : ''}${closes} closed: corrected before running`);
           }
           // Comments go before it runs (and before it enters the history); a fix's program
           // already came without them
           // Trimmed like the runtime trims it, so error lines match the program kept here
           let executableCode = (options?.autoFix ? inspected.code : stripComments(inspected.code)).trim();
-          // First, lines that go (so the line numbers below match the program that runs).
-          // Its own speak()/out/clear: taken out so the real helpers are used (error-hints.ts)
-          if (!inspected.isProse) {
-            const copies = dropHelperCopies(executableCode);
-            if (copies.dropped.length > 0 || copies.renamed.length > 0 || copies.kept.length > 0) {
-              executableCode = copies.code;
-              for (const name of copies.dropped) appendRunLog('imagined', `its own ${name} → the ready-made one: corrected before running`);
-              // Its own speak() holding the whole program: renamed, the real speak() kept for what it says
-              for (const rename of copies.renamed) appendRunLog('imagined', `its own ${rename}() (it held the program): corrected before running`);
-              // Its own clear(), root, out that does something of its own: kept under another name
-              for (const rename of copies.kept) appendRunLog('imagined', `its own ${rename} (a helper's name, kept as the program's): corrected before running`);
-            }
-            // The example reply's own words, copied in: taken out
-            const example = dropCopiedExample(executableCode);
-            if (example.dropped) {
-              executableCode = example.code;
-              appendRunLog('imagined', "the example reply's speak() copied into the program → taken out: corrected before running");
-            }
-            // Its own requestAnimationFrame(), setTimeout() …: taken out, so the browser's runs
-            const browserCopies = dropBrowserCopies(executableCode);
-            if (browserCopies.dropped.length > 0) {
-              executableCode = browserCopies.code;
-              for (const name of browserCopies.dropped) appendRunLog('imagined', `its own ${name}() → the browser's: corrected before running`);
-            }
-            // A stray quote or backtick ending a line (markdown's, kept): removed when that alone
-            // makes the program parse
-            const stray = dropStrayQuote(executableCode);
-            if (stray) {
-              executableCode = stray.code;
-              appendRunLog('imagined', `a stray quote at the end of line ${stray.line} → removed: corrected before running`);
-            }
-            // three.js imports: THREE is provided
-            const three = provideThree(executableCode);
-            if (three.changed) {
-              executableCode = three.code;
-              for (const name of three.provided) appendRunLog('imagined', `import from '${name === 'THREE' ? 'three' : 'tone'}' → the ready-made ${name}: corrected before running`);
-            }
-            // Packages the browser doesn't have, loaded and never used: taken out
-            const packages = dropUnusedPackages(executableCode);
-            if (packages.dropped.length > 0) {
-              executableCode = packages.code;
-              for (const from of packages.dropped) appendRunLog('imagined', `unused package '${from}' → removed: corrected before running`);
-            }
-          }
-          // Members its objects don't have (ctx.fillstyle, style.backgroundColour): a sure slip is
-          // corrected now; anything else is reported after the run as its error (property-check.ts)
-          const unknown = inspected.isProse ? [] : unknownMembers(executableCode);
-          const slips = unknown.filter((issue) => issue.slip);
-          if (slips.length > 0) {
-            executableCode = renameMembers(executableCode, slips.map((issue) => ({ object: issue.object, from: issue.member, to: issue.slip!, spans: issue.spans })));
-            for (const issue of slips) appendRunLog('imagined', `${issue.object}.${issue.member} → ${issue.object}.${issue.slip}: corrected before running`);
-          }
-          // (soft: a member this browser lacks may be one a newer browser has, ctx.filter on
-          // Safari: on a run that works it is noted, not made the error)
-          const notThere: Array<{ line: number; error: string; soft?: boolean }> = unknown
-            .filter((issue) => !issue.slip)
-            .map((issue) => ({ line: issue.line, error: unknownMemberError(issue), soft: true }));
-          if (!inspected.isProse) {
-            // Writes to read-only properties and invalid style values (property-check.ts): a sure
-            // answer is corrected, the rest reported after the run
-            const unusable = unusableAssignments(executableCode);
-            if (unusable.some((issue) => issue.fix)) {
-              executableCode = applyAssignmentFixes(executableCode, unusable);
-              for (const issue of unusable) if (issue.fix) appendRunLog('imagined', `${issue.fix.note}: corrected before running`);
-            }
-            for (const issue of unusable) if (!issue.fix) notThere.push({ line: issue.line, error: issue.message });
-            // A name in the wrong letter case (mycount for myCount): the declared one
-            const cased = fixCaseSlips(executableCode);
-            if (cased.fixed.length > 0) {
-              executableCode = cased.code;
-              for (const { from, to } of cased.fixed) appendRunLog('imagined', `${from} → ${to}: corrected before running`);
-            }
-            // A key its own object literal doesn't have, one slip from one it does (sounds.drum for drums)
-            const keys = fixKeySlips(executableCode);
-            if (keys.fixed.length > 0) {
-              executableCode = keys.code;
-              for (const { object, from, to } of keys.fixed) appendRunLog('imagined', `${object}.${from} → ${object}.${to} (the key it has): corrected before running`);
-            }
-            // An iterator's result kept instead of its item (outputs.values().next()): its value
-            const iterated = fixIteratorResults(executableCode);
-            if (iterated.fixed.length > 0) {
-              executableCode = iterated.code;
-              // (an iterator read with [n] comes back as its own `from → to`; a .next() result as the name that kept it)
-              for (const name of iterated.fixed) {
-                appendRunLog('imagined', name.includes(' → ') ? `${name}: corrected before running` : `${name} = ….next() is { value, done } → ….next().value: corrected before running`);
-              }
-            }
-            // An audio node read as a property of an AudioContext: the create…() that makes it
-            const nodes = fixAudioNodeProperties(executableCode);
-            if (nodes.fixed.length > 0) {
-              executableCode = nodes.code;
-              for (const change of nodes.fixed) appendRunLog('imagined', `audio context ${change}: corrected before running`);
-            }
-            // An animation that moves things but asks for one frame only: it asks for the next too
-            const frames = loopOneFrameAnimations(executableCode);
-            if (frames.looped.length > 0) {
-              executableCode = frames.code;
-              for (const issue of notThere) issue.line += frames.atLines.filter((at) => at < issue.line).length;
-              for (const name of frames.looped) appendRunLog('imagined', `${name}() moved things for one frame only → it asks for the next frame: corrected before running`);
-            }
-            // A variable declared inside one function and used in another: declared for the whole program
-            const sharing = shareDeclarations(executableCode);
-            if (sharing.shared.length > 0) {
-              executableCode = sharing.code;
-              for (const { name, from, line } of sharing.shared) {
-                // (each adds one line before its function)
-                for (const issue of notThere) if (issue.line >= line) issue.line += 1;
-                appendRunLog('imagined', `${name} was declared inside ${from}() but used outside it → declared for the whole program, set in ${from}(): corrected before running`);
-              }
-            }
-            // A drawing context, canvas or audio context it uses but never made: made at its top
-            const missing = declareMissing(executableCode);
-            if (missing.declared.length > 0) {
-              executableCode = missing.code;
-              // (its lines moved down by the declarations put at its top)
-              for (const issue of notThere) issue.line += missing.declared.length;
-              for (const { name, make } of missing.declared) appendRunLog('imagined', `${name} was never made → const ${name} = ${make}: corrected before running`);
-            }
-          }
+          const repaired = repairBeforeRunning(executableCode, !!inspected.isProse, (text) => appendRunLog('imagined', text), codeTask);
+          executableCode = repaired.code;
+          const notThere = repaired.notThere;
           const isProse = inspected.isProse || forceProse;
           assistantMsg.rawCode = executableCode;
           assistantMsg.rawLlmOutput = rawContent;
@@ -1630,10 +1830,12 @@ export class ConversationOrchestrator {
             const attempt = options?.fixAttempt ?? 1;
             if (failed) {
               // What the reply changed in the program (its first line when it changed nothing)
-              const applied = options?.autoFix ? applyFixReply(options.autoFix, rawContent, fixLine, options.fixBlock?.end) : rawContent;
-              const shown =
-                (options?.autoFix ? changedLines(options.autoFix, options.fixWhole ? restoreDeclarations(options.autoFix, applied).code : applied) : '') ||
-                rawContent.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('//') && !l.startsWith('```'));
+              const applied = options?.autoFix ? applyFixReply(options.autoFix, rawContent, fixLine, options.fixBlock?.end, options.fixWhole) : rawContent;
+              const shown = failedReplyLine(
+                options?.autoFix,
+                options?.autoFix ? changedLines(options.autoFix, options.fixWhole ? restoreDeclarations(options.autoFix, applied).code : applied) : '',
+                rawContent
+              );
               if (shown) {
                 const key = this.requestKey(failed);
                 setForRecentRequests(this.failedReplies, key, [...(this.failedReplies.get(key) ?? []), shown]);
@@ -1750,8 +1952,15 @@ export class ConversationOrchestrator {
               execResult.error = NO_PROGRAM;
               appendRunLog('error', NO_PROGRAM);
             }
+            // Talk that only says the question back is no answer: the question is asked again
+            const copiedQuestion = !execResult.error && onlyAsksExample(executableCode, codeTask);
+            const saidBack = !execResult.error && !copiedQuestion && saysQuestionBack(executableCode, codeTask);
+            if (saidBack || copiedQuestion) {
+              execResult.error = copiedQuestion ? COPIED_QUESTION : SAID_BACK;
+              appendRunLog('error', execResult.error);
+            }
             // Only talk that asks the user something: their answer comes next, nothing is missing
-            const asksUser = isTalkOnly(executableCode) && /\?\s*["'`]\s*\)/.test(executableCode);
+            const asksUser = !saidBack && !copiedQuestion && isTalkOnly(executableCode) && /\?\s*["'`]\s*\)/.test(executableCode);
             if (asksUser) appendRunLog('retry', 'the reply asks the user a question: waiting for the answer');
             if (!execResult.error && !asksUser) {
               const missing = await this.missingOutcome(codeTask, soundMark, executableCode);
@@ -1776,7 +1985,7 @@ export class ConversationOrchestrator {
               task: codeTask,
               isAutoFix: !!options?.autoFix,
               fixRequested: false,
-              error: execResult.error ?? null,
+              error: execResult.error ? this.namedError(execResult.error, executableCode) : null,
               errorLine: execResult.errorLine,
               fixAttempt: options?.autoFix ? (options.fixAttempt ?? 1) : 0,
               originalTurnId: fixedTurnId ?? turnId,
@@ -2019,7 +2228,7 @@ export class ConversationOrchestrator {
     const run = this.lastRun;
     // A program that only talks can't have thrown it: it's from an app still on screen from before
     if (!run || run.error || isTalkOnly(run.code)) return;
-    run.error = message;
+    run.error = this.namedError(message, run.code);
     run.errorLine = line;
     // Still finishing its turn (speaking): the turn's end sends it
     if (!this.scheduler.getActiveTurnId()) this.maybeAutoFix(run.turnId);
@@ -2049,6 +2258,7 @@ export class ConversationOrchestrator {
     if (this.scheduler.getActiveTurnId() || this.gaveUp.has(this.requestKey(run))) return; // the user has moved on
     const said = this.memoryStore.getMessages().find((m) => m.id === `msg_assistant_${run.turnId}`)?.canonicalContent ?? '';
     const soundBefore = this.javascriptRuntime.soundUseCount?.() ?? 0;
+    const soundMark = { uses: soundBefore, heard: this.javascriptRuntime.soundHeardCount?.() ?? 0, silent: this.javascriptRuntime.soundSilentCount?.() ?? 0 };
     const result = await this.javascriptRuntime.execute(code, undefined, {
       onSpeak: (phrase) => {
         if (phrase.trim() && !said.includes(phrase.trim())) void this.speakOutOfTurn(phrase);
@@ -2056,12 +2266,21 @@ export class ConversationOrchestrator {
       audioContextAccessor: this.audioContextAccessor,
     });
     if (result.error && result.errorLine === undefined) result.errorLine = await syntaxErrorLine(code);
+    // A corrected program that ran is held to the request like any other: it may still draw nothing
+    // or stay silent (the fix loop goes on from there)
+    if (!result.error && !isTalkOnly(code) && !this.scheduler.getActiveTurnId()) {
+      const missing = await this.missingOutcome(run.task, soundMark, code);
+      if (missing) {
+        result.error = missing;
+        appendRunLog('error', missing);
+      }
+    }
     setForRecentRequests(this.correctedPrograms, run.turnId, { code, request: this.requestKey(run) }, (_turnId, v) => v.request);
     if (this.lastAction?.kind === 'code' && this.lastAction.code === run.code) this.lastAction = { ...this.lastAction, code };
     this.lastRun = {
       ...run,
       code,
-      error: result.error ?? null,
+      error: result.error ? this.namedError(result.error, code) : null,
       errorLine: result.errorLine,
       fixRequested: false,
       ...(blankFix ? { fixAttempt: blankFix.fixAttempt, errorHistory: blankFix.errorHistory } : { corrections: (run.corrections ?? 0) + 1 }),
@@ -2118,7 +2337,7 @@ export class ConversationOrchestrator {
     // A sure slip (a method's wrong case, a typo of a declared name, an element id one slip
     // from an id on the page) is corrected and run again without the model, even in a fix's
     // program; anything else goes to the model with the facts it was missing (error-hints.ts)
-    const hint = errorHint(run.code, run.error, run.errorLine, { ids: this.javascriptRuntime.pageIds?.() ?? [], standIns: this.javascriptRuntime.standInIds?.() ?? [] });
+    const hint = errorHint(run.code, run.error, run.errorLine, this.pageFacts());
     if (hint?.correction && hint.correction.code !== run.code && (run.corrections ?? 0) < 3) {
       run.fixRequested = true;
       void this.correctByRule(run, hint.correction);
@@ -2136,14 +2355,14 @@ export class ConversationOrchestrator {
    * that fails exactly as the program did hasn't addressed the error, so it isn't run for real,
    * and the model is asked instead. A runtime that can't test-run runs it as before.
    */
-  private async correctByRule(run: NonNullable<typeof this.lastRun>, correction: { code: string; note: string }): Promise<void> {
+  private async correctByRule(run: NonNullable<typeof this.lastRun>, correction: { code: string; note: string; mustRunClean?: boolean }): Promise<void> {
     if (typeof this.javascriptRuntime.trialRun === 'function' && run.error) {
       await settleOnIos(AFTER_HEAVY_MS);
       if (this.lastRun !== run || this.scheduler.getActiveTurnId() || this.gaveUp.has(this.requestKey(run))) return;
       const trial = await this.trial(correction.code);
       if (this.lastRun !== run || this.scheduler.getActiveTurnId() || this.gaveUp.has(this.requestKey(run))) return;
-      if (trial.error === run.error) {
-        appendRunLog('imagined', `${correction.note}: a test run of the correction failed the same way (${errorText(trial.error, trial.errorLine)}), so it was not made`);
+      if (trial.error === run.error || (correction.mustRunClean && trial.error)) {
+        appendRunLog('imagined', `${correction.note}: a test run of the correction ${trial.error === run.error ? 'failed the same way' : 'gave an error'} (${errorText(trial.error, trial.errorLine)}), so it was not made`);
         const attempt = (run.fixAttempt ?? 0) + 1;
         if (attempt <= MAX_FIX_TRIES) this.nextTry(run, attempt);
         return;
@@ -2172,20 +2391,36 @@ export class ConversationOrchestrator {
     setForRecentRequests(this.fixKindsUsed, kindsKey, used, (k) => k.slice(0, k.indexOf('\n')));
     const broken = brokenLines(run.code);
     const blank = this.blankFor(run);
+    const member = this.memberBlankFor(run);
     const fits = (kind: FixKind) =>
-      kind === 'blank'
+      kind === 'member'
+        ? !!member
+        : kind === 'blank'
         ? !!blank
         : kind === 'function'
           ? !broken && !!enclosingFunction(run.code, run.errorLine)
           : kind === 'line' || kind === 'different'
             ? !!run.errorLine || !!broken
-            : true;
+            : kind === 'made'
+              ? !broken && !!run.errorLine && (madeAsWrongClass(run.code, run.error ?? '', this.javascriptRuntime.pageScope?.() ?? undefined)?.line ?? run.errorLine) !== run.errorLine
+              : true;
     const unused = (this.largeModel() ? FIX_ORDER_LARGE : FIX_ORDER_SMALL).find((k) => !used.has(k) && fits(k));
     // Every kind asked already (one didn't fit): the whole program, told the replies that failed,
     // so this question too differs from every one before
     const kind = unused ?? 'program';
     used.add(kind);
-    const hint = hintText ?? errorHint(run.code, run.error, run.errorLine, { ids: this.javascriptRuntime.pageIds?.() ?? [], standIns: this.javascriptRuntime.standInIds?.() ?? [] })?.text;
+    // What Chatty's libraries (Tone.js, three.js) printed or threw for this program goes to the fix as facts
+    const libraryFacts = (this.javascriptRuntime.soundSetup?.()?.library ?? []).join(' ');
+    const hint =
+      [hintText ?? errorHint(run.code, run.error, run.errorLine, this.pageFacts())?.text, libraryFacts]
+        .filter(Boolean)
+        .join(' ') || undefined;
+    if (kind === 'member' && member) {
+      run.fixRequested = true;
+      this.events.onRunStatus?.(run.turnId, { kind: 'error', text: `${errorText(run.error, run.errorLine)} (choosing among the real members of ${member.blank.member!.object})` });
+      void this.blankStage(run, member.blank, attempt, hint, member.members);
+      return;
+    }
     if (kind === 'blank' && blank) {
       run.fixRequested = true;
       this.events.onRunStatus?.(run.turnId, { kind: 'error', text: `${errorText(run.error, run.errorLine)} (trying fixes for ${blank.text})` });
@@ -2196,7 +2431,18 @@ export class ConversationOrchestrator {
     const different = (kind === 'different' || !unused) && tried.length
       ? `Write a fix different from these, which didn't work: ${tried.slice(-3).map((r) => `\`${r}\``).join('; ')}.`
       : undefined;
-    this.askFix(run, attempt, kind === 'blank' ? 'line' : kind, [note, different, hint].filter(Boolean).join(' ') || undefined);
+    this.askFix(run, attempt, kind === 'blank' || kind === 'member' ? 'line' : kind, [note, different, hint].filter(Boolean).join(' ') || undefined);
+  }
+
+  /** An error with a bundle's shortened class names replaced by the library's own ("an instance of e" → "Tone.Param", "Class constructor Cu" → "Tone.PolySynth"), when the page can say */
+  private namedError(error: string, code: string): string {
+    const scope = /is an instance of|Class constructor/.test(error) ? this.javascriptRuntime.pageScope?.() : null;
+    return scope ? withLibraryClassNames(error, code, scope) : error;
+  }
+
+  /** What the live page holds, for the hints of an error (see error-hints.ts PageFacts) */
+  private pageFacts() {
+    return { ids: this.javascriptRuntime.pageIds?.() ?? [], standIns: this.javascriptRuntime.standInIds?.() ?? [], scope: this.javascriptRuntime.pageScope?.() ?? undefined };
   }
 
   /** The request a run belongs to (every fix of it shares the key) */
@@ -2215,6 +2461,11 @@ export class ConversationOrchestrator {
   }
 
   /** The blank for a failed run, when its program can be test-run and parses */
+  /** The member blank for the run's error: a choice among the real members of an object that lacks the one the program used */
+  private memberBlankFor(run: NonNullable<typeof this.lastRun>): ReturnType<typeof memberBlank> {
+    return run.error && typeof this.javascriptRuntime.trialRun === 'function' && !brokenLines(run.code) ? memberBlank(run.code, run.error, run.errorLine, this.javascriptRuntime.pageScope?.() ?? undefined) : null;
+  }
+
   private blankFor(run: NonNullable<typeof this.lastRun>): Blank | null {
     return run.error && typeof this.javascriptRuntime.trialRun === 'function' && !brokenLines(run.code) ? findBlank(run.code, run.error, run.errorLine) : null;
   }
@@ -2224,7 +2475,9 @@ export class ConversationOrchestrator {
     const wait = TRIAL_GAP_MS - (Date.now() - this.lastTrialEnd);
     if (wait > 0) await settle(wait);
     try {
-      return await this.javascriptRuntime.trialRun!(code);
+      // (named the way the real run's error is, so the two compare as the same error)
+      const result = await this.javascriptRuntime.trialRun!(code);
+      return result.error ? { ...result, error: this.namedError(result.error, code) } : result;
     } finally {
       this.lastTrialEnd = Date.now();
     }
@@ -2254,7 +2507,7 @@ export class ConversationOrchestrator {
    * A fix turn: the marked line (or the statements that don't parse), the whole function around
    * it, or the whole program, as try `attempt`
    */
-  private askFix(run: NonNullable<typeof this.lastRun>, attempt: number, kind: Exclude<FixKind, 'blank'>, factsText?: string): void {
+  private askFix(run: NonNullable<typeof this.lastRun>, attempt: number, kind: Exclude<FixKind, 'blank' | 'member'>, factsText?: string): void {
     if (!run.error) return;
     run.fixRequested = true;
     this.events.onRunStatus?.(run.turnId, {
@@ -2291,8 +2544,11 @@ export class ConversationOrchestrator {
       : fn
         ? { start: fn.start, end: fn.end, name: fn.name || undefined }
         : undefined;
-    const line = kind === 'program' ? undefined : run.errorLine;
-    const facts = [earlierErrors(run.errorHistory, run.error), factsText].filter(Boolean).join(' ') || undefined;
+    // The line that makes the value the error is about, when the fix belongs there ("x.m is not a function" where x is made on another line)
+    const made = kind === 'made' ? madeAsWrongClass(run.code, run.error, this.javascriptRuntime.pageScope?.() ?? undefined) : null;
+    const line = kind === 'program' ? undefined : (made?.line ?? run.errorLine);
+    const facts =
+      [earlierErrors(run.errorHistory, run.error), made ? `The error at line ${run.errorLine} comes from ${made.name}, which is made on the marked line.` : '', factsText].filter(Boolean).join(' ') || undefined;
     const request = fixRequest(run.task, run.code, line, run.error, facts, block);
     this.startFixLog(run);
     const what = broken
@@ -2303,7 +2559,9 @@ export class ConversationOrchestrator {
           ? 'the whole program'
           : kind === 'different'
             ? 'the marked line, unlike the replies that failed'
-            : 'the marked line';
+            : made
+              ? `the line that makes ${made.name} (line ${made.line})`
+              : 'the marked line';
     appendRunLog('retry', `the program failed (${errorText(run.error, run.errorLine)}): asking the model for ${what} (try ${attempt} of ${MAX_FIX_TRIES})`);
     // A short pause before the model runs again, unless the user moves on meanwhile
     void settle(AFTER_HEAVY_MS).then(() => {
@@ -2469,12 +2727,26 @@ export class ConversationOrchestrator {
     const measures = !!this.javascriptRuntime.soundHeardCount;
     const soundSettled = () => heard() || silent() || (asked() && !measures);
     const shown = () => !!this.javascriptRuntime.hasVisualContent?.();
-    const done = () => (!wantsSound || soundSettled()) && (!wantsVisual || shown());
+    // A canvas nothing was drawn on, or an element with nothing in it, shows nothing, unless the
+    // program waits for the user to start it (a click, a key); it gets a moment to fill its first frame
+    const drawn = () => (soundWaits || !this.javascriptRuntime.hasDrawnContent ? shown() : this.javascriptRuntime.hasDrawnContent());
+    const done = () => (!wantsSound || soundSettled()) && (!wantsVisual || drawn());
     // Long enough for the speaker measurement when sound was asked for
     for (let waited = 0; !done() && waited < (wantsSound && asked() ? 2500 : 1500); waited += 100) await settle(100);
+    // Something drawn or shown, for a request of something that moves or counts: the screen has to
+    // keep changing on its own for a few seconds (when the page is watched: a hidden page's
+    // animation frames stop), unless the user drives it (a click, a key, the pointer)
+    const stillScreen =
+      wantsVisual && MOTION_REQUEST.test(request) && !soundWaits && !MOVES_WITH_USER.test(code) && drawn() && !(await screenChanges(this.javascriptRuntime));
     // MIDI that never started a note is silent for that reason: the audio context has nothing to do with it
     const midi = this.javascriptRuntime.midiSummary?.();
     const noNoteStarted = !!midi && midi.sent > 0 && midi.noteOns === 0;
+    // Silent with the audio running: the step the program didn't take, when its page says which
+    // (Tone.Transport never started, a source never connected), in place of the generic advice
+    const stepMissing = wantsSound && asked() && silent() && !noNoteStarted ? missingStepsError(this.javascriptRuntime.soundSetup?.()) : null;
+    // An app to press or type in, with nothing on the page to press or type in
+    const noControls = wantsVisual && MAKES_USED_THING.test(request) && !DRAWING_REQUEST.test(request) && !soundWaits && shown() && drawn() && !!this.javascriptRuntime.controlCount && this.javascriptRuntime.controlCount() === 0;
+    const emptied = wantsVisual && shown() && !drawn() ? (this.javascriptRuntime.emptyElements?.() ?? []) : [];
     const missing = [
       wantsSound && !asked()
         ? soundKinds(request).music
@@ -2483,11 +2755,20 @@ export class ConversationOrchestrator {
         : wantsSound && silent()
           ? noNoteStarted
             ? `No note was started: every MIDI message was something else${midi.others.length ? ` (${midi.others.join('; ')})` : ''}. A note starts with output.send([0x90 + channel, note, velocity]) where channel is 0 to 15 and velocity 1 to 127, and ends with 0x80 + channel.`
-            : /\bTone\s*\./.test(code)
-              ? "The program's sound never reached the speakers: connect each Tone synth to the output with .toDestination(), and play notes with triggerAttackRelease(note, duration, time)."
-              : "The program's sound never reached the speakers: connect each sound to the audio context's destination (node.connect(audioContext.destination))."
+            : stepMissing ??
+              (/\bTone\s*\./.test(code)
+                ? "The program's sound never reached the speakers: connect each Tone synth to the output with .toDestination(), and play notes with triggerAttackRelease(note, duration, time)."
+                : "The program's sound never reached the speakers: connect each sound to the audio context's destination (node.connect(audioContext.destination)).")
           : '',
-      wantsVisual && !shown() ? 'The program showed nothing: what it adds to document.body appears in the card on screen.' : '',
+      wantsVisual && !shown()
+        ? 'The program showed nothing: what it adds to document.body appears in the card on screen.'
+        : wantsVisual && !drawn()
+          ? `The program put nothing visible on screen: its canvas has nothing drawn on it, or its elements are empty${emptied.length ? ` (${emptied.join(', ')} have no text and no size)` : ''}. Put text in an element (textContent, innerHTML) or give it a size (a style with width and height), or draw with the 2d context (fillRect, arc, lineTo, fill, stroke, fillText) in a function that is called.`
+          : noControls
+            ? 'The page has nothing to press or type in: this app needs controls the user can use (button, input, select), each with a handler (onclick, an input listener) that does the work.'
+            : stillScreen
+              ? 'The screen never changed and nothing is scheduled to change it: something that moves or counts has to keep updating what it shows (setInterval, or requestAnimationFrame that draws again each frame).'
+              : '',
     ].filter(Boolean);
     if (missing.length === 0) {
       appendRunLog('retry', `outcome check: ${[wantsSound ? 'wanted sound: heard' : '', wantsVisual ? 'wanted visual: seen' : ''].filter(Boolean).join('; ')}`);
@@ -2512,7 +2793,7 @@ export class ConversationOrchestrator {
     this.events.onMessageCreated?.(note);
   }
 
-  private async blankStage(run: NonNullable<typeof this.lastRun>, blank: Blank, attempt: number, hintText?: string): Promise<void> {
+  private async blankStage(run: NonNullable<typeof this.lastRun>, blank: Blank, attempt: number, hintText?: string, members?: RealMember[]): Promise<void> {
     const error = run.error;
     if (!error) return;
     const moved = () => !!this.scheduler.getActiveTurnId() || this.lastRun !== run;
@@ -2521,14 +2802,15 @@ export class ConversationOrchestrator {
     if (moved()) return;
     this.addFixNote(fixNote(attempt, error), `blank_${run.turnId}`);
     this.startFixLog(run);
-    appendRunLog('retry', `the program failed (${errorText(error, run.errorLine)}): trying expressions for the blank \`${blank.text}\` (${blank.why}), each in a test run (try ${attempt} of ${MAX_FIX_TRIES})`);
+    appendRunLog('retry', `the program failed (${errorText(error, run.errorLine)}): trying ${members ? 'the real members' : 'expressions'} for the blank \`${blank.text}\` (${blank.why}), each in a test run (try ${attempt} of ${MAX_FIX_TRIES})`);
 
     const abort = new AbortController();
     this.blankAbort = abort;
     const provider = this.phonePipeline?.coder ?? this.llmProvider;
     const facts = [earlierErrors(run.errorHistory, error), hintText].filter(Boolean).join(' ') || undefined;
     const page = { ids: this.javascriptRuntime.pageIds?.() ?? [], fields: this.javascriptRuntime.pageFields?.() ?? [] };
-    const choices = blankChoices(run.code, blank, page);
+    // (a member blank: the real members that fit and are related to the name)
+    const choices = members ? members.map((m) => m.name) : blankChoices(run.code, blank, page);
 
     const asking = (request: string, shape: Partial<LlmGenerationOptions> = {}): LlmGenerationOptions => ({
       turnId: `blank_${run.turnId}_${attempt}`,
@@ -2586,29 +2868,34 @@ export class ConversationOrchestrator {
     const test = async (expr: string): Promise<void> => {
       if (tested.has(expr) || count >= MAX_BLANK_CANDIDATES || moved() || abort.signal.aborted) return;
       tested.add(expr);
-      const filled = fillBlank(run.code, blank, expr);
+      const filled = members ? fillMember(run.code, blank, expr) : fillBlank(run.code, blank, expr);
       if (!filled || filled === run.code) return;
       count++;
       // The test copy marks the blank, to tell a clean run from one that never got there (a click
-      // handler, an animation frame)
-      const probe = fillBlank(run.code, blank, `((globalThis.__chattyReached = true), ${expr})`) ?? filled;
+      // handler, an animation frame, a Tone.Loop's callback). A member name can't carry the mark, so
+      // the object it is a member of does
+      const probe = members ? (fillMember(run.code, blank, expr, 'globalThis.__chattyReached = true') ?? filled) : (fillBlank(run.code, blank, `((globalThis.__chattyReached = true), ${expr})`) ?? filled);
       const trial = await this.trial(probe);
       if (moved()) return;
       // 3: ran through the blank without an error; 2: an error further on; 1: another error, no
-      // longer about the blank, or no error but the blank never ran. An error without a line (a
-      // value the page rejected) can't be placed after the blank: no progress
+      // longer about the blank (the same member still missing is not another), or no error but the
+      // blank never ran. An error without a line (a value the page rejected) can't be placed after
+      // the blank: no progress
+      // (a member pick whose use the run never reached is not applied: nothing showed it works)
       const level = !trial.error
         ? trial.reached === false && probe !== filled
-          ? 1
+          ? members
+            ? 0
+            : 1
           : 3
         : namesCandidate(trial.error, expr) || trial.errorLine === undefined
           ? 0
           : trial.error !== error && trial.errorLine !== undefined && trial.errorLine > (run.errorLine ?? blank.line) + (blank.declareAt ? 1 : 0)
             ? 2
-            : trial.error !== error && !mentions.test(trial.error)
+            : trial.error !== error && !mentions.test(trial.error) && !sameMissingMember(trial.error, error)
               ? 1
               : 0;
-      appendRunLog('retry', `a test run: \`${expr}\` for \`${blank.text}\` gave ${trial.error ? `${errorText(trial.error, trial.errorLine)}${level ? ' (progress)' : ''}` : trial.reached === false ? 'no error, but the blank never ran' : 'no error'}`);
+      appendRunLog('retry', `a test run: \`${expr}\` for \`${blank.text}\` gave ${trial.error ? `${errorText(trial.error, trial.errorLine)}${level ? ' (progress)' : ''}` : trial.reached === false ? `no error, but the blank never ran${members ? ' (not applied)' : ''}` : 'no error'}`);
       if (!level) return;
       const entry = { code: filled, expr, level, rank: rankOf(expr), votes: votes.get(expr) ?? 0 };
       if (!best || entry.level > best.level || (entry.level === best.level && (entry.rank < best.rank || (entry.rank === best.rank && entry.votes > best.votes)))) best = entry;
@@ -2639,8 +2926,9 @@ export class ConversationOrchestrator {
       // needn't write anything
       if (ranked.length > 0) await test(ranked[0]);
       if (!settled()) {
-        // Greedy, then wide, then narrow: three really different answers
-        for (const sampling of [{ exact: true }, { sampling: fixSampling(2) }, { sampling: fixSampling(3) }]) {
+        // Greedy, then wide, then narrow: three really different answers (a member blank has only
+        // the real members to choose from: no expression is written)
+        for (const sampling of members ? [] : [{ exact: true }, { sampling: fixSampling(2) }, { sampling: fixSampling(3) }]) {
           if (moved() || abort.signal.aborted) break;
           const reply = await ask(blankRequest(run.task, run.code, blank, error, facts), { ...sampling, fixShape: 'expression', maxOutputTokens: 96 });
           vote(reply === null ? null : firstExpression(reply));

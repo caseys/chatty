@@ -1,6 +1,6 @@
 import { parse, type Node } from 'acorn';
 import { enclosingFunction } from './line-fix.ts';
-import { methodNames, objectType } from './method-hints.ts';
+import { memberChoices, methodNames, objectType, realMembers, type MemberUse, type RealMember } from './method-hints.ts';
 import { editDistance, flatName } from './fuzzy-match.ts';
 
 /**
@@ -20,6 +20,12 @@ export interface Blank {
   spans: Array<{ start: number; end: number }>;
   /** Short plain description: "bill is not declared", "this has no play()" */
   why: string;
+  /**
+   * The blank is a member name (`createSynth` in `Tone.createSynth()`), chosen from what its object
+   * really has (see memberBlank): the object, how it was used, where each use of the member starts
+   * (to put `new` there when a class is chosen for a call) and which choices are classes
+   */
+  member?: { object: string; use: MemberUse; calleeStarts: number[]; classes: string[] };
   /**
    * An undeclared name used more than once: filled by declaring it once here (a char offset, the
    * start of the statement holding its first use), not by writing the expression at every use
@@ -308,6 +314,46 @@ function undeclared(tree: Tree, code: string, name: string, errorLine?: number):
   };
 }
 
+/** Whether an error is about reading or setting a property of undefined or null */
+function reads(message: string): boolean {
+  return /Cannot (?:read|set) propert(?:y|ies) of (?:undefined|null)|Cannot read property '[^']*' of (?:undefined|null)|^(?:undefined|null) is not an object \(evaluating|can't access property "[^"]*", .+? is (?:undefined|null)/.test(message);
+}
+
+/** The member expression whose object was undefined or null, and which of the two, from such an error (null when it can't be told) */
+function readingTarget(tree: Tree, code: string, message: string, line: number | undefined): { member: AnyNode; kind: string } | null {
+  const reading =
+    message.match(/Cannot (?:read|set) propert(?:y|ies) of (undefined|null)(?: \((?:reading|setting) '([^']*)'\))?/) ??
+    message.match(/Cannot read property '([^']*)' of (undefined|null)/) ??
+    message.match(/^(undefined|null) is not an object \(evaluating '(.+)'\)/) ??
+    message.match(/can't access property "([^"]*)", (.+?) is (undefined|null)/);
+  if (!reading) return null;
+  let kind: string;
+  let property: string | undefined;
+  let object: string | undefined;
+  if (reading[0].startsWith("can't")) [property, object, kind] = [reading[1], reading[2], reading[3]];
+  else if (/^Cannot read property/.test(reading[0])) [property, kind] = [reading[1], reading[2]];
+  else if (/^(?:undefined|null) is not an object/.test(reading[0])) [kind, property] = [reading[1], reading[2]];
+  else [kind, property] = [reading[1], reading[2]];
+  const members = (n: AnyNode) =>
+    n.type === 'MemberExpression' && !n.optional && !GLOBAL_OBJECTS.has(render(n.object)) && n.object.type !== 'Literal' && n.object.type !== 'TemplateLiteral';
+  let wanted: AnyNode[];
+  if (object !== undefined) {
+    wanted = near<AnyNode>(tree, line, (n) => members(n) && matches(code, n.object, object!), failLine);
+  } else if (property !== undefined && /^[\w$]+$/.test(property) && !/\(/.test(property)) {
+    // "reading 'p'": the member with that property name
+    wanted = near<AnyNode>(tree, line, (n) => members(n) && (n.computed ? code.slice(n.property.start, n.property.end).replace(/['"]/g, '') === property : n.property.name === property), failLine);
+  } else if (property !== undefined) {
+    // Safari's "evaluating 'a.b.p'" (or with a call at the end): the whole member's text
+    const text = property.replace(/\(.*\)$/, '');
+    wanted = near<AnyNode>(tree, line, (n) => members(n) && matches(code, n, text), failLine);
+    if (wanted.length === 0) wanted = near<AnyNode>(tree, line, (n) => members(n) && matches(code, n, property!), failLine);
+  } else {
+    wanted = [];
+  }
+  // Several on one line: the first whose object isn't a plain name the program declared as a literal
+  return wanted.length ? { member: wanted[0], kind } : null;
+}
+
 /** The expression the error names, on or near errorLine, or null when the error doesn't name one. */
 export function findBlank(code: string, error: string, errorLine?: number): Blank | null {
   const tree = analyse(code);
@@ -338,40 +384,9 @@ export function findBlank(code: string, error: string, errorLine?: number): Blan
   }
 
   // Reading or setting a property of nothing
-  const reading =
-    message.match(/Cannot (?:read|set) propert(?:y|ies) of (undefined|null)(?: \((?:reading|setting) '([^']*)'\))?/) ??
-    message.match(/Cannot read property '([^']*)' of (undefined|null)/) ??
-    message.match(/^(undefined|null) is not an object \(evaluating '(.+)'\)/) ??
-    message.match(/can't access property "([^"]*)", (.+?) is (undefined|null)/);
-  if (reading) {
-    let kind: string;
-    let property: string | undefined;
-    let object: string | undefined;
-    if (reading[0].startsWith("can't")) [property, object, kind] = [reading[1], reading[2], reading[3]];
-    else if (/^Cannot read property/.test(reading[0])) [property, kind] = [reading[1], reading[2]];
-    else if (/^(?:undefined|null) is not an object/.test(reading[0])) [kind, property] = [reading[1], reading[2]];
-    else [kind, property] = [reading[1], reading[2]];
-    const members = (n: AnyNode) =>
-      n.type === 'MemberExpression' && !n.optional && !GLOBAL_OBJECTS.has(render(n.object)) && n.object.type !== 'Literal' && n.object.type !== 'TemplateLiteral';
-    let wanted: AnyNode[];
-    if (object !== undefined) {
-      wanted = near<AnyNode>(tree, line, (n) => members(n) && matches(code, n.object, object!), failLine);
-    } else if (property !== undefined && /^[\w$]+$/.test(property) && !/\(/.test(property)) {
-      // "reading 'p'": the member with that property name
-      wanted = near<AnyNode>(tree, line, (n) => members(n) && (n.computed ? code.slice(n.property.start, n.property.end).replace(/['"]/g, '') === property : n.property.name === property), failLine);
-    } else if (property !== undefined) {
-      // Safari's "evaluating 'a.b.p'" (or with a call at the end): the whole member's text
-      const text = property.replace(/\(.*\)$/, '');
-      wanted = near<AnyNode>(tree, line, (n) => members(n) && matches(code, n, text), failLine);
-      if (wanted.length === 0) wanted = near<AnyNode>(tree, line, (n) => members(n) && matches(code, n, property!), failLine);
-    } else {
-      wanted = [];
-    }
-    if (wanted.length === 0) return null;
-    // Several on one line: the first whose object isn't a plain name the program declared as a literal
-    const member = wanted[0];
-    return blankAt(tree, code, member.object, `${code.slice(member.object.start, member.object.end)} is ${kind}`, failLine(member));
-  }
+  const target = readingTarget(tree, code, message, line);
+  if (target) return blankAt(tree, code, target.member.object, `${code.slice(target.member.object.start, target.member.object.end)} is ${target.kind}`, failLine(target.member));
+  if (reads(message)) return null;
 
   // Destructuring nothing: "Cannot destructure property 'x' of 'obj' as it is undefined."
   const destructure = message.match(/Cannot destructure (?:property '[^']*' of )?'([^']+)' as it is (undefined|null)/);
@@ -409,6 +424,95 @@ export function findBlank(code: string, error: string, errorLine?: number): Blan
   }
 
   return null;
+}
+
+/**
+ * The member blank, for a member that doesn't exist on a real object: "Tone.create is not a
+ * function", "new Tone.Foo()", or `Tone.make.x` where Tone.make is undefined. What the object
+ * really has is read from the page (realMembers); the choices are the members that fit the use
+ * (a function for a call, a class for new) and are related to the name, a few of them. Null when
+ * the object can't be found, has the member, or nothing related fits (the facts say what it has).
+ */
+export function memberBlank(code: string, error: string, errorLine?: number, scope?: Record<string, unknown>): { blank: Blank; members: RealMember[] } | null {
+  const tree = analyse(code);
+  if (!tree) return null;
+  const message = bare(error);
+  const line = errorLine && errorLine >= 1 ? errorLine : undefined;
+  let member: AnyNode | null = null;
+  let use: MemberUse = 'call';
+  const safariCallee = message.match(/\(In '.*', '(.+)' is (?:undefined|null)\)/)?.[1];
+  const notFunction = safariCallee ?? (/\(near '\.\.\./.test(message) ? undefined : message.match(/^(.+?) is not a function/)?.[1]);
+  const plain = (n: AnyNode | undefined): n is AnyNode => !!n && n.type === 'MemberExpression' && !n.computed && n.object.type !== 'Super';
+  if (notFunction) {
+    member = near<AnyNode>(tree, line, (n) => n.type === 'CallExpression' && matches(code, n.callee, notFunction)).map((call) => call.callee as AnyNode).find(plain) ?? null;
+  } else if (/is not a constructor/.test(message)) {
+    const evaluating = message.match(/\(evaluating '(.+)'\)/)?.[1];
+    const named = message.match(/^(.+?) is not a constructor/)?.[1] ?? '';
+    const news = near<AnyNode>(tree, line, (n) => n.type === 'NewExpression' && (evaluating ? strip(code.slice(n.start, n.end)) === strip(evaluating) : matches(code, n.callee, named)));
+    member = news.map((n) => n.callee as AnyNode).find(plain) ?? null;
+    use = 'new';
+  } else {
+    // Reading a property of what a missing member gave back: Tone.createSynth.createSynth(…)
+    const target = readingTarget(tree, code, message, line);
+    if (target && plain(target.member.object as AnyNode)) {
+      member = target.member.object as AnyNode;
+      use = 'read';
+    }
+  }
+  if (!member) return null;
+  const object = code.slice(member.object.start, member.object.end);
+  const name = member.property.name as string;
+  if (!/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.test(object)) return null;
+  const real = realMembers(code, object, scope);
+  if (!real || real.members.some((m) => m.name === name)) return null;
+  const choices = memberChoices(name, real.members, use);
+  if (choices.length < 2) return null;
+  // Every use of that member of that object (they all fail the same way)
+  const uses = tree.nodes.filter((n) => n.type === 'MemberExpression' && !n.computed && n.property.name === name && code.slice(n.object.start, n.object.end) === object);
+  return {
+    members: choices,
+    blank: {
+      line: failLine(member),
+      text: name,
+      spans: uses.map((n) => ({ start: n.property.start, end: n.property.end })),
+      why: `${object} has no ${name}${use === 'read' ? '' : '()'}`,
+      member: { object, use, calleeStarts: uses.map((n) => n.start), classes: choices.filter((c) => c.kind === 'class').map((c) => c.name) },
+    },
+  };
+}
+
+/**
+ * The program with the member blank filled by one of the real members. A class chosen where the
+ * member was called (not made with new) is made with new: `Tone.createSynth()` becomes `new
+ * Tone.Synth()`. Null when it doesn't parse.
+ */
+export function fillMember(code: string, blank: Blank, name: string, mark?: string): string | null {
+  const info = blank.member;
+  if (!info || !/^[A-Za-z_$][\w$]*$/.test(name) || blank.spans.length === 0) return null;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  // A test copy can mark each use: its object is evaluated through `((mark), Tone)` (the comma gives
+  // Tone itself, so `this` and `new` work as before), which tells a clean run from one that never got there
+  const marks: Array<{ start: number; end: number; text: string }> = [];
+  blank.spans.forEach((span, i) => {
+    if (code.slice(span.start, span.end) !== blank.text) return;
+    edits.push({ start: span.start, end: span.end, text: name });
+    // (a call that is already made with new keeps it)
+    if (info.use === 'call' && info.classes.includes(name) && !/\bnew\s*$/.test(code.slice(0, info.calleeStarts[i]))) edits.push({ start: info.calleeStarts[i], end: info.calleeStarts[i], text: 'new ' });
+    const at = info.calleeStarts[i];
+    if (mark && code.slice(at, at + info.object.length) === info.object) {
+      marks.push({ start: at, end: at, text: `((${mark}), ` }, { start: at + info.object.length, end: at + info.object.length, text: ')' });
+    }
+  });
+  if (edits.length !== blank.spans.length && edits.length !== blank.spans.length * 2) return null;
+  let result = code;
+  // (a mark goes in before the `new` that starts at the same place: it is applied first, the `new` lands in front of it)
+  for (const edit of [...marks, ...edits].sort((a, b) => b.start - a.start || b.end - a.end)) result = result.slice(0, edit.start) + edit.text + result.slice(edit.end);
+  try {
+    parse(result, OPTIONS);
+  } catch {
+    return null;
+  }
+  return result;
 }
 
 /** The part of the program a choice list is built from */
@@ -923,8 +1027,8 @@ export function choiceRequest(task: string, code: string, blank: Blank, error: s
     ...requestHead(task, error, facts),
     fenced,
     `In this line: ${failing}`,
-    `${blank.why}. These expressions are available:`,
+    blank.member ? `${blank.why}. These members of ${blank.member.object} are available:` : `${blank.why}. These expressions are available:`,
     ...choices.slice(0, 26).map((choice, i) => `${String.fromCharCode(65 + i)}. ${choice}`),
-    `Reply with the letter of the expression that belongs in place of \`${blank.text}\`.`,
+    blank.member ? `Reply with the letter of the member that belongs in place of \`${blank.text}\`.` : `Reply with the letter of the expression that belongs in place of \`${blank.text}\`.`,
   ].join('\n');
 }

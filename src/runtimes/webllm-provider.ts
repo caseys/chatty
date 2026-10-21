@@ -268,7 +268,13 @@ export class WebLlmProvider implements LlmRuntimeProvider {
   private async sizeContext(modelUrl: string | undefined): Promise<void> {
     const config = modelUrl ? await readModelConfig(`${modelFilesUrl(modelUrl)}mlc-chat-config.json`) : null;
     const perToken = kvBytesPerToken(config);
-    const budget = workingMemoryBudget(currentDevice());
+    let setMb: string | null = null;
+    try {
+      setMb = localStorage.getItem('chatty_phone_budget_mb');
+    } catch {
+      // Storage unavailable
+    }
+    const budget = workingMemoryBudget(currentDevice(), setMb);
     this.contextLimit = contextWindowFor(perToken, budget, this.spec.contextLimit, modelMaxContext(config));
     this.maxOutputTokens = Math.min(this.spec.maxOutputTokens, Math.floor(this.contextLimit / 2));
     if (perToken) {
@@ -485,6 +491,17 @@ export class WebLlmProvider implements LlmRuntimeProvider {
 
   cancel(): void {
     this.engine?.interrupt();
+  }
+
+  /** One tiny run right after the load ("Hi", one token), done and caught in the worker */
+  async warmUp(): Promise<void> {
+    await this.engine?.warmUp({
+      messages: [{ role: 'user', content: 'Hi' }],
+      temperature: 0,
+      top_p: 1,
+      max_tokens: 1,
+      ...(this.spec.noThinking ? { extra_body: { enable_thinking: false } } : {}),
+    });
   }
 
   async reset(): Promise<void> {

@@ -87,6 +87,24 @@ describe('WebLLM worker protocol', () => {
     expect(await new WebLlmClient(plain.worker).complete(request)).toEqual({ text: 'hi', firstToken: null });
   });
 
+  it('warms up in the worker, which catches a failure and still answers done', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fake = fakeWebLlmWorker({
+      replies: [
+        () => ({ choices: [{ message: { content: 'H' } }] }),
+        () => {
+          throw new Error('GPU lost');
+        },
+      ],
+    });
+    const client = new WebLlmClient(fake.worker);
+    await expect(client.warmUp({ ...request, max_tokens: 1 })).resolves.toBeUndefined();
+    expect(fake.created[0]).toMatchObject({ stream: false, max_tokens: 1 });
+    await expect(client.warmUp({ ...request, max_tokens: 1 })).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith('[WebLLM] warm-up failed (ignored):', expect.any(Error));
+    warn.mockRestore();
+  });
+
   it('interrupts, unloads, names a model\'s files and deletes its cache', async () => {
     const fake = fakeWebLlmWorker({ models: { 'Some-Model-MLC': 'https://huggingface.co/mlc-ai/Some-Model-MLC' } });
     const client = new WebLlmClient(fake.worker);

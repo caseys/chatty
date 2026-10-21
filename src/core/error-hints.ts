@@ -16,14 +16,15 @@ import { parse as parseLoose } from 'acorn-loose';
 import { sureMatch } from './fuzzy-match.ts';
 import { analyse, isReference, resolve } from './blank-fix.ts';
 import { onlySendsLists, usedAs } from './value-use.ts';
-import { applyCorrection, argumentCountFact, memberKind, methodHint, missingMethod, objectType } from './method-hints.ts';
+import { applyCorrection, argumentCountFact, memberKind, methodHint, missingMethod, objectType, realMembers, valueOfPath } from './method-hints.ts';
 import { memberNames, writability } from './property-check.ts';
+import { toneStepsOnly, withTransportStart } from './sound-setup.ts';
 
 export interface ErrorHint {
   /** Facts for the fix request */
   text?: string;
-  /** The program corrected without the model, and what was changed (for the run log) */
-  correction?: { code: string; note: string };
+  /** The program corrected without the model, and what was changed (for the run log). With `mustRunClean`, a test run must also pass without any error (the error being fixed was no thrown one, so "failed the same way" can't tell) */
+  correction?: { code: string; note: string; mustRunClean?: boolean };
 }
 
 /** What the live page holds, read from the sandbox when the program failed */
@@ -31,6 +32,8 @@ export interface PageFacts {
   ids: string[];
   /** Ids the program looked up that never existed, and what stood in for each */
   standIns?: StandIn[];
+  /** The page's own window: where the browser's types, and Tone and THREE when the page has them, are read from */
+  scope?: Record<string, unknown>;
 }
 
 /** An id that never existed: an empty <div> made for it, or the element the program made last */
@@ -58,37 +61,57 @@ function tryParse(code: string): AnyNode | null {
   }
 }
 
+/** Whether a line is a statement of JavaScript that does something (a call, an assignment, a declaration), not markup or words that happen to parse */
+function looksLikeCode(line: string): boolean {
+  const text = line.trim();
+  if (!text) return false;
+  const ast = tryParse(text);
+  return !!ast && (ast.body as AnyNode[]).some((statement) => (statement.type === 'ExpressionStatement' ? /^(?:Call|Assignment|Update|Await)Expression$/.test((statement.expression as AnyNode).type) : !/^(?:Empty|Block)Statement$/.test(statement.type)));
+}
+
 /**
  * A reply cut off before its end (stopped for repeating itself, or at the output limit): the
- * unfinished last lines go and the blocks still open are closed, when that makes it parse. Only
- * for a program that fails in its last line; anything else is the fix's to judge.
+ * unfinished last lines go and the blocks still open are closed, when that makes it parse. A
+ * template string left open (markup the program was writing into the page) is closed first: it can
+ * only run to the end of the program. Only for a program that fails in its last line, or inside such
+ * a template; anything else is the fix's to judge.
  */
-export function closeCutOff(code: string): { code: string; dropped: number; closed: number } | null {
+export function closeCutOff(code: string): { code: string; dropped: number; closed: number; template: boolean } | null {
+  let inTemplate = false;
   try {
     parse(code, PARSE_OPTIONS);
     return null;
   } catch (err) {
     const pos = (err as { pos?: number }).pos;
+    inTemplate = /^Unterminated template/.test((err as Error).message);
     // At the end, or inside its last line (a string or comment cut off there)
-    if (typeof pos !== 'number' || code.slice(pos).trim().includes('\n')) return null;
+    if (!inTemplate && (typeof pos !== 'number' || code.slice(pos).trim().includes('\n'))) return null;
+    // A template that runs on past lines of code (a closing backtick missing in the middle of the
+    // program, not a reply cut off) can't be told from one cut off: the closing is the fix's to find
+    if (inTemplate && typeof pos === 'number' && code.slice(pos).split('\n').slice(1).some(looksLikeCode)) return null;
   }
   const lines = code.replace(/\s+$/, '').split('\n');
   for (let dropped = 0; dropped <= 8 && dropped < lines.length; dropped++) {
     const kept = lines.slice(0, lines.length - dropped).join('\n');
-    const open: string[] = [];
-    try {
-      for (const token of tokenizer(kept, PARSE_OPTIONS)) {
-        const label = token.type.label;
-        if (label === '{' || label === '(' || label === '[' || label === '${') open.push(label);
-        else if (label === '}' || label === ')' || label === ']') open.pop();
+    // (the template, when that is where it was cut: closed on a line of its own)
+    for (const [ending, template] of [['', false], ['\n`;', true]] as const) {
+      if (template && !inTemplate) continue;
+      const text = kept + ending;
+      const open: string[] = [];
+      try {
+        for (const token of tokenizer(text, PARSE_OPTIONS)) {
+          const label = token.type.label;
+          if (label === '{' || label === '(' || label === '[' || label === '${') open.push(label);
+          else if (label === '}' || label === ')' || label === ']') open.pop();
+        }
+      } catch {
+        continue; // cut inside a string or comment: another line goes, or the template is closed
       }
-    } catch {
-      continue; // cut inside a string or comment: drop another line
+      // Only blocks are closed: a cut call or array (`ctx.arc(100, 100`) loses its line instead
+      if (open.some((o) => o !== '{') || (open.length === 0 && !template)) continue;
+      const closed = open.length ? `${text}\n${open.map(() => '}').join('\n')}` : text;
+      if (tryParse(closed)) return { code: closed, dropped, closed: open.length, template };
     }
-    // Only blocks are closed: a cut call or array (`ctx.arc(100, 100`) loses its line instead
-    if (open.length === 0 || open.some((o) => o !== '{')) continue;
-    const closed = `${kept}\n${open.map(() => '}').join('\n')}`;
-    if (tryParse(closed)) return { code: closed, dropped, closed: open.length };
   }
   return null;
 }
@@ -378,21 +401,266 @@ function repairLine(code: string, line: number, repair: (text: string) => string
  * `{ notes: G major }` (words left unquoted), and a name declared twice
  */
 /**
- * A program that doesn't parse only because one line ends in a stray quote or backtick (a reply's
- * `speak("Done.");` with markdown's closing backtick kept): that character goes, when removing it
- * alone makes the whole program parse. Lines are tried from the end; the first that works wins.
+ * A program that doesn't parse only because one line ends in a stray character: a quote or
+ * backtick (a reply's `speak("Done.");` with markdown's closing backtick kept), or a closing
+ * ) or ] nothing opened (`speak("Done.");)`, where the parser stops at it). That character
+ * goes, when removing it alone makes the whole program parse. Quotes are tried from the last
+ * line up, the first that works wins; a bracket is the one the parser itself stopped at.
  */
-export function dropStrayQuote(code: string): { code: string; line: number } | null {
-  if (tryParse(code)) return null;
+export function dropStrayCharacter(code: string): { code: string; line: number; removed: string } | null {
+  let stopped: number | null = null;
+  try {
+    parse(code, PARSE_OPTIONS);
+    return null;
+  } catch (error) {
+    stopped = typeof (error as { pos?: unknown }).pos === 'number' ? (error as { pos: number }).pos : null;
+  }
   const lines = code.split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
     const text = lines[i].replace(/\s+$/, '');
     const last = text.slice(-1);
     if (!/[`'"]/.test(last) || (text.split(last).length - 1) % 2 === 0) continue;
     const candidate = [...lines.slice(0, i), text.slice(0, -1), ...lines.slice(i + 1)].join('\n');
-    if (tryParse(candidate)) return { code: candidate, line: i + 1 };
+    if (tryParse(candidate)) return { code: candidate, line: i + 1, removed: last };
+  }
+  // A closing ) or ] the parser met with nothing open, last on its line and right after a statement
+  // that is complete (`speak("Done.");)`). A } is not taken: a missing { is as good an answer (a loop
+  // body without braces, its last line cut loose), so there is no one answer
+  const lineStart = stopped === null ? 0 : code.lastIndexOf('\n', stopped - 1) + 1;
+  if (stopped !== null && /[)\]]/.test(code[stopped] ?? '') && /;\s*$/.test(code.slice(lineStart, stopped)) && /^[ \t]*(?:\r?\n|$)/.test(code.slice(stopped + 1))) {
+    const candidate = code.slice(0, stopped) + code.slice(stopped + 1);
+    if (tryParse(candidate)) return { code: candidate, line: code.slice(0, stopped).split('\n').length, removed: code[stopped] };
   }
   return null;
+}
+
+/**
+ * Statements written where an arrow function's body is an expression
+ * (`items.map((item) => ctx.beginPath(); ctx.arc(…); ctx.fill();)`): the parser stops at the first
+ * `;`. The statements are the body the model meant, so they go in braces, up to the bracket that
+ * closes the call. Only where that bracket is a `)` with no comma of its own before it (a second
+ * argument would be unclear), one arrow at a time until the program parses; a program that still
+ * doesn't parse is left as it was. The lines of the arrows wrapped are returned.
+ */
+export function wrapBracelessArrows(code: string): { code: string; lines: number[] } | null {
+  let current = code;
+  const lines: number[] = [];
+  for (let pass = 0; pass < 12; pass++) {
+    let stopped: number | null = null;
+    try {
+      parse(current, PARSE_OPTIONS);
+      return lines.length ? { code: current, lines } : null;
+    } catch (error) {
+      stopped = typeof (error as { pos?: unknown }).pos === 'number' ? (error as { pos: number }).pos : null;
+    }
+    if (stopped === null || current[stopped] !== ';') return null;
+    let tokens: Array<{ type: { label: string }; start: number; end: number }>;
+    try {
+      tokens = [...tokenizer(current, { ecmaVersion: 'latest' })] as unknown as typeof tokens;
+    } catch {
+      return null;
+    }
+    // The last arrow before the stop, whose body does not begin with a block
+    let arrow = -1;
+    for (let i = 0; i < tokens.length && tokens[i].end <= stopped; i++) if (tokens[i].type.label === '=>') arrow = i;
+    if (arrow < 0 || !tokens[arrow + 1] || tokens[arrow + 1].type.label === '{' || tokens[arrow + 1].start > stopped) return null;
+    let depth = 0;
+    let close = -1;
+    for (let i = arrow + 1; i < tokens.length; i++) {
+      const label = tokens[i].type.label;
+      if (label === '(' || label === '[' || label === '{' || label === '${') depth++;
+      else if (label === ')' || label === ']' || label === '}') {
+        if (depth === 0) {
+          close = label === ')' ? tokens[i].start : -1;
+          break;
+        }
+        depth--;
+      } else if (label === ',' && depth === 0) return null;
+    }
+    if (close < 0 || close < stopped) return null;
+    const body = current.slice(tokens[arrow].end, close);
+    // A statement that is only a number, a string or a name is a comma that became a semicolon
+    // (`setTimeout(() => speak("hi"); 1000)`: the 1000 was the delay): the arrow is not the slip
+    const statements = (tryParse(body) as unknown as { body?: AnyNode[] } | null)?.body ?? [];
+    if (statements.some((statement) => statement.type === 'ExpressionStatement' && ['Literal', 'Identifier'].includes((statement.expression as AnyNode).type))) return null;
+    const tail = body.match(/\s*$/)![0];
+    lines.push(current.slice(0, tokens[arrow].end).split('\n').length);
+    current = `${current.slice(0, tokens[arrow].end)} {${body.slice(0, body.length - tail.length)} }${tail}${current.slice(close)}`;
+  }
+  return null;
+}
+
+/**
+ * A statement that is only a template literal with no placeholder (`` `ctx.fillStyle = "red";` ``)
+ * does nothing, whatever it says: a line of code written inside backticks, as markdown's inline
+ * code is. When its text is code (it parses and has an assignment or a call in it), the backticks
+ * go and it is the statement it was meant to be. The lines of the statements unwrapped are
+ * returned; the result must parse.
+ */
+export function unwrapBackticks(code: string): { code: string; lines: number[] } | null {
+  const ast = tryParse(code);
+  if (!ast) return null;
+  // The literals of a statement made only of them: one, or several on lines after each other with no
+  // semicolon, which the parser reads as one tagged template (`a` `b` calls "a" with "b")
+  const literals = (expression: AnyNode): AnyNode[] | null => {
+    if (expression.type === 'TemplateLiteral') return (expression.expressions as AnyNode[]).length === 0 ? [expression] : null;
+    if (expression.type !== 'TaggedTemplateExpression') return null;
+    const before = literals(expression.tag as AnyNode);
+    const quasi = literals(expression.quasi as AnyNode);
+    return before && quasi ? [...before, ...quasi] : null;
+  };
+  const edits: Array<{ start: number; end: number; text: string; lines: number[] }> = [];
+  walk(ast, (node) => {
+    if (node.type !== 'ExpressionStatement') return;
+    const found = literals(node.expression as AnyNode);
+    if (!found) return;
+    // Each as written between its backticks (an escape stays as it was): code, or the statement is left alone
+    const texts = found.map((literal) => code.slice(literal.start + 1, literal.end - 1).trim());
+    // (text that parses only as a label, `Example: greet("Bob")`, is a sentence with a colon, not code)
+    const code_ = (text: string) => {
+      const parsed = text && /[=(]/.test(text) ? (tryParse(text) as unknown as { body?: AnyNode[] } | null) : null;
+      return !!parsed && !(parsed.body ?? []).some((statement) => statement.type === 'LabeledStatement');
+    };
+    if (!texts.every(code_)) return;
+    edits.push({
+      start: node.start,
+      end: node.end,
+      text: texts.map((text) => (/[;}]\s*$/.test(text) ? text : `${text};`)).join(`\n${code.slice(code.lastIndexOf('\n', node.start - 1) + 1, node.start).match(/^\s*/)![0]}`),
+      lines: found.map(lineOf),
+    });
+  });
+  if (edits.length === 0) return null;
+  let fixed = code;
+  for (const edit of [...edits].sort((a, b) => b.start - a.start)) fixed = fixed.slice(0, edit.start) + edit.text + fixed.slice(edit.end);
+  return tryParse(fixed) ? { code: fixed, lines: edits.flatMap((edit) => edit.lines).sort((a, b) => a - b) } : null;
+}
+
+/**
+ * A function that calls itself as a plain statement, with nothing before it that can leave the
+ * function (no return or throw in it), recurses until the stack is gone. When it also hands
+ * itself to requestAnimationFrame, setTimeout or setInterval (an animation loop), that call
+ * already repeats it, and the direct call is the slip: `function animate() { …;
+ * requestAnimationFrame(animate); … animate(); }` made thousands of elements before the browser
+ * stopped it. The direct call goes. Kept only when the result parses.
+ */
+export function dropEndlessSelfCalls(code: string): { code: string; dropped: string[] } {
+  const ast = tryParse(code);
+  if (!ast) return { code, dropped: [] };
+  const cuts: Array<{ start: number; end: number }> = [];
+  const dropped: string[] = [];
+  // The function's own statements, not those of the functions inside it
+  const within = (node: AnyNode, visit: (node: AnyNode) => void) => {
+    visit(node);
+    for (const value of Object.values(node)) {
+      const children = Array.isArray(value) ? value : [value];
+      for (const child of children) {
+        if (child && typeof child === 'object' && typeof (child as AnyNode).type === 'string' && !/Function/.test((child as AnyNode).type)) within(child as AnyNode, visit);
+      }
+    }
+  };
+  const check = (name: string, fn: AnyNode) => {
+    const body = fn.body as AnyNode;
+    if (body.type !== 'BlockStatement') return;
+    let leaves = false;
+    let scheduled = false;
+    within(body, (node) => {
+      if (node.type === 'ReturnStatement' || node.type === 'ThrowStatement') leaves = true;
+    });
+    // (the scheduling call may sit in a callback inside it: setTimeout(() => loop(), 10) is not what is looked for, only the function itself handed over)
+    walk(body, (node) => {
+      if (node.type !== 'CallExpression') return;
+      const callee = node.callee as AnyNode;
+      const scheduler = callee.type === 'Identifier' ? callee.name : callee.type === 'MemberExpression' && !callee.computed ? (callee.property as AnyNode).name : null;
+      if (['requestAnimationFrame', 'setTimeout', 'setInterval'].includes(scheduler as string) && (node.arguments as AnyNode[])[0]?.type === 'Identifier' && ((node.arguments as AnyNode[])[0].name as string) === name) scheduled = true;
+    });
+    if (leaves || !scheduled) return;
+    for (const statement of body.body as AnyNode[]) {
+      const call = statement.type === 'ExpressionStatement' ? (statement.expression as AnyNode) : null;
+      if (call?.type === 'CallExpression' && (call.callee as AnyNode).type === 'Identifier' && (call.callee as AnyNode).name === name) {
+        cuts.push({ start: statement.start, end: statement.end });
+        dropped.push(name);
+      }
+    }
+  };
+  walk(ast, (node) => {
+    if (node.type === 'FunctionDeclaration' && node.id) check((node.id as AnyNode).name as string, node);
+    if (node.type === 'VariableDeclarator' && (node.id as AnyNode).type === 'Identifier' && /^(?:Arrow)?FunctionExpression$/.test(((node.init as AnyNode | null)?.type as string) ?? '')) {
+      check((node.id as AnyNode).name as string, node.init as AnyNode);
+    }
+  });
+  if (cuts.length === 0) return { code, dropped: [] };
+  let fixed = code;
+  for (const cut of cuts.sort((a, b) => b.start - a.start)) fixed = fixed.slice(0, cut.start) + fixed.slice(cut.end);
+  return tryParse(fixed) ? { code: fixed, dropped: [...new Set(dropped)] } : { code, dropped: [] };
+}
+
+/**
+ * A language label left in the code (`javascript` on a line of its own, from a fence's ```javascript
+ * once the fence was taken away): a statement that is only that name reads a variable nobody made,
+ * which stops the program. When nothing in the program declares it, the line goes. Lines of the
+ * statement are kept (it is replaced by nothing, not removed), so line numbers hold.
+ */
+export function dropFenceLabels(code: string): { code: string; labels: string[] } {
+  const tree = analyse(code);
+  if (!tree) return { code, labels: [] };
+  const cuts: Array<{ start: number; end: number }> = [];
+  const labels: string[] = [];
+  for (const statement of (tree.ast.body as AnyNode[]) ?? []) {
+    const expression = statement.type === 'ExpressionStatement' ? (statement.expression as AnyNode) : null;
+    if (expression?.type !== 'Identifier' || !/^(?:javascript|js|jsx|typescript|ts|html|css|json)$/.test(expression.name as string)) continue;
+    if (resolve(tree, expression, expression.name as string) !== null || (expression.name as string) in globalThis) continue;
+    cuts.push({ start: statement.start, end: statement.end });
+    labels.push(expression.name as string);
+  }
+  if (cuts.length === 0) return { code, labels: [] };
+  let fixed = code;
+  for (const cut of cuts.sort((a, b) => b.start - a.start)) fixed = fixed.slice(0, cut.start) + fixed.slice(cut.end);
+  return tryParse(fixed) ? { code: fixed, labels } : { code, labels: [] };
+}
+
+/**
+ * A speak() that says the user's own request back (speak("Hi! Show a big ten second countdown on
+ * screen.") for that request), in a program that does something else too: it tells the user what
+ * they just said, and the page reads it aloud (once for every run of the program). Taken out when
+ * the words of its text are the request's words (a greeting in front aside), the request is three
+ * words or more (a greeting answered with a greeting is an answer), nothing declares speak itself,
+ * and something else is left in the program. Lines of the statement are kept (replaced by nothing),
+ * so line numbers hold.
+ */
+export function dropRequestEcho(code: string, request: string): { code: string; dropped: number } {
+  const words = (text: string) =>
+    text
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim()
+      .replace(/^(?:(?:hi|hello|hey|sure|okay|ok|alright|certainly|of course)\b\s*)+/, '');
+  const asked = words(request);
+  if (asked.split(' ').length < 3) return { code, dropped: 0 };
+  const tree = analyse(code);
+  if (!tree) return { code, dropped: 0 };
+  const cuts: Array<{ start: number; end: number }> = [];
+  walk(tree.ast, (node) => {
+    if (node.type !== 'Program' && node.type !== 'BlockStatement') return;
+    for (const statement of node.body as AnyNode[]) {
+      const call = statement.type === 'ExpressionStatement' ? (statement.expression as AnyNode) : null;
+      const callee = call?.type === 'CallExpression' ? (call.callee as AnyNode) : null;
+      const args = (call?.arguments as AnyNode[] | undefined) ?? [];
+      if (callee?.type !== 'Identifier' || callee.name !== 'speak' || args.length !== 1 || resolve(tree, callee, 'speak') !== null) continue;
+      const arg = args[0];
+      const text = arg.type === 'Literal' && typeof arg.value === 'string' ? arg.value : arg.type === 'TemplateLiteral' && (arg.expressions as AnyNode[]).length === 0 ? ((arg.quasis as AnyNode[])[0].value as { cooked: string }).cooked : null;
+      if (text !== null && words(text) === asked) cuts.push({ start: statement.start, end: statement.end });
+    }
+  });
+  if (cuts.length === 0) return { code, dropped: 0 };
+  let fixed = code;
+  for (const cut of cuts.sort((a, b) => b.start - a.start)) fixed = fixed.slice(0, cut.start) + fixed.slice(cut.end);
+  const rest = tryParse(fixed);
+  return rest && (rest.body as AnyNode[]).length > 0 ? { code: fixed, dropped: cuts.length } : { code, dropped: 0 };
+}
+
+/** What a stray character is called in the run log */
+export function strayName(removed: string): string {
+  return /[`'"]/.test(removed) ? 'a stray quote' : `a stray ${removed}`;
 }
 
 function syntaxSlip(code: string, error: string, errorLine?: number): ErrorHint | null {
@@ -409,8 +677,10 @@ function syntaxSlip(code: string, error: string, errorLine?: number): ErrorHint 
     );
     if (quoted) return quoted;
   }
-  const stray = dropStrayQuote(code);
-  if (stray) return { correction: { code: stray.code, note: `a stray quote at the end of line ${stray.line} → removed` } };
+  const stray = dropStrayCharacter(code);
+  if (stray) return { correction: { code: stray.code, note: `${strayName(stray.removed)} at the end of line ${stray.line} → removed` } };
+  const braceless = wrapBracelessArrows(code);
+  if (braceless) return { correction: { code: braceless.code, note: `statements as an arrow function's body (line${braceless.lines.length > 1 ? 's' : ''} ${braceless.lines.join(', ')}) → wrapped in { }` } };
   const twice = error.match(/Identifier '([^']+)' has already been declared/) ?? error.match(/Cannot declare a (?:const|let) variable twice: '([^']+)'/);
   if (twice) {
     // Only the declarations in one block (declareOnce, by the parser): the same name declared
@@ -433,6 +703,16 @@ const SANDBOX_NAMES = [...HELPERS, 'playNotes', 'searchWikipedia'];
  * a rename of something that exists.
  */
 const PROVIDED_NAMES = [...SANDBOX_NAMES, 'THREE', 'Tone', 'bpm', 'beat', 'start'];
+
+/** Whether the use sits in the initializer of the declaration of `name` itself, with no function between (a closure reads it later, when it is made) */
+function readsItsOwnDeclaration(tree: NonNullable<ReturnType<typeof analyse>>, node: AnyNode, name: string): boolean {
+  for (let at: AnyNode | undefined = node; at; at = tree.parent.get(at)) {
+    if (/Function/.test(at.type) || at.type === 'ClassBody') return false;
+    const parent = tree.parent.get(at);
+    if (parent?.type === 'VariableDeclarator' && tree.key.get(at) === 'init' && (parent.id as AnyNode).type === 'Identifier' && (parent.id as AnyNode).name === name) return true;
+  }
+  return false;
+}
 
 /**
  * Before a program runs: a name used but declared nowhere it can be seen from, that differs from
@@ -462,6 +742,9 @@ export function fixCaseSlips(code: string): { code: string; fixed: Array<{ from:
     const name = node.name as string;
     if (resolve(tree, node, name) || name in globalThis || PROVIDED_NAMES.includes(name)) continue;
     const to = caseSlip(name, visibleFrom(node));
+    // Not the name a declaration is still making: `const oscillator = new Oscillator()` is not
+    // `new oscillator()` (the name can't be read in its own initializer)
+    if (to && readsItsOwnDeclaration(tree, node, to)) continue;
     if (to && !edits.has(node.start)) edits.set(node.start, { end: node.end, text: shorthand ? `${name}: ${to}` : to, from: name, to });
   }
   let out = code;
@@ -638,26 +921,29 @@ const PROVIDED_LIBRARIES: Record<string, string> = { three: 'THREE', tone: 'Tone
  */
 export function provideThree(code: string): { code: string; changed: boolean; provided: string[] } {
   const provided = new Set<string>();
-  const out = code.replace(/^[ \t]*import\s+([^;\n]+?)\s+from\s+(['"])(three|tone)\2[ \t]*;?[ \t]*$/gm, (line, clause: string, _q: string, pkg: string) => {
-    const global = PROVIDED_LIBRARIES[pkg];
+  // What a binding of the package becomes: the names it takes from the ready-made global. A name
+  // that is the global itself ({ Tone } from 'tone') is that global already, so it takes nothing
+  const bind = (clause: string, global: string, line: string): string => {
     const star = clause.match(/^\*\s+as\s+([A-Za-z_$][\w$]*)$/);
-    if (star) {
+    const def = clause.match(/^([A-Za-z_$][\w$]*)$/);
+    const alias = star?.[1] ?? def?.[1];
+    if (alias) {
       provided.add(global);
-      return star[1] === global ? '' : `const ${star[1]} = ${global};`;
+      return alias === global ? '' : `const ${alias} = ${global};`;
     }
     const named = clause.match(/^\{([^}]*)\}$/);
     if (named) {
       provided.add(global);
-      const parts = named[1].split(',').map((p) => p.trim()).filter(Boolean).map((p) => p.replace(/\s+as\s+/, ': '));
-      return `const { ${parts.join(', ')} } = ${global};`;
-    }
-    const def = clause.match(/^([A-Za-z_$][\w$]*)$/);
-    if (def) {
-      provided.add(global);
-      return def[1] === global ? '' : `const ${def[1]} = ${global};`;
+      const parts = named[1].split(',').map((p) => p.trim()).filter(Boolean).filter((p) => p !== global).map((p) => p.replace(/\s+as\s+/, ': '));
+      return parts.length ? `const { ${parts.join(', ')} } = ${global};` : '';
     }
     return line;
-  });
+  };
+  let out = code.replace(/^[ \t]*import\s+([^;\n]+?)\s+from\s+(['"])(three|tone)\2[ \t]*;?[ \t]*$/gm, (line, clause: string, _q: string, pkg: string) => bind(clause, PROVIDED_LIBRARIES[pkg], line));
+  // The same in CommonJS: const Tone = require('tone'), const { Synth } = require('tone')
+  out = out.replace(/^[ \t]*(?:const|let|var)\s+(\{[^}]*\}|[A-Za-z_$][\w$]*)\s*=\s*require\(\s*(['"])(three|tone)\2\s*\)[ \t]*;?[ \t]*$/gm, (line, clause: string, _q: string, pkg: string) =>
+    bind(clause, PROVIDED_LIBRARIES[pkg], line)
+  );
   return { code: out, changed: provided.size > 0, provided: [...provided] };
 }
 
@@ -841,8 +1127,8 @@ function shortCalls(code: string, errorLine?: number): string | null {
 }
 
 /** Facts for a browser method called with too few arguments (method-hints.ts) */
-function argumentCountFacts(code: string, error: string, errorLine?: number): ErrorHint | null {
-  const text = argumentCountFact(code, error, errorLine);
+function argumentCountFacts(code: string, error: string, errorLine?: number, scope?: Record<string, unknown>): ErrorHint | null {
+  const text = argumentCountFact(code, error, errorLine, scope);
   return text ? { text } : null;
 }
 
@@ -1067,6 +1353,134 @@ function audioParamTime(code: string, error: string): ErrorHint | null {
   let fixed = code;
   for (const at of ends.sort((a, b) => b - a)) fixed = `${fixed.slice(0, at)}, 0${fixed.slice(at)}`;
   return tryParse(fixed) ? { correction: { code: fixed, note: `${named}(value) → ${named}(value, 0): a time already past sets it now` } } : null;
+}
+
+/**
+ * A class called as a function (`Tone.PolySynth()`, `Ball()`): the browser's error names the class
+ * ("Class constructor PolySynth cannot be invoked without 'new'"), and a class is only ever made
+ * with new, so every call of that name gets it. Only a call whose callee is a plain name or a
+ * chain of names (a call in the chain, `make().Ball()`, would change what `new` applies to); the
+ * result must parse. Chrome's wording only: the others don't name the class.
+ */
+/** Whether a value is a function made with `class` (its source says so) */
+function isEsClass(value: unknown): boolean {
+  if (typeof value !== 'function') return false;
+  try {
+    return /^class\b/.test(Function.prototype.toString.call(value));
+  } catch {
+    return false;
+  }
+}
+
+function classCalledWithoutNew(code: string, error: string, errorLine?: number, scope?: Record<string, unknown>): ErrorHint | null {
+  // (the library's own name for the class, "Tone.PolySynth", when the error was given it: the last part is the class)
+  const named = error.match(/^Class constructor ([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*) cannot be invoked without 'new'/)?.[1]?.split('.').pop();
+  // (a bundle that minifies its classes names them `Cu`, Safari and Firefox name none: then the
+  // call on the failing line whose callee is a class in the page is the one)
+  const unnamed = !!scope && !!errorLine && /^Class constructor \S+ cannot be invoked without 'new'|Cannot call a class as a function|class constructors must be invoked with 'new'|^Class constructor/i.test(error);
+  if (!named && !unnamed) return null;
+  const ast = tryParse(code);
+  if (!ast) return null;
+  const chainOfNames = (node: AnyNode): boolean =>
+    node.type === 'Identifier' || node.type === 'ThisExpression' || (node.type === 'MemberExpression' && !node.computed && chainOfNames(node.object as AnyNode));
+  const starts: number[] = [];
+  const classes = new Set<string>();
+  walk(ast, (node) => {
+    if (node.type !== 'CallExpression') return;
+    const callee = node.callee as AnyNode;
+    if (!chainOfNames(callee)) return;
+    const last = callee.type === 'Identifier' ? callee.name : callee.type === 'MemberExpression' ? (callee.property as AnyNode).name : null;
+    const text = code.slice(callee.start, callee.end).replace(/\s+/g, '');
+    const isThatClass = named !== undefined && last === named;
+    // (a real `class` only: Chrome throws this error for class syntax, and Number(), String() or Date() are called without new on purpose)
+    const isAClassHere = unnamed && lineOf(node) === errorLine && isEsClass(valueOfPath(code, text, scope));
+    // Every other call of a class the page has gets it too: a class is only ever made with new, and
+    // the next error would name the next one (a program that called five Tone classes this way
+    // failed, was corrected and run again five times). Only a real `class` (a native function such
+    // as Date() or String() is called without new on purpose).
+    const isAnotherClass = !!scope && isEsClass(valueOfPath(code, text, scope));
+    if (isThatClass || isAClassHere || isAnotherClass) {
+      starts.push(callee.start);
+      classes.add(String(last));
+    }
+  });
+  if (starts.length === 0) return null;
+  let fixed = code;
+  for (const at of starts.sort((a, b) => b - a)) fixed = `${fixed.slice(0, at)}new ${fixed.slice(at)}`;
+  const label = [...classes].join(', ');
+  return tryParse(fixed) ? { correction: { code: fixed, note: `${label}() → new ${label}(): a class is made with new` } } : null;
+}
+
+/**
+ * A factory the object doesn't have, handed the class it should make (`Tone.create(Tone.PolySynth)`,
+ * `Tone.make("Synth")`): the object has no such function, but it has the class named in the first
+ * argument, and a class is made with new, so the call becomes `new Tone.PolySynth(rest)`. The
+ * object is a real one the page has (not one the program declared), the member is missing from
+ * it, and every such call names a class; the result must parse.
+ */
+function factoryOfClass(code: string, error: string, scope?: Record<string, unknown>): ErrorHint | null {
+  const missing = missingMethod(error);
+  if (!missing || !scope) return null;
+  // Only a method that is a factory by its name (create, make, new, build): `Tone.play(Tone.Synth, "C4")`
+  // plays something, and is not a way of making a Synth
+  if (!/^(?:create|make|new|build)(?![a-z])/.test(missing.method)) return null;
+  const real = realMembers(code, missing.object, scope);
+  if (!real || real.members.some((m) => m.name === missing.method)) return null;
+  const classes = new Set(real.members.filter((m) => m.kind === 'class').map((m) => m.name));
+  const ast = tryParse(code);
+  if (!ast) return null;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  let others = false;
+  walk(ast, (node) => {
+    if (node.type !== 'CallExpression') return;
+    const callee = node.callee as AnyNode;
+    if (callee.type !== 'MemberExpression' || callee.computed || (callee.property as AnyNode).name !== missing.method || code.slice((callee.object as AnyNode).start, (callee.object as AnyNode).end) !== missing.object) return;
+    const args = node.arguments as AnyNode[];
+    const first = args[0];
+    const named =
+      first?.type === 'MemberExpression' && !first.computed && code.slice((first.object as AnyNode).start, (first.object as AnyNode).end) === missing.object
+        ? ((first.property as AnyNode).name as string)
+        : first?.type === 'Literal' && typeof first.value === 'string'
+          ? first.value
+          : null;
+    if (!named || !classes.has(named)) {
+      others = true;
+      return;
+    }
+    const rest = args.slice(1).map((arg) => code.slice(arg.start, arg.end)).join(', ');
+    edits.push({ start: node.start, end: node.end, text: `new ${missing.object}.${named}(${rest})` });
+  });
+  if (edits.length === 0 || others) return null;
+  let fixed = code;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) fixed = fixed.slice(0, edit.start) + edit.text + fixed.slice(edit.end);
+  return tryParse(fixed) ? { correction: { code: fixed, note: `${missing.object}.${missing.method}(…) → ${edits.length > 1 ? 'new …' : edits[0].text.replace(/\(.*$/, '(…)')}: a class is made with new` } } : null;
+}
+
+/**
+ * `new` on a real object that is no class (`new Tone.Transport()`, `new Math()`): the browser says
+ * "X is not a constructor". X, found in the page, is an object (not a function, not undefined),
+ * and the new takes no arguments: the object itself is meant, so `new X()` becomes `X`. With
+ * arguments, or any other X, nothing is changed. The result must parse.
+ */
+function newOnObject(code: string, error: string, scope?: Record<string, unknown>): ErrorHint | null {
+  const named =
+    error.match(/\(evaluating 'new ((?:[A-Za-z_$][\w$]*)(?:\.[A-Za-z_$][\w$]*)*)\(/)?.[1] ??
+    error.match(/(?:^|\s)((?:[A-Za-z_$][\w$]*)(?:\.[A-Za-z_$][\w$]*)*) is not a constructor/)?.[1];
+  if (!named || !scope) return null;
+  const value = valueOfPath(code, named, scope);
+  if (value === null || typeof value !== 'object') return null;
+  const ast = tryParse(code);
+  if (!ast) return null;
+  const cuts: Array<{ start: number; end: number }> = [];
+  walk(ast, (node) => {
+    if (node.type !== 'NewExpression' || (node.arguments as AnyNode[]).length > 0) return;
+    const callee = node.callee as AnyNode;
+    if (code.slice(callee.start, callee.end).replace(/\s+/g, '') === named) cuts.push({ start: node.start, end: node.end });
+  });
+  if (cuts.length === 0) return null;
+  let fixed = code;
+  for (const cut of cuts.sort((a, b) => b.start - a.start)) fixed = fixed.slice(0, cut.start) + named + fixed.slice(cut.end);
+  return tryParse(fixed) ? { correction: { code: fixed, note: `new ${named}() → ${named}: ${named} is an object, not a class` } } : null;
 }
 
 /**
@@ -1550,17 +1964,28 @@ export function dropBrowserCopies(code: string): { code: string; dropped: string
 }
 
 export function errorHint(code: string, error: string, errorLine?: number, page?: PageFacts): ErrorHint | null {
+  const hint = generalErrorHint(code, error, errorLine, page);
+  if (hint?.correction) return hint;
+  // The library's own facts come last, after whatever the general rules found
+  const facts = toneOptionFacts(code, page?.scope);
+  return facts ? { ...hint, text: [hint?.text, facts].filter(Boolean).join(' ') } : hint;
+}
+
+function generalErrorHint(code: string, error: string, errorLine?: number, page?: PageFacts): ErrorHint | null {
   // Corrections by rule first: they need no model
   const rule =
     redeclaredHelper(code, error) ??
     missingAwait(code, error, errorLine) ??
     syntaxSlip(code, error, errorLine) ??
     propertyCalled(code, error) ??
-    audioParamTime(code, error);
+    audioParamTime(code, error) ??
+    classCalledWithoutNew(code, error, errorLine, page?.scope) ??
+    newOnObject(code, error, page?.scope) ??
+    factoryOfClass(code, error, page?.scope);
   if (rule) return rule;
   const helper = helperDeclared(code, error);
   if (helper) return helper;
-  const method = methodHint(code, error);
+  const method = methodHint(code, error, page?.scope, errorLine);
   // A sure slip of a real member (getcontext) is corrected; otherwise a stand-in explains the error
   const standIn = method?.correction ? null : standInElement(code, error, errorLine, page);
   // An error that names nothing gets what the failing call was given
@@ -1576,7 +2001,7 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
         }
       : (unknownCallDropped(code, error, errorLine) ?? { text: method.text });
   }
-  const found = argumentCountFacts(code, error, errorLine) ?? notDefined(code, error, errorLine, page) ?? nothingThere(code, error, errorLine, page) ?? leftOpen(code, error) ?? tooEarly(code, error, errorLine);
+  const found = argumentCountFacts(code, error, errorLine, page?.scope) ?? notDefined(code, error, errorLine, page) ?? nothingThere(code, error, errorLine, page) ?? leftOpen(code, error) ?? tooEarly(code, error, errorLine);
   if (found?.correction) return found;
   // A method called on undefined (not on a missing element, which is null): its maker returns,
   // or the call is made only when there is something to call
@@ -1585,7 +2010,243 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
   // Calls of the failing function that pass too few values, added to whatever else was found
   const calls = shortCalls(code, errorLine);
   const text = [found?.text, vague, calls].filter(Boolean).join(' ');
-  return text ? { text } : null;
+  if (text) return { text };
+  return libraryRepairAfterError(code, error);
+}
+
+// ============================================================================
+// Library-specific repairs (Tone.js). Their own group, after every general repair: a general
+// correction or hint always gets the first look, and these run only when none applies. Each is
+// grounded in the library's documented API, only for a program that uses the library, and logged
+// like the rest.
+// ============================================================================
+
+// The program's nodes as the scope analysis hands them out: any field may be read
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Loose = Node & Record<string, any>;
+
+/** Tone's note values ("4n", "8n.", "4t", "1m"): times a program may write where a number of seconds is needed */
+const TONE_NOTE_VALUE = /^\d+[nmt]\.?$/;
+/** A pitch: "C4", "D#4", "Bb3" */
+const TONE_NOTE_NAME = /^[A-Ga-g][#b]?-?\d$/;
+/** Tone methods that give back the object they were called on, so a chain of them still ends in the made object */
+const TONE_CHAINABLE = new Set(['toDestination', 'toMaster', 'connect', 'chain', 'fan', 'sync']);
+/** The Tone classes whose first argument is a callback called with the time it plays at */
+const TONE_TIMED_CALLBACKS = new Set(['Loop', 'Part', 'Sequence', 'Pattern', 'ToneEvent', 'Event']);
+
+/**
+ * Before a program runs, in programs that use Tone, by Tone's documented API:
+ *  - a note value added to a time (`time += "8n"`, `time + "4n"`) joins text to a number of
+ *    seconds: it becomes Tone.Time("8n").toSeconds(). The time is a number only where the program
+ *    says so: the first argument of a Loop, Part, Sequence or Transport.schedule callback, or a
+ *    variable made from a number or Tone.now() (and only that once).
+ *  - a pitch given to a NoiseSynth ("D#4", which has none: triggerAttackRelease(duration, time,
+ *    velocity), triggerAttack(time, velocity)) is dropped. The object is a NoiseSynth only where
+ *    its one declaration says so (`new Tone.NoiseSynth()`, a chain of toDestination() and the like).
+ * Each is kept only when the result parses.
+ */
+export function fixToneCalls(code: string): { code: string; fixed: string[] } {
+  const none = { code, fixed: [] as string[] };
+  if (!/\bTone\b/.test(code)) return none;
+  const tree = analyse(code);
+  if (!tree) return none;
+  const isMember = (node: Loose | undefined, object: string, property: string): boolean =>
+    node?.type === 'MemberExpression' && !node.computed && node.object.type === 'Identifier' && node.object.name === object && node.property.name === property;
+  const text = (node: Loose) => code.slice(node.start, node.end);
+  const numeric = (node: Loose): boolean =>
+    (node.type === 'Literal' && typeof node.value === 'number') ||
+    (node.type === 'CallExpression' && node.arguments.length === 0 && (isMember(node.callee, 'Tone', 'now') || isMember(node.callee, 'Tone', 'immediate'))) ||
+    (node.type === 'MemberExpression' && !node.computed && isMember(node.object, 'Tone', 'Transport') && node.property.name === 'seconds') ||
+    (node.type === 'UnaryExpression' && node.operator === '-' && numeric(node.argument)) ||
+    (node.type === 'BinaryExpression' && /^[-+*/]$/.test(node.operator) && numeric(node.left) && numeric(node.right));
+  // What a name stands for where it is used: its one declaration (and nothing else assigns it)
+  const declarators = (scope: Loose, name: string) =>
+    tree.nodes.filter((n) => n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.id.name === name && resolve(tree, n.id, name) === scope);
+  const reassigned = (scope: Loose, name: string) =>
+    tree.nodes.some((n) => n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && n.left.name === name && resolve(tree, n.left, name) === scope);
+  const timedCallback = (fn: Loose): boolean => {
+    const call = tree.parent.get(fn);
+    if (!call || (call.type !== 'NewExpression' && call.type !== 'CallExpression') || call.arguments[0] !== fn) return false;
+    const callee = call.callee as Loose;
+    if (callee.type !== 'MemberExpression' || callee.computed) return false;
+    if (callee.object.type === 'Identifier' && callee.object.name === 'Tone') return TONE_TIMED_CALLBACKS.has(callee.property.name);
+    return call.type === 'CallExpression' && /^schedule(?:Repeat|Once)?$/.test(callee.property.name) && (isMember(callee.object, 'Tone', 'Transport') || (callee.object.type === 'Identifier' && callee.object.name === 'Transport'));
+  };
+  const seconds = (id: Loose): boolean => {
+    const scope = resolve(tree, id, id.name);
+    if (!scope) return false;
+    if (/Function/.test(scope.type) && scope.params[0]?.type === 'Identifier' && scope.params[0].name === id.name) return timedCallback(scope);
+    const made = declarators(scope, id.name);
+    return made.length === 1 && !!made[0].init && numeric(made[0].init) && !reassigned(scope, id.name);
+  };
+  const edits: Array<{ start: number; end: number; text: string; note: string }> = [];
+  const noteValue = (node: Loose) => node.type === 'Literal' && typeof node.value === 'string' && TONE_NOTE_VALUE.test(node.value);
+  const noiseSynths = new Map<Loose, Set<string>>();
+  for (const node of tree.nodes) {
+    // time += "8n", time + "4n"
+    const isSum = (node.type === 'AssignmentExpression' && /^[-+]=$/.test(node.operator)) || (node.type === 'BinaryExpression' && /^[-+]$/.test(node.operator));
+    if (isSum && noteValue(node.right) && (node.left.type === 'Identifier' ? seconds(node.left) : node.type === 'BinaryExpression' && numeric(node.left))) {
+      const value = text(node.right);
+      edits.push({ start: node.right.start, end: node.right.end, text: `Tone.Time(${value}).toSeconds()`, note: `${text(node.left)} ${node.operator} ${value} → ${text(node.left)} ${node.operator} Tone.Time(${value}).toSeconds()` });
+    }
+    if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier' && node.init) {
+      let made: Loose = node.init;
+      while (made.type === 'CallExpression' && made.callee.type === 'MemberExpression' && !made.callee.computed && TONE_CHAINABLE.has(made.callee.property.name)) made = made.callee.object;
+      const scope = resolve(tree, node.id, node.id.name);
+      if (made.type === 'NewExpression' && isMember(made.callee, 'Tone', 'NoiseSynth') && scope) {
+        const names = noiseSynths.get(scope) ?? new Set<string>();
+        noiseSynths.set(scope, names.add(node.id.name));
+      }
+    }
+  }
+  // A pitch given to a NoiseSynth
+  for (const node of tree.nodes) {
+    if (node.type !== 'CallExpression' || node.callee.type !== 'MemberExpression' || node.callee.computed || node.callee.object.type !== 'Identifier') continue;
+    const method = node.callee.property.name as string;
+    const first = node.arguments[0] as Loose | undefined;
+    if (!first || first.type !== 'Literal' || typeof first.value !== 'string' || !TONE_NOTE_NAME.test(first.value)) continue;
+    if (!((method === 'triggerAttackRelease' && node.arguments.length >= 2) || method === 'triggerAttack')) continue;
+    const name = node.callee.object.name as string;
+    const scope = resolve(tree, node.callee.object, name);
+    if (!scope || !noiseSynths.get(scope)?.has(name) || declarators(scope, name).length !== 1 || reassigned(scope, name)) continue;
+    const next = node.arguments[1] as Loose | undefined;
+    edits.push({ start: first.start, end: next ? next.start : first.end, text: '', note: `${name}.${method}(${text(first)}, …): a Tone.NoiseSynth has no pitch → ${text(first)} dropped` });
+  }
+  if (edits.length === 0) return none;
+  let fixed = code;
+  for (const edit of [...edits].sort((a, b) => b.start - a.start)) fixed = fixed.slice(0, edit.start) + edit.text + fixed.slice(edit.end);
+  return tryParse(fixed) ? { code: fixed, fixed: edits.sort((a, b) => a.start - b.start).map((edit) => edit.note) } : none;
+}
+
+/**
+ * Facts, not a repair (Tone.js): an option a Tone class is made with that the class does not have,
+ * by its own static getDefaults() (every Tone class lists its options there): `new Tone.Loop({
+ * duration: 4, tempo: 120 })` gives a Loop options it has no use for. Only for a class the page
+ * has, made with an object of plain keys.
+ */
+export function toneOptionFacts(code: string, scope?: Record<string, unknown>): string | null {
+  const tone = scope?.Tone as Record<string, { getDefaults?: () => Record<string, unknown> }> | undefined;
+  if (!tone || !/\bTone\b/.test(code)) return null;
+  const ast = tryParse(code);
+  if (!ast) return null;
+  const facts: string[] = [];
+  walk(ast, (node) => {
+    if (node.type !== 'NewExpression') return;
+    const callee = node.callee as AnyNode;
+    if (callee.type !== 'MemberExpression' || callee.computed || (callee.object as AnyNode).type !== 'Identifier' || (callee.object as AnyNode).name !== 'Tone') return;
+    const name = (callee.property as AnyNode).name as string;
+    const first = (node.arguments as AnyNode[])[0];
+    if (first?.type !== 'ObjectExpression') return;
+    let defaults: Record<string, unknown> | null = null;
+    try {
+      defaults = typeof tone[name]?.getDefaults === 'function' ? tone[name].getDefaults!() : null;
+    } catch {
+      defaults = null;
+    }
+    if (!defaults) return;
+    const given: string[] = [];
+    for (const property of first.properties as AnyNode[]) {
+      if (property.type !== 'Property' || property.computed) return;
+      const key = property.key as AnyNode;
+      given.push((key.type === 'Identifier' ? key.name : key.value) as string);
+    }
+    const unknown = given.filter((key) => !(key in defaults!));
+    if (unknown.length === 0) return;
+    const options = Object.keys(defaults).filter((key) => key !== 'context');
+    facts.push(`Tone.${name} has no option ${unknown.join(' or ')} (its options: ${options.slice(0, 8).join(', ')}${options.length > 8 ? ', …' : ''}).`);
+  });
+  return facts.length ? [...new Set(facts)].slice(0, 3).join(' ') : null;
+}
+
+/** Tone objects that are scheduled, started at a time (a loop, a part) rather than playing at once */
+const TONE_SCHEDULED = new Set(['Tone.Loop', 'Tone.Part', 'Tone.Sequence', 'Tone.Pattern', 'Tone.ToneEvent']);
+
+/**
+ * The Tone steps a silent program was missing (see toneStepsOnly), as code: `.toDestination()` on
+ * each `new Tone.X(…)` of a kind that was never connected, `name.start(0);` after each scheduled
+ * object that was never started (a loop, a part), and Tone.Transport.start() at the end. Only
+ * objects the program made in a declaration of their own, whose start it never names; kept only
+ * when the result parses. Null when nothing could be added.
+ */
+function addToneSteps(code: string, steps: { transport: boolean; unconnected: string[]; unstarted: string[] }): { code: string; notes: string[] } | null {
+  const ast = tryParse(code);
+  if (!ast || !/\bTone\b/.test(code)) return null;
+  const edits: Array<{ at: number; text: string }> = [];
+  const notes: string[] = [];
+  const kindOf = (init: AnyNode | null | undefined): string | null => {
+    if (init?.type !== 'NewExpression') return null;
+    const callee = init.callee as AnyNode;
+    return callee.type === 'MemberExpression' && !callee.computed && (callee.object as AnyNode).type === 'Identifier' && (callee.object as AnyNode).name === 'Tone' ? `Tone.${(callee.property as AnyNode).name as string}` : null;
+  };
+  // Whether a name is used as a value anywhere (handed to a call, put in a list, assigned, returned):
+  // `[pad, lead].forEach((s) => s.connect(reverb))` and `Tone.connect(synth, reverb)` route a part
+  // through code this can't follow, so a part like that is the program's to connect, not a guess. Only
+  // `name.member` and `name.method()` leave it where it is.
+  const usedAsValue = (name: string): boolean => {
+    let found = false;
+    const visit = (node: AnyNode, parent: AnyNode | null): void => {
+      if (found) return;
+      if (node.type === 'Identifier' && node.name === name && parent) {
+        const own = parent.type === 'VariableDeclarator' && parent.id === node;
+        const object = parent.type === 'MemberExpression' && parent.object === node;
+        const property = parent.type === 'MemberExpression' && parent.property === node && !parent.computed;
+        const key = parent.type === 'Property' && parent.key === node && !parent.computed && !parent.shorthand;
+        if (!own && !object && !property && !key) found = true;
+      }
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) {
+          for (const child of value) if (child && typeof (child as AnyNode).type === 'string') visit(child as AnyNode, node);
+        } else if (value && typeof value === 'object' && typeof (value as AnyNode).type === 'string') {
+          visit(value as AnyNode, node);
+        }
+      }
+    };
+    visit(ast, null);
+    return found;
+  };
+  walk(ast, (node, functions) => {
+    if (node.type !== 'VariableDeclaration' || functions.length > 0) return;
+    for (const declarator of node.declarations as AnyNode[]) {
+      const kind = kindOf(declarator.init as AnyNode);
+      if (!kind || (declarator.id as AnyNode).type !== 'Identifier') continue;
+      const name = (declarator.id as AnyNode).name as string;
+      const used = (pattern: string) => new RegExp(`\\b${name.replace(/\$/g, '\\$')}\\s*\\.\\s*(?:${pattern})\\s*\\(`).test(code);
+      if (steps.unconnected.includes(kind) && !TONE_SCHEDULED.has(kind) && !used('toDestination|toMaster|connect|chain|fan') && !usedAsValue(name)) {
+        edits.push({ at: (declarator.init as AnyNode).end, text: '.toDestination()' });
+        notes.push(`${name} = new ${kind}(…) → .toDestination()`);
+      }
+      if (steps.unstarted.includes(kind) && TONE_SCHEDULED.has(kind) && !used('start') && !usedAsValue(name)) {
+        edits.push({ at: node.end, text: `\n${name}.start(0);` });
+        notes.push(`${name}.start(0) added after it (a ${kind} plays only once started)`);
+      }
+    }
+  });
+  let fixed = code;
+  for (const edit of edits.sort((a, b) => b.at - a.at)) fixed = fixed.slice(0, edit.at) + edit.text + fixed.slice(edit.at);
+  if (steps.transport) {
+    const started = withTransportStart(fixed, (candidate) => tryParse(candidate) !== null);
+    if (started) {
+      fixed = started;
+      notes.push('Tone.Transport.start() added at the end');
+    }
+  }
+  return notes.length > 0 && fixed !== code && tryParse(fixed) ? { code: fixed, notes } : null;
+}
+
+/** After an error: the one step a library program is missing, when the error names it */
+function libraryRepairAfterError(code: string, error: string): ErrorHint | null {
+  // A Tone program whose silence has only Tone steps missing (the page says which): each is the one
+  // call that sets it right. Tone.Transport started at the end (nothing plays until it is), an
+  // instrument or source connected with .toDestination(), a loop or part started at 0
+  const steps = toneStepsOnly(error);
+  if (steps) {
+    const set = addToneSteps(code, steps);
+    if (set) return { correction: { code: set.code, note: `${set.notes.join(', ')}: the steps its sound was missing`, mustRunClean: true } };
+  }
+  // The notation repairs of fixToneCalls, for a program that got past them before it ran (a fix's)
+  const tone = fixToneCalls(code);
+  if (tone.fixed.length) return { correction: { code: tone.code, note: tone.fixed.join('; ') } };
+  return null;
 }
 
 /**
@@ -1639,7 +2300,35 @@ export function declareOnce(code: string): { code: string; names: string[] } | n
         edits.push({ start: statement.start, end: statement.start + 'const'.length, text: 'let' });
       }
       const id = declarators[0]?.id as AnyNode | undefined;
-      if (declarators.length !== 1 || id?.type !== 'Identifier') continue;
+      if (declarators.length !== 1) continue;
+      // A pattern (`const { C4, D5 } = scale;`) written again: when every name in it is one the block
+      // already has, it sets them again (an object pattern as an assignment needs its parentheses)
+      if (id?.type === 'ObjectPattern' || id?.type === 'ArrayPattern') {
+        const bound = boundNames(id);
+        const repeated = bound.filter((n) => first.has(n));
+        if (repeated.length === 0) {
+          for (const n of bound) first.set(n, statement);
+          continue;
+        }
+        const init = declarators[0].init as AnyNode | null;
+        if (repeated.length !== bound.length || !init) continue;
+        const earlierOnes = bound.map((n) => first.get(n)!);
+        if (statement.kind === 'var' && earlierOnes.every((e) => e.kind !== 'let' && e.kind !== 'const')) continue;
+        names.add(bound.join(', '));
+        // (a line that starts with ( or [ continues the one before unless that ended: `;` first)
+        const before = code.slice(0, statement.start).trimEnd();
+        const guard = before === '' || /[;{}]$/.test(before) ? '' : ';';
+        edits.push(id.type === 'ObjectPattern' ? { start: statement.start, end: id.start, text: `${guard}(` } : { start: statement.start, end: id.start, text: guard });
+        if (id.type === 'ObjectPattern') edits.push({ start: init.end, end: init.end, text: ')' });
+        for (const earlierOne of new Set(earlierOnes)) {
+          if (earlierOne.kind === 'const' && !madeLet.has(earlierOne)) {
+            madeLet.add(earlierOne);
+            edits.push({ start: earlierOne.start, end: earlierOne.start + 'const'.length, text: 'let' });
+          }
+        }
+        continue;
+      }
+      if (id?.type !== 'Identifier') continue;
       const name = id.name as string;
       const earlier = first.get(name);
       if (!earlier) {

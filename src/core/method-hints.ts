@@ -6,8 +6,8 @@
  * without the model; otherwise the candidates go into the fix request, so the model picks from
  * a list instead of guessing again.
  */
-import { parseExpressionAt } from 'acorn';
-import { closestNames, flatName, NAME_VERBS, sureMatch } from './fuzzy-match.ts';
+import { parse, parseExpressionAt } from 'acorn';
+import { closestNames, editDistance, flatName, NAME_VERBS, nameWords, sureMatch } from './fuzzy-match.ts';
 
 /** The object and the method a "not a function" error names, or null */
 export function missingMethod(error: string): { object: string; method: string } | null {
@@ -41,7 +41,13 @@ const NAMED: Record<string, string> = {
   console: '@console',
   navigator: '@navigator',
   out: '@out',
+  // The libraries Chatty puts in a program's page: named once the page is the scope (see PageFacts.scope)
+  Tone: '@Tone',
+  THREE: '@THREE',
 };
+
+/** Tone methods that give back the object they were called on, so a chain of them still is that object */
+const GIVES_BACK_THIS = new Set(['toDestination', 'toMaster', 'connect', 'chain', 'fan', 'sync']);
 
 /** Methods of Chatty's own objects (not browser types) */
 const OWN_METHODS: Record<string, string[]> = {
@@ -94,6 +100,15 @@ function typeMadeBy(expression: string, code = ''): string | null {
   }
   if (top.type === 'AwaitExpression') top = top.argument;
   if (!top || !/^(?:CallExpression|NewExpression)$/.test(top.type)) return null;
+  // A class of a library the page has (new Tone.Synth().toDestination(), new THREE.Mesh(a, b))
+  type Loose = { type: string; callee?: Loose; object?: Loose; property?: { name?: string }; name?: string; computed?: boolean };
+  let made = top as unknown as Loose;
+  while (made.type === 'CallExpression' && made.callee?.type === 'MemberExpression' && !made.callee.computed && GIVES_BACK_THIS.has(made.callee.property?.name ?? '') && made.callee.object) {
+    made = made.callee.object;
+  }
+  if (made.type === 'NewExpression' && made.callee?.type === 'MemberExpression' && !made.callee.computed && made.callee.object?.type === 'Identifier' && /^(?:Tone|THREE)$/.test(made.callee.object.name ?? '')) {
+    return `${made.callee.object.name}.${made.callee.property?.name}`;
+  }
   const tag = expression.match(/createElement\(\s*['"]([\w-]+)['"]/)?.[1];
   if (tag) return `element:${tag.toLowerCase()}`;
   const node = audioNodeMadeBy(expression, code);
@@ -151,6 +166,12 @@ export function namesSources(type: string, scope: Record<string, unknown> = glob
     return Object.getOwnPropertyNames(scope)
       .filter((key) => /^(?:HTML|SVG)\w*Element$/.test(key))
       .map((key) => (scope[key] as { prototype?: unknown } | undefined)?.prototype);
+  }
+  // A class of a library (Tone.Synth): found by its path from the page
+  if (type.includes('.')) {
+    let at: unknown = scope;
+    for (const segment of type.split('.')) at = (at as Record<string, unknown> | undefined)?.[segment];
+    return [(at as { prototype?: unknown } | undefined)?.prototype];
   }
   return [(scope[type] as { prototype?: unknown } | undefined)?.prototype];
 }
@@ -226,7 +247,7 @@ export function closestMethods(missing: string, names: string[], count = 3): str
 }
 
 /** The methods of the browser's CanvasRenderingContext2D (a canvas's 2D drawing context) */
-const CONTEXT_2D_METHODS = new Set([
+export const CONTEXT_2D_METHODS = new Set([
   'arc', 'arcTo', 'beginPath', 'bezierCurveTo', 'clearRect', 'clip', 'closePath', 'createLinearGradient',
   'createPattern', 'createRadialGradient', 'drawImage', 'ellipse', 'fill', 'fillRect', 'fillText', 'getImageData',
   'lineTo', 'measureText', 'moveTo', 'putImageData', 'quadraticCurveTo', 'rect', 'restore', 'rotate', 'roundRect',
@@ -238,19 +259,267 @@ export function nearMiss(missing: string, names: string[]): string | null {
   return sureMatch(missing, names);
 }
 
+// ============================================================================
+// What an object really has. The members of a real value (an instance, a namespace like Tone or
+// Math, a class's statics), read from the page's own prototypes, each as a class (made with new), a
+// function, or a plain value. Accessors are never called. Used for the member blank, the real
+// names in an error and the repair of `new` on an object that is no class.
+// ============================================================================
+
+export interface RealMember {
+  name: string;
+  kind: 'class' | 'function' | 'property';
+}
+
+const FUNCTION_INTRINSICS = new Set(['constructor', 'prototype', 'length', 'name', 'caller', 'arguments', 'callee']);
+
+/** Whether a function is a class (`class X`), or a capitalized function with a prototype of methods (a native constructor) */
+export function classLike(fn: (...args: unknown[]) => unknown, name: string): boolean {
+  try {
+    if (/^class\b/.test(Function.prototype.toString.call(fn))) return true;
+  } catch {
+    // not readable as text
+  }
+  const proto = (fn as unknown as { prototype?: object }).prototype;
+  return /^[A-Z]/.test(name) && !!proto && Object.getOwnPropertyNames(proto).filter((n) => n !== 'constructor').length > 0;
+}
+
+/** Own and inherited members of a real value: the prototype chain up to Object's (and Function's) */
+export function membersOfValue(value: unknown): RealMember[] {
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return [];
+  const found = new Map<string, RealMember>();
+  let target: unknown = value;
+  for (let hops = 0; target && hops < 12 && target !== Object.prototype && target !== Function.prototype; hops++) {
+    for (const key of Object.getOwnPropertyNames(target)) {
+      if (FUNCTION_INTRINSICS.has(key) || key.startsWith('_') || !/^[A-Za-z$][\w$]*$/.test(key) || found.has(key)) continue;
+      const descriptor = Object.getOwnPropertyDescriptor(target, key);
+      if (!descriptor) continue;
+      const member = descriptor.value;
+      found.set(key, { name: key, kind: typeof member === 'function' ? (classLike(member, key) ? 'class' : 'function') : 'property' });
+    }
+    target = Object.getPrototypeOf(target);
+  }
+  return [...found.values()];
+}
+
+/**
+ * What the object an expression names really has: a typed object (made by `new Tone.Synth()`,
+ * `getContext('2d')`, `createElement('div')`) by its prototype, a global path (Tone, Math,
+ * Tone.Transport, document.body) by walking it from the page. Null when it can't be found.
+ */
+export function realMembers(code: string, expression: string, scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>): { label: string; members: RealMember[]; namespace: boolean } | null {
+  const first = expression.split('.')[0];
+  const declaredHere = new RegExp(`(?:const|let|var|function|class)\\s+${first.replace(/\$/g, '\\$')}\\b`).test(code);
+  let type = objectType(code, expression);
+  // A well-known name (Tone, Math, document) that the program declares for itself is its own
+  if (type?.startsWith('@') && declaredHere) type = null;
+  if (type) {
+    const members = new Map<string, RealMember>();
+    for (const source of namesSources(type, scope)) for (const member of membersOfValue(source)) if (!members.has(member.name)) members.set(member.name, member);
+    if (members.size === 0) return null;
+    return { label: typeLabel(type, expression), members: [...members.values()], namespace: type.startsWith('@') };
+  }
+  const path = expression.split('.');
+  if (path.length > 3 || !path.every((segment) => /^[A-Za-z_$][\w$]*$/.test(segment))) return null;
+  // A name the program declares itself is its own, not the page's
+  if (new RegExp(`(?:const|let|var|function|class)\\s+${path[0].replace(/\$/g, '\\$')}\\b`).test(code)) return null;
+  let value: unknown = scope[path[0]];
+  try {
+    for (const segment of path.slice(1)) value = (value as Record<string, unknown> | null | undefined)?.[segment];
+  } catch {
+    return null;
+  }
+  const members = membersOfValue(value);
+  return members.length ? { label: expression, members, namespace: typeof value === 'object' && members.filter((m) => m.kind === 'class').length >= members.length / 2 } : null;
+}
+
+/**
+ * What a library value is, by the library's own name for its class: the export whose class made it
+ * ("Tone.Param"), found by walking the library's exports (a bundle shortens its own class names:
+ * Safari says "an instance of e"). A browser object gives its own constructor's name. Null when
+ * the value is not an object or its class has no name here.
+ */
+export function libraryClassName(value: unknown, scope: Record<string, unknown>): string | null {
+  if (value === null || typeof value !== 'object') return null;
+  const ctor = (value as { constructor?: unknown }).constructor;
+  if (typeof ctor !== 'function') return null;
+  for (const library of ['Tone', 'THREE']) {
+    const exported = scope[library] as Record<string, unknown> | undefined;
+    if (!exported) continue;
+    try {
+      for (const key of Object.keys(exported)) if (exported[key] === ctor) return `${library}.${key}`;
+    } catch {
+      // an export that can't be read
+    }
+  }
+  const name = (ctor as { name?: string }).name;
+  return name && name.length > 2 ? name : null;
+}
+
+/**
+ * The library export whose class is called `name` ("Cu" → "Tone.PolySynth"): a bundle shortens
+ * its class names, and Chrome names the class that way in "Class constructor Cu cannot be invoked
+ * without 'new'". Only when exactly one export of Tone or THREE is a class with that name (two
+ * is a tie, and a tie changes nothing), and not when the program declares that name itself.
+ */
+export function libraryClassNamed(name: string, code: string, scope: Record<string, unknown>): string | null {
+  if (new RegExp(`(?:const|let|var|function|class)\\s+${name.replace(/\$/g, '\\$')}\\b`).test(code)) return null;
+  const found: string[] = [];
+  for (const library of ['Tone', 'THREE']) {
+    const exported = scope[library] as Record<string, unknown> | undefined;
+    if (!exported) continue;
+    try {
+      for (const key of Object.keys(exported)) {
+        const value = exported[key];
+        if (typeof value === 'function' && (value as { name?: string }).name === name && classLike(value as never, key)) found.push(`${library}.${key}`);
+      }
+    } catch {
+      // an export that can't be read
+    }
+  }
+  return found.length === 1 ? found[0] : null;
+}
+
+/**
+ * An error that names a class the bundle shortened, with the class's own library name in its
+ * place. Only the two slots the browsers use for it: "'Tone.Transport.bpm' is an instance of e"
+ * (→ "… is an instance of Tone.Param", the object found in the page) and "Class constructor Cu
+ * cannot be invoked without 'new'" (→ "Class constructor Tone.PolySynth …", the export class of
+ * that name). A name that isn't a library class stays as it is, and so does any other text.
+ */
+export function withLibraryClassNames(error: string, code: string, scope: Record<string, unknown>): string {
+  return error
+    .replace(/'([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)' is an instance of ([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)/g, (whole, path: string, shortened: string) => {
+      if (shortened.includes('.')) return whole;
+      const name = libraryClassName(valueOfPath(code, path, scope), scope);
+      return name && name !== shortened ? `'${path}' is an instance of ${name}` : whole;
+    })
+    .replace(/\bClass constructor ([A-Za-z_$][\w$]*) cannot be invoked without 'new'/g, (whole, shortened: string) => {
+      const name = libraryClassNamed(shortened, code, scope);
+      return name ? `Class constructor ${name} cannot be invoked without 'new'` : whole;
+    });
+}
+
+/** The value a global path names in the page (Tone.Transport, Math): undefined when it isn't there or the program declares the first name itself */
+export function valueOfPath(code: string, path: string, scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>): unknown {
+  const segments = path.split('.');
+  if (segments.length > 3 || !segments.every((segment) => /^[A-Za-z_$][\w$]*$/.test(segment))) return undefined;
+  if (new RegExp(`(?:const|let|var|function|class)\\s+${segments[0].replace(/\$/g, '\\$')}\\b`).test(code)) return undefined;
+  try {
+    let value: unknown = scope[segments[0]];
+    for (const segment of segments.slice(1)) value = (value as Record<string, unknown> | null | undefined)?.[segment];
+    return value;
+  } catch {
+    return undefined;
+  }
+}
+
+/** How near a real member's name is to the missing one: shared words weigh most, then a name inside the other, then a few edits (0: unrelated) */
+function relatedness(missing: string, name: string): number {
+  const mine = nameWords(missing);
+  const shared = nameWords(name).filter((w) => w.length > 2 && mine.includes(w)).length;
+  const a = flatName(missing);
+  const b = flatName(name);
+  const near = b.length >= 3 && (a.includes(b) || b.includes(a)) ? 2 : editDistance(a, b) <= Math.max(2, Math.floor(a.length / 3)) ? 1 : 0;
+  return shared * 3 + near;
+}
+
+export type MemberUse = 'call' | 'new' | 'read';
+
+/**
+ * The real members that fit how the missing one was used (a function for a call, a class for new,
+ * anything to read) and are related to its name, closest first, a few (what the model is asked to
+ * choose from). Fewer than two related ones is no choice: an empty list.
+ */
+export function memberChoices(missing: string, members: readonly RealMember[], use: MemberUse, count = 5): RealMember[] {
+  const fits = members.filter((m) => (use === 'read' ? true : use === 'new' ? m.kind === 'class' : m.kind !== 'property'));
+  const ranked = fits
+    .map((member) => ({ member, score: relatedness(missing, member.name) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || Number(b.member.kind === 'class') - Number(a.member.kind === 'class') || a.member.name.length - b.member.name.length || a.member.name.localeCompare(b.member.name));
+  return ranked.length >= 2 ? ranked.slice(0, count).map((entry) => entry.member) : [];
+}
+
+/**
+ * What to tell about an object that has no such member, when no single one is meant: the
+ * members that share a word with the name, or failing that what the object makes (a namespace of
+ * classes: "things are made with new: Tone.Synth, Tone.PolySynth"), else nothing
+ */
+export function memberFacts(object: string, missing: string, members: readonly RealMember[], namespace: boolean, use: MemberUse): string {
+  const share = members.filter((m) => nameWords(m.name).some((w) => w.length > 2 && nameWords(missing).includes(w)));
+  if (share.length > 0) return `${object} has no ${missing}${use === 'read' ? '' : '()'}; the members that share a word with it: ${share.slice(0, 5).map((m) => `${object}.${m.name}`).join(', ')}.`;
+  const classes = members.filter((m) => m.kind === 'class');
+  if (namespace && classes.length >= 2) {
+    const words = (name: string) => nameWords(name).length;
+    const simplest = [...classes].sort((a, b) => words(a.name) - words(b.name) || a.name.localeCompare(b.name)).slice(0, 5);
+    return `${object} has no ${missing}${use === 'read' ? '' : '()'}; things are made with new: ${simplest.map((m) => `${object}.${m.name}`).join(', ')}.`;
+  }
+  return '';
+}
+
 export interface MethodHint {
   /** A sentence for the fix request: what the object is and its closest methods */
   text: string;
-  /** A slip that can be corrected without the model */
-  correction?: { object: string; from: string; to: string };
+  /** A slip that can be corrected without the model (`at`: where its name is written, for an object that is an expression) */
+  correction?: { object: string; from: string; to: string; at?: { start: number; end: number } };
+}
+
+/**
+ * A "not a function" error whose object the browser abbreviated (`document.getElementById(...)
+ * .getContext(...).fillArc is not a function`): the call is found in the program (on the failing
+ * line, when it is known), and what its object is read from the code that makes it. Exactly one
+ * such call, or nothing.
+ */
+function inlineMethodHint(code: string, error: string, errorLine: number | undefined, scope?: Record<string, unknown>): MethodHint | null {
+  const method = error.match(/\)\.([A-Za-z_$][\w$]*) is not a function/)?.[1];
+  if (!method) return null;
+  let ast: { type: string; [key: string]: unknown };
+  try {
+    ast = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true, locations: true }) as never;
+  } catch {
+    return null;
+  }
+  type Call = { loc: { start: { line: number } }; callee: { object: { start: number; end: number }; property: { name: string; start: number; end: number } } };
+  const calls: Call[] = [];
+  const visit = (node: { type: string; [key: string]: unknown }) => {
+    const callee = node.callee as { type?: string; computed?: boolean; property?: { name?: string } } | undefined;
+    if (node.type === 'CallExpression' && callee?.type === 'MemberExpression' && !callee.computed && callee.property?.name === method) calls.push(node as unknown as Call);
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && visit(child);
+      else if (value && typeof value === 'object' && typeof (value as { type?: unknown }).type === 'string') visit(value as never);
+    }
+  };
+  visit(ast);
+  // The calls on the failing line, else every one of that name; written again is the same slip,
+  // so every one of them must have the same object type
+  const onLine = calls.filter((call) => call.loc.start.line === errorLine);
+  const found = (onLine.length > 0 ? onLine : calls).map((call) => ({ call, text: code.slice(call.callee.object.start, call.callee.object.end) }));
+  if (found.length === 0) return null;
+  const type = typeMadeBy(found[0].text, code);
+  if (!type || !found.every((one) => typeMadeBy(one.text, code) === type)) return null;
+  const names = methodNames(type, scope);
+  if (names.length === 0) return null;
+  const object = found[0].text.replace(/\s+/g, ' ');
+  const shortObject = object.length > 90 ? `${object.slice(0, 87)}...` : object;
+  const fix = sureMatch(method, names, { reshaped: true, used: usedMembers(code) });
+  const closest = closestMembers(type, method, true, scope);
+  return {
+    // (the members as they follow that object: .fillRect(x, y, width, height) (a method))
+    text: `${shortObject} is ${typeLabel(type, shortObject)}, which has no ${method}(). It has ${closest.map((n) => describeMember(type, '', n, scope)).join(', ')}: use the one you meant.`,
+    ...(fix && found.length === 1 ? { correction: { object: shortObject, from: method, to: fix, at: { start: found[0].call.callee.property.start, end: found[0].call.callee.property.end } } } : {}),
+  };
 }
 
 /** Help for a "not a function" error: the candidates, and a correction when it's a slip */
-export function methodHint(code: string, error: string, scope?: Record<string, unknown>): MethodHint | null {
+export function methodHint(code: string, error: string, scope?: Record<string, unknown>, errorLine?: number): MethodHint | null {
   const missing = missingMethod(error);
-  if (!missing) return null;
-  const type = objectType(code, missing.object);
-  if (!type) return null;
+  if (!missing) return inlineMethodHint(code, error, errorLine, scope);
+  let type = objectType(code, missing.object);
+  // A well-known name (Tone, Math, document) that the program declares for itself is its own
+  if (type?.startsWith('@') && new RegExp(`(?:const|let|var|function|class)\\s+${missing.object.split('.')[0].replace(/\$/g, '\\$')}\\b`).test(code)) return null;
+  // An object the program didn't make by a call the types know (Tone.Transport, Math, document.body):
+  // what it really has, read from the page
+  if (!type) return realObjectHint(code, missing, scope);
   const names = methodNames(type, scope);
   if (names.length === 0) return null;
   const typeName = typeLabel(type, missing.object);
@@ -263,18 +532,139 @@ export function methodHint(code: string, error: string, scope?: Record<string, u
   }
   // A sure method (a slip, or the name reshaped: page() for getPage()) is corrected; otherwise the
   // closest members, methods or properties (getPage() where it has page), each shown as it is used
-  const fix = sureMatch(missing.method, names, { reshaped: true, used: usedMembers(code) });
+  let fix = sureMatch(missing.method, names, { reshaped: true, used: usedMembers(code) });
+  // A method that belongs to a setting of the object (gain.setValueAtTime(…), which is
+  // gain.gain.setValueAtTime(…)): when exactly one of its settings has it, that is the one
+  const through = fix ? null : memberWithMethod(type, missing.method, scope);
+  if (through) fix = `${through}.${missing.method}`;
   const closest = closestMembers(type, missing.method, true, scope);
+  // A class of a library (Tone.Loop): where the value was made, and which classes do have the method
+  const library = /^(?:Tone|THREE)\./.test(type);
+  const made = library ? madeAtLine(code, missing.object) : null;
+  const owners = library ? classesWithMethod(type, missing.method, scope) : [];
+  // A namespace (Tone, Math): the real names that share a word, or what it makes, in place of its closest names
+  if (type.startsWith('@')) {
+    const real = realMembers(code, missing.object, scope);
+    const facts = real && !fix ? memberFacts(missing.object, missing.method, real.members, real.namespace, 'call') : '';
+    if (facts) return { text: facts };
+  }
   return {
-    text: `${missing.object} is ${typeName}, which has no ${missing.method}(). It has ${closest.map((n) => describeMember(type, missing.object, n, scope)).join(', ')}: use the one you meant.`,
+    text:
+      `${missing.object} is ${typeName}${made ? ` (made at line ${made})` : ''}, which has no ${missing.method}(). ` +
+      `${owners.length ? `${missing.method}() belongs to ${owners.join(', ')}. ` : ''}` +
+      `It has ${closest.map((n) => describeMember(type, missing.object, n, scope)).join(', ')}: use the one you meant.`,
     ...(fix ? { correction: { object: missing.object, from: missing.method, to: fix } } : {}),
   };
 }
 
+/** The line a name is declared on (`const loop = …`), or null when it is not declared exactly once */
+export function madeAtLine(code: string, name: string): number | null {
+  const found = [...code.matchAll(new RegExp(`(?:^|[^\\w$.])(?:const|let|var)\\s+${name.replace(/\$/g, '\\$')}\\s*=`, 'g'))];
+  return found.length === 1 ? code.slice(0, found[0].index! + 1).split('\n').length : null;
+}
+
+/** The value a "x.m is not a function" error is about: its name and the line it is made on (null when it is not declared once) */
+export function valueMadeAt(code: string, error: string): { name: string; line: number } | null {
+  const missing = missingMethod(error);
+  if (!missing || !/^[A-Za-z_$][\w$]*$/.test(missing.object)) return null;
+  const line = madeAtLine(code, missing.object);
+  return line ? { name: missing.object, line } : null;
+}
+
+/**
+ * The value an error is about, when the fix may belong on the line that makes it: a class of a
+ * library (new Tone.Loop) asked for a method that other classes of that library have, so the
+ * class made there is the likely mistake. Null for anything else (a method a browser type lacks
+ * belongs on the line that calls it).
+ */
+export function madeAsWrongClass(code: string, error: string, scope?: Record<string, unknown>): { name: string; line: number } | null {
+  const made = valueMadeAt(code, error);
+  const missing = missingMethod(error);
+  if (!made || !missing || !scope) return null;
+  const type = objectType(code, made.name);
+  if (!type || !/^(?:Tone|THREE)\./.test(type)) return null;
+  return classesWithMethod(type, missing.method, scope, 1).length > 0 ? made : null;
+}
+
+/**
+ * The classes of a library (Tone.Synth, Tone.PolySynth…) that have a method, read from the real
+ * prototypes of what the library exports: the simplest names first, a few of them
+ */
+export function classesWithMethod(type: string, method: string, scope?: Record<string, unknown>, count = 4): string[] {
+  const library = type.split('.')[0];
+  const exported = scope?.[library] as Record<string, unknown> | undefined;
+  if (!exported) return [];
+  const found: string[] = [];
+  for (const key of Object.keys(exported)) {
+    const candidate = `${library}.${key}`;
+    if (candidate === type || typeof exported[key] !== 'function' || !/^[A-Z]/.test(key)) continue;
+    if (memberKind(candidate, method, scope) === 'method') found.push(candidate);
+  }
+  const words = (name: string) => name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(' ').length;
+  found.sort((a, b) => words(a) - words(b) || a.localeCompare(b));
+  return found.length > count ? [...found.slice(0, count), `${found.length - count} more`] : found;
+}
+
+/** "x.m is not a function" for an object found by walking the page (Tone.Transport.foo): what it has, or the sure slip */
+function realObjectHint(code: string, missing: { object: string; method: string }, scope?: Record<string, unknown>): MethodHint | null {
+  if (!scope) return null;
+  const real = realMembers(code, missing.object, scope);
+  if (!real) return null;
+  // The member is there, but a value and no function (Tone.Transport.bpm is a Tone.Param): what it
+  // is and what it has, so the call can become one of those
+  if (real.members.some((m) => m.name === missing.method && m.kind === 'property')) {
+    const value = valueOfPath(code, `${missing.object}.${missing.method}`, scope);
+    const label = libraryClassName(value, scope);
+    const own = membersOfValue(value);
+    const shown = [...own.filter((m) => m.kind === 'property'), ...own.filter((m) => m.kind !== 'property')]
+      .filter((m) => !/^(?:dispose|toString|valueOf|get|set|name)$/.test(m.name))
+      .slice(0, 5)
+      .map((m) => (m.kind === 'property' ? `.${m.name}` : `.${m.name}()`));
+    if (label && shown.length) return { text: `${missing.object}.${missing.method} is ${/^[AEIOU]/.test(label.replace(/^[A-Za-z]+\./, '')) ? 'an' : 'a'} ${label}, not a function; it has ${shown.join(', ')}.` };
+  }
+  const callable = real.members.filter((m) => m.kind !== 'property').map((m) => m.name);
+  const fix = sureMatch(missing.method, callable, { reshaped: true, used: usedMembers(code) });
+  const facts = memberFacts(missing.object, missing.method, real.members, real.namespace, 'call');
+  const closest = closestNames(missing.method, callable, 3);
+  return {
+    text: facts || `${missing.object} has no ${missing.method}()${closest.length ? `. It has ${closest.map((n) => `${missing.object}.${n}()`).join(', ')}: use the one you meant.` : '.'}`,
+    ...(fix ? { correction: { object: missing.object, from: missing.method, to: fix } } : {}),
+  };
+}
+
+/**
+ * The one member of an audio node (its settings are AudioParams: gain, frequency, detune…) that has
+ * the method, read from a node of that type made on a silent offline context. Null when no member
+ * has it, several do (an oscillator's frequency and detune), or the type isn't an audio node.
+ */
+export function memberWithMethod(type: string, method: string, scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>): string | null {
+  try {
+    const Node = scope[type] as (new (context: unknown) => Record<string, unknown>) | undefined;
+    const Offline = scope.OfflineAudioContext as (new (channels: number, length: number, rate: number) => unknown) | undefined;
+    const Base = scope.AudioNode as { prototype?: object } | undefined;
+    const Param = scope.AudioParam as (abstract new () => object) | undefined;
+    if (typeof Node !== 'function' || typeof Offline !== 'function' || typeof Param !== 'function' || !Base?.prototype || !(Node.prototype instanceof (Base as unknown as new () => object))) return null;
+    const sample = new Node(new Offline(1, 1, 8000));
+    const owners: string[] = [];
+    for (const { name, kind } of membersOfValue(Object.getPrototypeOf(sample))) {
+      if (kind !== 'property') continue;
+      // Only a setting (an AudioParam) counts: a node's `context` also has suspend() and resume(), and
+      // gainNode.context.suspend() would stop the audio of the whole page
+      const value = sample[name] as Record<string, unknown> | null | undefined;
+      if (value instanceof Param && typeof value[method] === 'function') owners.push(name);
+    }
+    return owners.length === 1 ? owners[0] : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The program with every call of object.from renamed to object.to */
-export function applyCorrection(code: string, correction: { object: string; from: string; to: string }): string {
+export function applyCorrection(code: string, correction: { object: string; from: string; to: string; at?: { start: number; end: number } }): string {
+  if (correction.at) return code.slice(0, correction.at.start) + correction.to + code.slice(correction.at.end);
   const object = correction.object.replace(/[.$]/g, (c) => `\\${c}`);
-  return code.replace(new RegExp(`(\\b${object}\\s*\\.\\s*)${correction.from}\\b`, 'g'), `$1${correction.to}`);
+  // (the object is the start of the path: `gain` in `gain.gain.setValueAtTime` is not the one to rename)
+  return code.replace(new RegExp(`((?<![\\w$.])${object}\\s*\\.\\s*)${correction.from}\\b`, 'g'), `$1${correction.to}`);
 }
 
 /**

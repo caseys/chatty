@@ -227,7 +227,24 @@ function keepCodeLines(text: string): string[] {
  * program) or code before the fence that makes the whole reply a program: the whole reply,
  * fence lines dropped.
  */
-function replyCode(reply: string): string[] {
+function replyCode(reply: string, wholeFor?: string): string[] {
+  const fences = [...reply.matchAll(/```[\w-]*[ \t]*\n([\s\S]*?)(?:```|$)/g)].filter((m) => m[1].trim());
+  // Asked for the whole program, a reply with several code blocks gives the complete one, not the
+  // fragment that came first: the block that keeps the most of the program's own lines (then the
+  // longer, then the first)
+  if (wholeFor !== undefined && fences.length > 1) {
+    const own = new Set(wholeFor.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('//')));
+    // (a block that is the program itself is "Before it was:", not the fix)
+    const squash = (text: string) => text.split('\n').map((l) => l.trim()).filter(Boolean).join('\n');
+    const others = fences.filter((m) => squash(m[1]) !== squash(wholeFor));
+    const scored = (others.length > 0 ? others : fences).map((m) => {
+      const order = fences.indexOf(m);
+      const lines = m[1].split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('//'));
+      return { m, order, kept: lines.filter((l) => own.has(l)).length, length: lines.length };
+    });
+    scored.sort((a, b) => b.kept - a.kept || b.length - a.length || a.order - b.order);
+    if (scored[0].order !== 0) return keepCodeLines(scored[0].m[1]);
+  }
   const fenced = reply.match(/```[\w-]*[ \t]*\n([\s\S]*?)(?:```|$)/);
   if (!fenced || !fenced[1].trim()) return keepCodeLines(reply);
   const before = keepCodeLines(reply.slice(0, fenced.index)).filter((l) => l.trim() && !/^\s*\/\//.test(l));
@@ -331,7 +348,7 @@ function replaceDeclaredFunction(program: string, reply: string): string | null 
   return result;
 }
 
-export function applyFixReply(program: string, reply: string, line?: number, endLine?: number): string {
+export function applyFixReply(program: string, reply: string, line?: number, endLine?: number, whole = false): string {
   const blocks = [...reply.matchAll(SEARCH_REPLACE)];
   // Edit markers but no edit that can be read: nothing to apply (running it would only fail)
   if (blocks.length === 0 && /^\s*(?:<{5,}|>{5,}|={5,})/m.test(reply)) return program;
@@ -345,7 +362,7 @@ export function applyFixReply(program: string, reply: string, line?: number, end
     }
     return lines.join('\n');
   }
-  const code = replyCode(reply);
+  const code = replyCode(reply, whole ? program : undefined);
   while (code.length > 0 && !code[code.length - 1].trim()) code.pop();
   while (code.length > 0 && !code[0].trim()) code.shift();
   // No code lines, but a comment that holds the corrected code ("// corrected line: foo();")

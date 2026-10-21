@@ -87,6 +87,11 @@ export class WebLlmClient {
     return (await this.ask((id) => ({ kind: 'complete', id, request }), {})) as WebLlmCompletion;
   }
 
+  /** The first, tiny run after a load, done in the worker; never fails (the worker logs a failure) */
+  async warmUp(request: WebLlmChatRequest): Promise<void> {
+    await this.ask((id) => ({ kind: 'warm-up', id, request }), {});
+  }
+
   /** Stops the reply being generated */
   interrupt(): void {
     this.worker.postMessage({ kind: 'interrupt' });

@@ -344,3 +344,75 @@ describe('names a destructuring declares', () => {
     expect(choices).not.toContain('notes');
   });
 });
+
+describe('the member blank: a choice among the real members of an object that lacks the one used', async () => {
+  const { memberBlank, fillMember } = await import('../src/core/blank-fix.ts');
+  // The shapes of Tone's namespace: classes made with new, a Transport object, functions
+  class Synth {
+    triggerAttackRelease() {}
+  }
+  class PolySynth extends Synth {}
+  class MembraneSynth extends Synth {}
+  class Loop {
+    start() {}
+  }
+  const Tone = { Synth, PolySynth, MembraneSynth, Loop, Transport: { start() {}, stop() {} }, now: () => 0 };
+  const scope = { Tone } as unknown as Record<string, unknown>;
+
+  it('offers the related classes for a made-up call, and makes the chosen one with new', () => {
+    const code = 'const synth = Tone.playSynth("C4");\nsynth.toDestination();';
+    const found = memberBlank(code, 'Tone.playSynth is not a function', 1, scope);
+    expect(found?.blank).toMatchObject({ text: 'playSynth', why: 'Tone has no playSynth()', line: 1 });
+    expect(found?.members.map((m) => m.name)).toEqual(['Synth', 'PolySynth', 'MembraneSynth']);
+    expect(fillMember(code, found!.blank, 'PolySynth')).toBe('const synth = new Tone.PolySynth("C4");\nsynth.toDestination();');
+    // Not twice when it was made with new already
+    const made = 'const synth = new Tone.playSynth("C4");';
+    expect(fillMember(made, memberBlank(made, 'Tone.playSynth is not a constructor', 1, scope)!.blank, 'Synth')).toBe('const synth = new Tone.Synth("C4");');
+  });
+
+  it('marks the object of each use in a test copy: the comma keeps this and new, and the program still runs as before', () => {
+    const mark = 'globalThis.__chattyReached = true';
+    const code = 'const synth = Tone.playSynth("C4");\nconst other = Tone.playSynth("D4");';
+    const blank = memberBlank(code, 'Tone.playSynth is not a function', 1, scope)!.blank;
+    const marked = fillMember(code, blank, 'PolySynth', mark)!;
+    expect(marked).toBe('const synth = new ((globalThis.__chattyReached = true), Tone).PolySynth("C4");\nconst other = new ((globalThis.__chattyReached = true), Tone).PolySynth("D4");');
+    // Runs: the marked copy gives the same instances, and sets the flag only when the use is reached
+    const g = globalThis as unknown as { __chattyReached?: boolean };
+    const run = (source: string) => new Function('Tone', `${source}\nreturn [synth, other];`)(Tone);
+    g.__chattyReached = false;
+    const [a, b] = run(marked);
+    expect(a).toBeInstanceOf(PolySynth);
+    expect(b).toBeInstanceOf(PolySynth);
+    expect(g.__chattyReached).toBe(true);
+    delete g.__chattyReached;
+    // A plain call keeps its receiver: the object the comma gives back is the one the method is called on
+    expect(new Function('Tone', `const mix = { gain: 3, level() { return this.gain; } };\nreturn ((${mark}), mix).level();`)(Tone)).toBe(3);
+    // Without a mark, as before
+    expect(fillMember(code, blank, 'PolySynth')).toBe('const synth = new Tone.PolySynth("C4");\nconst other = new Tone.PolySynth("D4");');
+  });
+
+  it('works for the member whose value was read next, as in the real blues program', () => {
+    // The real shape: Tone.createSynth is undefined, so reading createSynth of it fails
+    const code = 'const synth = Tone.createSynth.createSynth(Tone.createSynth.PolySynth);';
+    const found = memberBlank(code, "Cannot read properties of undefined (reading 'createSynth')", 1, scope);
+    expect(found?.blank.member).toMatchObject({ object: 'Tone', use: 'read' });
+    expect(found?.blank.spans.length).toBe(2);
+    expect(found?.members.map((m) => m.name)).toContain('Synth');
+    // Read uses fit any member: the choices stay the related ones
+    expect(fillMember(code, found!.blank, 'Synth')).toBe('const synth = Tone.Synth.createSynth(Tone.Synth.PolySynth);');
+  });
+
+  it('keeps only what fits the use: a class for new, a function for a call', () => {
+    const asNew = memberBlank('const t = new Tone.makeLoop();', 'Tone.makeLoop is not a constructor', 1, scope);
+    expect(asNew).toBeNull(); // only one related class: no choice
+    const call = memberBlank('Tone.Transport.startNow();', 'Tone.Transport.startNow is not a function', 1, scope);
+    expect(call).toBeNull(); // start() and now share no word with startNow beyond one: one related member
+  });
+
+  it('is left alone when nothing is related, the object has the member, or it cannot be found', () => {
+    expect(memberBlank('Tone.create("PolySynth");', 'Tone.create is not a function', 1, scope)).toBeNull();
+    expect(memberBlank('Tone.Synth();', 'Tone.Synth is not a function', 1, scope)).toBeNull();
+    expect(memberBlank('mystery.playSynth();', 'mystery.playSynth is not a function', 1, scope)).toBeNull();
+    expect(memberBlank('const Tone = { go() {} };\nTone.playSynth();', 'Tone.playSynth is not a function', 2, scope)).toBeNull();
+  });
+});

@@ -197,4 +197,17 @@ describe('an import of Tone.js', async () => {
     expect(provideThree("import * as T from 'three';\nimport * as Tone from 'tone';").provided.sort()).toEqual(['THREE', 'Tone']);
     expect(provideThree("import x from 'lodash';").changed).toBe(false);
   });
+
+  it('also when it is required, as Qwen3 0.6B wrote it for the blues loop, and not as its own name taken from itself', () => {
+    // The real line: a Node-style import of the package that names Tone out of it
+    expect(provideThree("const { Tone } = require('tone');\nconst tempo = 120;")).toEqual({ code: '\nconst tempo = 120;', changed: true, provided: ['Tone'] });
+    expect(provideThree("const Tone = require('tone');").code).toBe('');
+    expect(provideThree("const T = require(\"tone\");\nconst s = new T.Synth();").code).toBe('const T = Tone;\nconst s = new T.Synth();');
+    expect(provideThree("const { Synth, Loop: L } = require('tone');").code).toBe('const { Synth, Loop: L } = Tone;');
+    expect(provideThree("const { Tone, Synth } = require('tone');").code).toBe('const { Synth } = Tone;');
+    expect(provideThree("import { Tone } from 'tone';").code).toBe('');
+    // Packages that are not provided stay as they are
+    expect(provideThree("const fs = require('fs');").changed).toBe(false);
+    expect(provideThree("const x = require('tone').Synth;").changed).toBe(false);
+  });
 });

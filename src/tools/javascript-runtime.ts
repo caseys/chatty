@@ -10,6 +10,7 @@ import { loopProtect } from './loop-protect.ts';
 import { playNotesHelper } from './music-tool.ts';
 import { fetchWikipediaSummary } from './web-tools.ts';
 import { closeCutOff, declareOnce, type StandIn } from '../core/error-hints.ts';
+import { analyse, isReference } from '../core/blank-fix.ts';
 import { sureMatch } from '../core/fuzzy-match.ts';
 import { checkedIds, elementKinds } from './element-kinds.ts';
 
@@ -40,6 +41,7 @@ async function loadBundle(win: Window, bundleUrl: string, name: string): Promise
     const script = doc.createElement('script');
     script.type = 'module';
     script.src = new URL(bundleUrl, window.location.href).href;
+    script.dataset.chattyLibrary = name;
     script.addEventListener('load', () => resolve());
     script.addEventListener('error', () => {
       console.warn(`${name} could not load`);
@@ -91,6 +93,7 @@ async function withLibraries(code: string, win: Window | null, live?: () => bool
   await Promise.all([withThree(code, win, live), withTone(code, win, live)]);
 }
 import { withActivity } from '../core/activity-breadcrumbs.ts';
+import type { SoundSetup } from '../core/sound-setup.ts';
 import { midiSummary as softwareMidiSummary, resetMidiSummary, silenceSoftwareMidi, softwareMidiAccess, type MidiSummary } from '../audio/software-midi.ts';
 
 export type JavascriptExecutionMode = 'iframe' | 'worker' | 'eval';
@@ -195,7 +198,7 @@ export interface PreparedExecutableCode {
   code: string;
   isProse: boolean;
   /** The reply was cut off before its end: its unfinished last lines removed, its open blocks closed */
-  cutOff?: { dropped: number; closed: number };
+  cutOff?: { dropped: number; closed: number; template?: boolean };
   /** A program that says nothing ended on a sentence in a comment: said with speak() (see speakClosingComment) */
   spokeComment?: string;
   /** Functions it declared but never called, called at its end (see callUncalledFunctions) */
@@ -206,6 +209,8 @@ export interface PreparedExecutableCode {
   repeatedBlocks?: number;
   /** Functions its inline handlers call, made reachable from them (see exposeFunctionsToInlineHandlers) */
   exposed?: string[];
+  /** Scripts in markup it sets through innerHTML, whose code now runs as part of the program (see hoistPageScripts) */
+  hoistedScripts?: number;
 }
 
 /**
@@ -576,7 +581,7 @@ function withTalk(parts: ReplyPart[]): string {
  * program that starts itself (calls one of its own functions at its top level) has chosen where
  * it begins: its other functions are left for it to call.
  */
-export function callUncalledFunctions(original: string): string {
+export function callUncalledFunctions(original: string, awaited = true): string {
   // Judged without comments: a word in a comment ("// then draw") is no call of draw()
   const code = stripComments(original);
   // The program's top-level functions that take nothing, however they are indented (a page's
@@ -590,16 +595,90 @@ export function callUncalledFunctions(original: string): string {
   // A function's own body doesn't count: one that only calls itself (a loop, a timer) still needs
   // its first call. Without a parse, every mention counts, so only the declaration may name it.
   const own = topLevelFunctionRanges(code);
+  const tree = analyse(code);
   const refs = (name: string) => {
     const range = own.get(name);
     const text = range ? code.slice(0, range[0]) + code.slice(range[1]) : code;
+    // With a parse: the places the name is used as a name (a word in a string, an element's id
+    // that happens to read like the function's name, is not one), and a call of it written inside
+    // a string (an inline handler: onclick="score++; update()", setAttribute('onclick', 'go()'))
+    if (tree) {
+      // ({ go } hands the function over too)
+      const named = (node: (typeof tree.nodes)[number]) => isReference(tree, node) || (tree.parent.get(node)?.type === 'Property' && !!tree.parent.get(node)?.shorthand);
+      const outside = (node: { start: number; end: number }) => !(range && node.start >= range[0] && node.end <= range[1]);
+      const used = tree.nodes.filter((node) => node.type === 'Identifier' && node.name === name && named(node) && outside(node)).length;
+      const call = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\s*\\(`);
+      const written = tree.nodes.filter(
+        (node) =>
+          outside(node) &&
+          ((node.type === 'Literal' && typeof node.value === 'string' && call.test(node.value)) || (node.type === 'TemplateElement' && call.test(String((node.value as { raw?: string }).raw ?? '')))),
+      ).length;
+      return used + written;
+    }
     return text.match(new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}(?![\\w$])`, 'g'))?.length ?? 0;
   };
   const roots = declared.filter((name) => refs(name) === (own.has(name) ? 0 : 1));
   let toCall = roots.filter((name) => /^(?:main|init|start|run|setup|draw|play|render|animate|create|build|show|make)/i.test(name));
   if (toCall.length === 0 && roots.length === declared.length) toCall = [declared[declared.length - 1]];
+  // The one function nothing refers to, when it is what calls the others (a gameLoop() that runs
+  // update() and draw()): the head of the program's calls, where it begins whatever it is named
+  if (toCall.length === 0 && roots.length === 1 && declared.length > 1) {
+    const range = own.get(roots[0]);
+    const body = range ? code.slice(range[0], range[1]) : '';
+    if (declared.some((other) => other !== roots[0] && new RegExp(`(?<![\\w$.])${other.replace(/\$/g, '\\$')}\\s*\\(`).test(body))) toCall = roots;
+  }
   preparing?.called.push(...toCall);
-  return toCall.length ? `${original}\n${toCall.map((name) => `await ${name}();`).join('\n')}` : original;
+  return toCall.length ? `${original}\n${toCall.map((name) => `${awaited ? 'await ' : ''}${name}();`).join('\n')}` : original;
+}
+
+/**
+ * A <script> in markup the program sets through innerHTML or insertAdjacentHTML, as a statement of
+ * its own: the browser never runs it, and the program put it there to run. Its code goes after the
+ * statement, as part of the program, so every repair a program gets reaches it too (an uncalled
+ * function called, a slipped name, a loop guarded). The markup keeps the rest. Only a script
+ * written out in a string or template literal as it will read (no escapes, no placeholders), with
+ * no src; a statement inside a function is left to the page, which runs such scripts itself.
+ */
+export function hoistPageScripts(code: string): { code: string; hoisted: number } {
+  if (!/<script\b/i.test(code)) return { code, hoisted: 0 };
+  let program: ReturnType<typeof parse>;
+  try {
+    program = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true });
+  } catch {
+    return { code, hoisted: 0 };
+  }
+  const edits: Array<{ start: number; end: number; text: string; after: number; body: string }> = [];
+  for (const statement of program.body as any[]) {
+    if (statement.type !== 'ExpressionStatement') continue;
+    const expression = statement.expression;
+    const literal =
+      expression.type === 'AssignmentExpression' && expression.left.type === 'MemberExpression' && !expression.left.computed && /^(?:innerHTML|outerHTML)$/.test(expression.left.property.name)
+        ? expression.right
+        : expression.type === 'CallExpression' && expression.callee.type === 'MemberExpression' && !expression.callee.computed && expression.callee.property.name === 'insertAdjacentHTML'
+          ? expression.arguments[1]
+          : null;
+    if (!literal || !((literal.type === 'TemplateLiteral' && literal.expressions.length === 0) || (literal.type === 'Literal' && typeof literal.value === 'string'))) continue;
+    const raw = code.slice(literal.start + 1, literal.end - 1);
+    const bodies: string[] = [];
+    let blocked = false;
+    // (only JavaScript: a JSON data block or a text/template stays in the markup, where it is read)
+    const markup = raw.replace(/<script(?![^>]*\bsrc\s*=)([^>]*)>([\s\S]*?)<\/script>/gi, (whole, attributes: string, body: string) => {
+      const type = attributes.match(/\btype\s*=\s*["']?([^"'\s>]+)/i)?.[1];
+      if (type !== undefined && !/^(?:text|application)\/(?:x-)?(?:java|ecma)script$/i.test(type)) return whole;
+      if (/\\|\$\{/.test(body)) blocked = true;
+      bodies.push(body.replace(/^\s*\n/, '').replace(/\s+$/, ''));
+      return '';
+    });
+    if (blocked || bodies.length === 0 || !bodies.some((b) => b.trim())) continue;
+    edits.push({ start: literal.start + 1, end: literal.end - 1, text: markup, after: statement.end, body: bodies.filter((b) => b.trim()).join('\n') });
+  }
+  if (edits.length === 0) return { code, hoisted: 0 };
+  let out = code;
+  for (const edit of edits.sort((a, b) => b.after - a.after)) {
+    out = out.slice(0, edit.after) + '\n' + edit.body + out.slice(edit.after);
+    out = out.slice(0, edit.start) + edit.text + out.slice(edit.end);
+  }
+  return parsesAsJs(out) ? { code: out, hoisted: edits.length } : { code, hoisted: 0 };
 }
 
 /**
@@ -958,12 +1037,21 @@ export function inspectExecutableCode(rawText: string, options: { closeCutOff?: 
   preparing = added;
   try {
     const prepared = prepareProgram(rawText, options);
+    // (a script in markup the program sets through innerHTML: its functions called, as a program's are)
+    let hoisted = 0;
+    if (!prepared.isProse) {
+      const page = hoistPageScripts(prepared.code);
+      hoisted = page.hoisted;
+      // (the program's own rule for functions nothing calls reaches the script's too)
+      prepared.code = hoisted ? exposeFunctionsToInlineHandlers(callUncalledFunctions(page.code)) : page.code;
+    }
     return {
       ...prepared,
       ...(added.called.length ? { called: [...new Set(added.called)] } : {}),
       ...(added.exposed.length ? { exposed: [...new Set(added.exposed)] } : {}),
       ...(added.redeclared.length ? { redeclared: [...new Set(added.redeclared)] } : {}),
       ...(added.repeats ? { repeatedBlocks: added.repeats } : {}),
+      ...(hoisted ? { hoistedScripts: hoisted } : {}),
     };
   } finally {
     preparing = outer;
@@ -982,7 +1070,7 @@ function prepareProgram(rawText: string, options: { closeCutOff?: boolean; speak
     let code = htmlToCode(opened > closed ? `${html}\n</script>` : html);
     const cut = options.closeCutOff === false ? null : closeCutOff(code);
     if (cut) code = cut.code;
-    return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(code)), isProse: false, ...(cut ? { cutOff: { dropped: cut.dropped, closed: cut.closed } } : {}) };
+    return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(code)), isProse: false, ...(cut ? { cutOff: { dropped: cut.dropped, closed: cut.closed, template: cut.template } } : {}) };
   };
   if (HTML_START.test(cleaned)) return asPage(cleaned);
 
@@ -1073,7 +1161,7 @@ function prepareProgram(rawText: string, options: { closeCutOff?: boolean; speak
       const closed = closeCutOff(part.text);
       if (closed) {
         part.text = closed.code;
-        cutOff = { dropped: closed.dropped, closed: closed.closed };
+        cutOff = { dropped: closed.dropped, closed: closed.closed, template: closed.template };
       }
     }
     const talked = withTalk(program);
@@ -1437,6 +1525,24 @@ export class JavascriptRuntime {
     update();
   }
 
+  /**
+   * Asks a page that is about to be thrown away to free what it holds (canvas pixels, WebGL
+   * contexts, sources still playing, its own audio context: __chattyTeardown in the sandbox
+   * runner). The page is the sandbox's own and same-origin, so the call is made straight away and
+   * is done when it returns: nothing waits before the page goes. For a trial's page the token says
+   * it is that trial's page (the frame outlives its pages); only a page that is going is passed here.
+   */
+  private teardownPage(iframe: HTMLIFrameElement | null | undefined, trialToken?: string): void {
+    try {
+      const page = iframe?.contentWindow as unknown as { __chattyTeardown?: () => void; __chattyTrialToken?: string } | null | undefined;
+      if (!page || typeof page.__chattyTeardown !== 'function') return;
+      if (trialToken !== undefined && page.__chattyTrialToken !== trialToken) return;
+      page.__chattyTeardown();
+    } catch {
+      // a page that can't be reached has nothing to free from here
+    }
+  }
+
   private async resetVisualNow(): Promise<void> {
     this.spoilDownload();
     const hadIframe = Boolean(this.activeIframe);
@@ -1449,6 +1555,7 @@ export class JavascriptRuntime {
     this.cardShadow = null;
     if (this.activeIframe) {
       this.activeIframe.style.pointerEvents = 'none';
+      this.teardownPage(this.activeIframe);
       this.activeIframe.remove();
       this.activeIframe = null;
       this.iframeReadyPromise = null;
@@ -1502,6 +1609,40 @@ export class JavascriptRuntime {
   }
   private soundSilent = 0;
 
+  /**
+   * What a hint reads names from: the app's own browser types, plus Tone and THREE as the visible
+   * page has them (the page's window itself is not used: asking its document for an element would
+   * leave one in the page's record of what the program made)
+   */
+  pageScope(): Record<string, unknown> | null {
+    try {
+      const page = this.activeIframe?.contentWindow as unknown as Record<string, { __chattyRaw?: unknown } | undefined> | null | undefined;
+      if (!page || !(page.Tone || page.THREE)) return null;
+      return new Proxy(globalThis as unknown as Record<string, unknown>, {
+        get(target, prop) {
+          if (prop === 'Tone' || prop === 'THREE') return page[prop]?.__chattyRaw ?? page[prop];
+          return Reflect.get(target, prop);
+        },
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * What the current program set up for sound (what was made, started, connected to the output)
+   * and what Chatty's libraries said about it, as its page reports them; null when the page
+   * can't be read (see sound-setup.ts)
+   */
+  soundSetup(): SoundSetup | null {
+    try {
+      const read = (this.activeIframe?.contentWindow as unknown as { __chattySetup?: () => SoundSetup } | null | undefined)?.__chattySetup;
+      return typeof read === 'function' ? read() : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** The MIDI messages the current program sent, by kind (note-ons above velocity 0, the others named) */
   midiSummary(): MidiSummary {
     return softwareMidiSummary();
@@ -1525,6 +1666,63 @@ export class JavascriptRuntime {
       return Array.from(doc.body.children).some(
         (el) => el !== root && el.tagName !== 'SCRIPT' && el.tagName !== 'STYLE'
       );
+    } catch {
+      return false;
+    }
+  }
+
+  /** How many controls (buttons, fields, links) the card has: what the user can press or type in */
+  controlCount(): number {
+    try {
+      const own = (this.activeIframe?.contentWindow as unknown as { __chattyControls?: () => number } | null)?.__chattyControls;
+      return typeof own === 'function' ? own() : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** The empty elements on the card, as selectors (div.bar ×5), for saying what shows nothing */
+  emptyElements(): string[] {
+    try {
+      const own = (this.activeIframe?.contentWindow as unknown as { __chattyEmptyElements?: () => string[] } | null)?.__chattyEmptyElements;
+      return typeof own === 'function' ? own() : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** The card as one string, for telling whether it changed over time; null when that can't be told (see __chattySignature) */
+  pageSignature(): string | null {
+    try {
+      const own = (this.activeIframe?.contentWindow as unknown as { __chattySignature?: () => string | null } | null)?.__chattySignature;
+      return typeof own === 'function' ? own() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Whether the card shows anything but canvases nothing was drawn on (hasVisualContent counts a
+   * blank canvas as something). A page that can't say is taken as hasVisualContent says.
+   */
+  hasDrawnContent(): boolean {
+    try {
+      const own = (this.activeIframe?.contentWindow as unknown as { __chattyHasDrawing?: () => boolean } | null)?.__chattyHasDrawing;
+      return typeof own === 'function' ? own() : this.hasVisualContent();
+    } catch {
+      return this.hasVisualContent();
+    }
+  }
+
+  /**
+   * Whether the current program has a timer or an interval that waits a second or more pending
+   * (the runner tracks them): its screen may be about to change. A frame loop or a faster interval
+   * doesn't count, since what it draws shows at once: one that changes nothing is stuck.
+   */
+  hasScheduledWork(): boolean {
+    try {
+      const slow = (this.activeIframe?.contentWindow as unknown as { __chattySlowWork?: () => number } | null | undefined)?.__chattySlowWork;
+      return typeof slow === 'function' ? slow() > 0 : false;
     } catch {
       return false;
     }
@@ -2062,7 +2260,13 @@ export class JavascriptRuntime {
 <body>
   <div id="root"></div>
   <script>
+  // The runner's own names live inside this function: a program's own top-level \`function setup()\`
+  // or \`var draw\` would otherwise meet them in the page's global scope ("Identifier 'setup' has
+  // already been declared") before the program starts
+  (function () {
     const __chattyHost = ${host ?? (trial ? trialHost(token) : 'window.parent')};
+    // The libraries' own scripts (Tone.js, see standalone/tone-realm.ts) look the host up as a global
+    window.__chattyHost = __chattyHost;
     const __chattyTrial = ${trial};
     const hasTopLevelReturn = ${hasTopLevelReturn.toString()};
     let currentExecId = null;
@@ -2158,7 +2362,22 @@ export class JavascriptRuntime {
             };
           }
           const value = Reflect.get(target, prop, target);
-          return typeof value === 'function' ? value.bind(target) : value;
+          if (typeof value !== 'function') return value;
+          const bound = value.bind(target);
+          // The nodes it makes are remembered, to say later which were started and which reach the output
+          if (typeof prop === 'string' && /^create[A-Z]/.test(prop)) {
+            const kind = prop.replace(/^create/, '').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
+            return (...args) => {
+              const node = bound(...args);
+              // A node's own .context is the app's real audio context, whose close() and suspend()
+              // would stop the whole page's audio: it hands out this stand-in instead (close and suspend do nothing)
+              try {
+                if (node && typeof node === 'object' && typeof node.connect === 'function') Object.defineProperty(node, 'context', { get: () => contextProxy, configurable: true });
+              } catch {}
+              return __chattyRememberSource(__chattyTrack(node, kind, 'web', (to) => to === shared.output));
+            };
+          }
+          return bound;
         },
         set(_target, prop, value) {
           local[prop] = value;
@@ -2169,6 +2388,203 @@ export class JavascriptRuntime {
     }
     window.AudioContext = SharedAudioContext;
     window.webkitAudioContext = SharedAudioContext;
+
+    // What the program set up for sound, and how far each part got: made, started, connected to the
+    // program's output. The host reads it (see soundSetup) to say what a silent program is missing,
+    // in place of advice the program may already follow. 'opaque' marks a part connected to
+    // something not tracked (a parameter, a node made another way): taken as reaching the output.
+    const __chattyOut = { output: true };
+    // The sources (oscillators, buffer sources, constant sources) that are still going, made on the
+    // app's audio by the program or by Tone (tone-realm.ts hands each it makes to __chattyRememberSource):
+    // the teardown below stops them. A source leaves the list when it ends by itself, so a program
+    // that beeps all day keeps no history; past a thousand the oldest are dropped.
+    const __chattySources = new Set();
+    function __chattyRememberSource(node) {
+      try {
+        if (node && typeof node.start === 'function' && typeof node.stop === 'function' && !__chattySources.has(node)) {
+          __chattySources.add(node);
+          node.addEventListener('ended', () => __chattySources.delete(node));
+          if (__chattySources.size > 1000) __chattySources.delete(__chattySources.values().next().value);
+        }
+      } catch {}
+      return node;
+    }
+    window.__chattyRememberSource = __chattyRememberSource;
+    const __chattyMade = { things: [], by: new Map(), transportStarted: false, scheduled: 0, played: new Set(), audios: new Set(), library: [] };
+    function __chattyResetMade() {
+      __chattyMade.things = [];
+      __chattyMade.by = new Map();
+      __chattyMade.transportStarted = false;
+      __chattyMade.scheduled = 0;
+      __chattyMade.played = new Set();
+      __chattyMade.audios = new Set();
+      __chattyMade.library = [];
+    }
+    function __chattyReaches(thing, seen) {
+      if (thing.opaque) return true;
+      for (const to of thing.edges) {
+        if (to === __chattyOut) return true;
+        if (!seen.has(to)) {
+          seen.add(to);
+          if (__chattyReaches(to, seen)) return true;
+        }
+      }
+      return false;
+    }
+    // A part of the sound the program made: remembered, with start() and connect() noted as they happen.
+    // A source or instrument makes sound, a scheduler (a loop, a part) starts others, the rest shapes it.
+    function __chattyTrack(obj, kind, system, isOutput) {
+      try {
+        if (!obj || (typeof obj !== 'object' && typeof obj !== 'function') || __chattyMade.by.has(obj)) return obj;
+        const starts = typeof obj.start === 'function';
+        const connects = typeof obj.connect === 'function';
+        const makesSound = system === 'web' ? starts : connects && (typeof obj.triggerAttack === 'function' || (starts && 'state' in obj));
+        const thing = { kind, system, starts, started: false, edges: [], opaque: false, role: makesSound ? 'source' : starts && !connects ? 'scheduler' : 'node' };
+        __chattyMade.by.set(obj, thing);
+        __chattyMade.things.push(thing);
+        if (starts) {
+          const start = obj.start;
+          obj.start = function (...args) {
+            thing.started = true;
+            return start.apply(this, args);
+          };
+        }
+        if (connects) {
+          const connect = obj.connect;
+          obj.connect = function (target, ...rest) {
+            if (isOutput(target)) thing.edges.push(__chattyOut);
+            else if (__chattyMade.by.has(target)) thing.edges.push(__chattyMade.by.get(target));
+            else thing.opaque = true;
+            return connect.call(this, target, ...rest);
+          };
+        }
+      } catch {}
+      return obj;
+    }
+    // Tone.js: each class the program can make that connects or starts is remembered as it is made
+    // (the program gets a Tone that hands those out), and Tone.Transport is counted: what was
+    // scheduled on it, and whether it was ever started. Tone's own objects stay Tone's.
+    function __chattyWatchTone() {
+      const raw = window.Tone;
+      if (!raw || raw.__chattyWatched) return;
+      try {
+        const isOutput = (target) => {
+          try {
+            return target === raw.Destination || (typeof raw.getDestination === 'function' && target === raw.getDestination());
+          } catch {
+            return false;
+          }
+        };
+        const transport = raw.Transport;
+        if (transport && !transport.__chattyWatched) {
+          for (const name of ['schedule', 'scheduleRepeat', 'scheduleOnce']) {
+            const schedule = transport[name];
+            if (typeof schedule === 'function') {
+              transport[name] = function (...args) {
+                __chattyMade.scheduled++;
+                return schedule.apply(this, args);
+              };
+            }
+          }
+          const startTransport = transport.start;
+          if (typeof startTransport === 'function') {
+            transport.start = function (...args) {
+              __chattyMade.transportStarted = true;
+              return startTransport.apply(this, args);
+            };
+          }
+          Object.defineProperty(transport, '__chattyWatched', { value: true });
+        }
+        const watched = {};
+        // Tone.connect(a, b) and Tone.connectSeries(a, b, c) join two parts without calling the part's own
+        // connect(): the same edge is noted for them
+        const joined = (from, to) => {
+          const thing = __chattyMade.by.get(from);
+          if (!thing) return;
+          if (isOutput(to)) thing.edges.push(__chattyOut);
+          else if (__chattyMade.by.has(to)) thing.edges.push(__chattyMade.by.get(to));
+          else thing.opaque = true;
+        };
+        for (const key of Object.keys(raw)) {
+          const value = raw[key];
+          if (typeof value === 'function' && (key === 'connect' || key === 'connectSeries')) {
+            const wrapped = key === 'connect'
+              ? function (from, to, ...rest) {
+                  try { joined(from, to); } catch {}
+                  return value.call(this, from, to, ...rest);
+                }
+              : function (...nodes) {
+                  try { for (let i = 0; i + 1 < nodes.length; i++) joined(nodes[i], nodes[i + 1]); } catch {}
+                  return value.apply(this, nodes);
+                };
+            Object.defineProperty(watched, key, { value: wrapped, enumerable: true, configurable: true, writable: true });
+            continue;
+          }
+          const proto = typeof value === 'function' ? value.prototype : null;
+          if (proto && typeof proto === 'object' && ('connect' in proto || ('start' in proto && 'state' in proto))) {
+            const wrapper = new Proxy(value, {
+              construct(target, args, newTarget) {
+                const made = Reflect.construct(target, args, newTarget === wrapper ? target : newTarget);
+                return __chattyTrack(made, 'Tone.' + key, 'tone', isOutput);
+              },
+            });
+            Object.defineProperty(watched, key, { value: wrapper, enumerable: true, configurable: true, writable: true });
+          } else {
+            Object.defineProperty(watched, key, { get: () => raw[key], set: (v) => { try { raw[key] = v; } catch {} }, enumerable: true, configurable: true });
+          }
+        }
+        Object.defineProperty(watched, '__chattyWatched', { value: true });
+        Object.defineProperty(watched, '__chattyRaw', { value: raw });
+        window.Tone = watched;
+      } catch {}
+    }
+    // Media elements: played means play() was called, or it plays by itself or waits for its controls
+    const __chattyNativePlay = window.HTMLMediaElement && HTMLMediaElement.prototype.play;
+    if (__chattyNativePlay) {
+      HTMLMediaElement.prototype.play = function (...args) {
+        __chattyMade.played.add(this);
+        return __chattyNativePlay.apply(this, args);
+      };
+    }
+    const __chattyNativeAudio = window.Audio;
+    if (__chattyNativeAudio) {
+      window.Audio = function (...args) {
+        const el = new __chattyNativeAudio(...args);
+        __chattyMade.audios.add(el);
+        return el;
+      };
+      window.Audio.prototype = __chattyNativeAudio.prototype;
+    }
+    window.__chattySetup = () => {
+      const things = __chattyMade.things.map((t) => ({
+        kind: t.kind,
+        system: t.system,
+        role: t.role,
+        starts: t.starts,
+        started: t.started,
+        connected: t.role !== 'source' || __chattyReaches(t, new Set([t])),
+      }));
+      const media = new Set(__chattyMade.audios);
+      for (const el of document.querySelectorAll('audio, video')) media.add(el);
+      for (const el of media) {
+        things.push({
+          kind: el.tagName.toLowerCase() + ' element',
+          system: 'media',
+          role: 'source',
+          starts: true,
+          started: __chattyMade.played.has(el) || !!el.autoplay || !!el.controls || !el.paused,
+          connected: true,
+        });
+      }
+      const raw = window.Tone && window.Tone.__chattyRaw;
+      let tone = null;
+      if (raw) {
+        let state = null;
+        try { state = raw.Transport && raw.Transport.state; } catch {}
+        tone = { transport: state, transportStarted: __chattyMade.transportStarted, scheduled: __chattyMade.scheduled };
+      }
+      return { things, tone, library: __chattyMade.library.slice() };
+    };
 
     // Which line of a program an error came from. Programs are compiled with a sourceURL so
     // stack traces name them; how many lines each way of running adds before the code is
@@ -2229,6 +2645,31 @@ export class JavascriptRuntime {
         rejectedReported = true;
         __chattyHost.postMessage({ type: 'program_error', message, line }, '*');
       }
+    }
+    // Warnings and errors that Chatty's own libraries (Tone.js, three.js) print or throw: facts for a
+    // fix of the program that called them. Only from their code (a script of this origin, not the
+    // program's, not a library the program loaded itself); console.log is the program's own speech
+    // and is never taken.
+    function __chattyFromLibrary(stack) {
+      const frames = String(stack || '').split('\\n').filter((f) => /:\\d+:\\d+\\)?\\s*$/.test(f) && !f.includes(pageAddress));
+      const first = frames[0] || '';
+      if (!first || /chatty-program\\.js/.test(first) || !first.includes(location.origin + '/')) return null;
+      return /three/i.test(first) ? 'three.js' : /tone/i.test(first) ? 'Tone.js' : 'a library of Chatty';
+    }
+    function __chattyNoteLibrary(what, text, stack) {
+      try {
+        const library = __chattyFromLibrary(stack || new Error().stack);
+        if (!library) return;
+        const note = library + ' ' + what + ': ' + String(text).replace(/\\s+/g, ' ').trim().slice(0, 160);
+        if (__chattyMade.library.length < 3 && !__chattyMade.library.includes(note)) __chattyMade.library.push(note);
+      } catch {}
+    }
+    for (const level of ['warn', 'error']) {
+      const base = console[level];
+      console[level] = (...args) => {
+        __chattyNoteLibrary(level === 'warn' ? 'warned' : 'reported', logText(args));
+        return base.apply(console, args);
+      };
     }
     const shown = (v) => (typeof v === 'string' ? "'" + v + "'" : String(v));
     const COLOR_PROPS = new Set(['fillStyle', 'strokeStyle', 'shadowColor']);
@@ -2417,6 +2858,19 @@ export class JavascriptRuntime {
     // A browser call that throws often says little (Safari: "Type error"): the error gets what the
     // call was given ("element.appendChild(a string 'Buy milk') failed: …"), so a fix can see it.
     // The same error, so its line still points at the program
+    // A library's bundle shortens its class names (a Tone.PolySynth says "Cu"): the library's own
+    // name for the class is the export that is it, found by walking Tone's and THREE's exports
+    function libraryClassOf(ctor) {
+      for (const library of ['Tone', 'THREE']) {
+        try {
+          const lib = window[library];
+          const exported = lib && (lib.__chattyRaw || lib);
+          if (!exported) continue;
+          for (const key of Object.keys(exported)) if (exported[key] === ctor) return library + '.' + key;
+        } catch {}
+      }
+      return null;
+    }
     function describeValue(v) {
       if (v === null) return 'null';
       if (v === undefined) return 'undefined';
@@ -2426,7 +2880,7 @@ export class JavascriptRuntime {
       if (Array.isArray(v)) return 'a list of ' + v.length;
       try {
         if (v instanceof Element) return 'a <' + v.tagName.toLowerCase() + '> element';
-        const name = v.constructor && v.constructor.name;
+        const name = v.constructor && (libraryClassOf(v.constructor) || v.constructor.name);
         return name && name !== 'Object' ? 'a ' + name : 'an object';
       } catch {
         return 'an object';
@@ -2462,6 +2916,10 @@ export class JavascriptRuntime {
         });
       }
     }
+    // The drawing calls each canvas has had, counted as the runner passes them on (the outcome
+    // check's "was anything drawn", without reading pixels back, which costs memory on a phone)
+    const __chattyDrawn = new WeakMap();
+    const __CHATTY_DRAWING = new Set(['fill', 'stroke', 'fillRect', 'strokeRect', 'fillText', 'strokeText', 'drawImage', 'putImageData', 'drawFocusIfNeeded']);
     function watchCalls(proto, label) {
       if (!proto) return;
       for (const key of Object.getOwnPropertyNames(proto)) {
@@ -2469,8 +2927,10 @@ export class JavascriptRuntime {
         if (!d || typeof d.value !== 'function' || key === 'constructor' || !d.configurable) continue;
         const fn = d.value;
         // arguments, not a rest parameter: past the checking window a call allocates nothing
+        const draws = label === 'ctx' && __CHATTY_DRAWING.has(key);
         proto[key] = function () {
           if (checking) checkCall(label, key, fn.length, Array.prototype.slice.call(arguments));
+          if (draws && this && this.canvas) __chattyDrawn.set(this.canvas, (__chattyDrawn.get(this.canvas) || 0) + 1);
           try {
             return fn.apply(this, arguments);
           } catch (err) {
@@ -2486,13 +2946,111 @@ export class JavascriptRuntime {
     // Every element the program makes, newest last (see getElementById below)
     const madeByProgram = [];
     const createElementNative = Document.prototype.createElement;
+    // A program that adds elements again and again without taking any away (an animation frame
+    // making ten a frame) would freeze the whole app. The page is counted twice a second (see
+    // __chattyStartWatch): a count above 20,000 that has grown at four counts in a row stops the
+    // run, and the next element it makes is an error that says so. A big grid made once, or a
+    // particle system that removes what it made, is not that.
+    let __chattyRunaway = 0;
+    // (a page may set its own limit before the runner starts: the tests do, to keep them short)
+    const __CHATTY_MAX_LIVE = Number(window.__chattyMaxLive) || 20000;
+    let __chattyWatcher = null;
+    function __chattyStartWatch() {
+      __chattyRunaway = 0;
+      if (__chattyWatcher !== null) realClearInterval(__chattyWatcher);
+      let last = 0;
+      let growing = 0;
+      __chattyWatcher = realSetInterval(() => {
+        const live = document.getElementsByTagName('*').length;
+        growing = live > __CHATTY_MAX_LIVE && live > last ? growing + 1 : 0;
+        last = live;
+        if (growing >= 4) {
+          __chattyRunaway = live;
+          realClearInterval(__chattyWatcher);
+          __chattyWatcher = null;
+          // However the elements come (createElement, insertAdjacentHTML, cloneNode, innerHTML +=), what
+          // keeps adding them is stopped: every timer, interval and frame the program has pending
+          __chattyStopWork();
+          __chattyReportLate(__chattyRunawayMessage(live), undefined);
+        }
+      }, 500);
+    }
+    function __chattyRunawayMessage(count) {
+      return 'The page has ' + count + ' elements and the program keeps adding more without taking the old ones away (a loop, or an animation frame that creates elements each time)';
+    }
+    // Ends the program's pending timers, intervals and animation frames (the runner tracks them)
+    function __chattyStopWork() {
+      try {
+        for (const key of Array.from(programWork)) {
+          const id = Number(key.slice(1));
+          if (key[0] === 't') {
+            realClearTimeout(id);
+            realClearInterval(id);
+          } else if (key[0] === 'f') {
+            realCancelFrame(id);
+          }
+          programWork.delete(key);
+        }
+        pendingFrames.clear();
+        slowTimers.clear();
+        workChanged();
+      } catch {}
+    }
     Document.prototype.createElement = function (...args) {
+      if (__chattyRunaway) throw new RangeError(__chattyRunawayMessage(__chattyRunaway));
       const el = createElementNative.apply(this, args);
+      if (el && /^(?:AUDIO|VIDEO)$/.test(el.tagName)) __chattyMade.audios.add(el);
       if (runningProgram) createdThisRun.push(el);
       madeByProgram.push(el);
       if (madeByProgram.length > 500) madeByProgram.shift();
       return el;
     };
+    // Scripts in markup a program sets through innerHTML or insertAdjacentHTML are never run by the
+    // browser (only its parser runs them), and the program put them there to run: each runs, once
+    // (a body rewritten with += hands the old scripts back as new elements: the same text doesn't
+    // run twice in a run).
+    const __chattyRanScripts = new Set();
+    // The scripts a container holds, by what they are (their source or text): the ones there before
+    // a set are not the new text's (a body added to with += hands the page's own scripts back, the
+    // runner's among them), and a library's script is never run again
+    const __chattyScriptKeys = (container) => new Set(Array.from(container.querySelectorAll('script'), (el) => el.src || el.textContent));
+    function __chattyRunScripts(container, before) {
+      try {
+        for (const old of Array.from(container.querySelectorAll('script'))) {
+          const key = old.src || old.textContent;
+          if (before.has(key) || old.hasAttribute('data-chatty-library') || __chattyRanScripts.has(key)) continue;
+          __chattyRanScripts.add(key);
+          const fresh = createElementNative.call(document, 'script');
+          for (const attr of Array.from(old.attributes)) fresh.setAttribute(attr.name, attr.value);
+          fresh.textContent = old.textContent;
+          old.replaceWith(fresh);
+          imagined('a <script> in markup set through innerHTML never runs in the browser → run');
+        }
+      } catch {}
+    }
+    {
+      const innerHtml = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+      if (innerHtml && innerHtml.set) {
+        Object.defineProperty(Element.prototype, 'innerHTML', {
+          ...innerHtml,
+          set(value) {
+            const scripted = typeof value === 'string' && /<script/i.test(value);
+            const before = scripted ? __chattyScriptKeys(this) : null;
+            innerHtml.set.call(this, value);
+            if (scripted) __chattyRunScripts(this, before);
+          },
+        });
+      }
+      const insertAdjacent = Element.prototype.insertAdjacentHTML;
+      Element.prototype.insertAdjacentHTML = function (position, text) {
+        const scripted = typeof text === 'string' && /<script/i.test(text);
+        const container = /^(?:before|after)/i.test(position) && this.parentNode ? this.parentNode : this;
+        const before = scripted ? __chattyScriptKeys(container) : null;
+        const result = insertAdjacent.call(this, position, text);
+        if (scripted) __chattyRunScripts(container, before);
+        return result;
+      };
+    }
     function describeControl(el) {
       const tag = el.tagName.toLowerCase();
       const label = el.id ? '#' + el.id : el.textContent ? " '" + el.textContent.trim().slice(0, 20) + "'" : '';
@@ -2653,19 +3211,27 @@ export class JavascriptRuntime {
         __chattyHost.postMessage({ type: 'program_activity', active }, '*');
       }, 200);
     }
+    // The timers that wait a second or more: a screen that stays as it is for that long may still be
+    // going to change (a countdown, a clock), while a frame loop or a fast interval that changed
+    // nothing for seconds is stuck (see slowWork in the host)
+    const slowTimers = new Set();
+    window.__chattySlowWork = () => slowTimers.size;
     window.setTimeout = (fn, ms, ...args) => {
       if (typeof fn !== 'function') return realSetTimeout(fn, ms, ...args);
       const id = realSetTimeout((...a) => {
         programWork.delete('t' + id);
+        slowTimers.delete(id);
         try { fn(...a); } finally { workChanged(); }
       }, ms, ...args);
       programWork.add('t' + id);
+      if (Number(ms) >= 1000) slowTimers.add(id);
       workChanged();
       return id;
     };
     window.setInterval = (fn, ms, ...args) => {
       const id = realSetInterval(fn, ms, ...args);
       programWork.add('t' + id);
+      if (Number(ms) >= 1000) slowTimers.add(id);
       workChanged();
       return id;
     };
@@ -2673,6 +3239,7 @@ export class JavascriptRuntime {
     window.clearTimeout = window.clearInterval = (id) => {
       realClearTimeout(id);
       realClearInterval(id);
+      slowTimers.delete(id);
       if (programWork.delete('t' + id)) workChanged();
     };
     // The same callback asked for again before its frame comes (a loop that calls
@@ -2867,6 +3434,46 @@ export class JavascriptRuntime {
         return made;
       };
     }
+    // Before the host throws this page away it frees what the page holds, which would otherwise wait
+    // for the page to be collected (on iPhone Safari memory is what runs out): the pixels of every
+    // canvas (size 0), every WebGL context (lost: three.js's renderers are covered too), the sources
+    // still playing (stopped and unplugged: a looping buffer source plays on, unheard, until then),
+    // and the audio context of the page's own when the program had to make one. The app's shared
+    // audio context is the app's: it is never closed or suspended here. Only the host calls this,
+    // for the page it is removing (a program that is still showing keeps all of it), and the page's
+    // pagehide calls it for a page that goes some other way (not one put away for later).
+    let __chattyTornDown = false;
+    window.__chattyTeardown = () => {
+      if (__chattyTornDown) return;
+      __chattyTornDown = true;
+      for (const source of [...__chattySources]) {
+        try { source.stop(); } catch {}
+        try { source.disconnect(); } catch {}
+      }
+      __chattySources.clear();
+      try {
+        if (window.__chattyOwnAudio) window.__chattyOwnAudio.close();
+      } catch {}
+      window.__chattyOwnAudio = null;
+      const canvases = new Set(document.querySelectorAll('canvas'));
+      for (const context of contexts) {
+        try {
+          // (only a WebGL context has getExtension)
+          if (typeof context.getExtension === 'function' && !(typeof context.isContextLost === 'function' && context.isContextLost())) {
+            const lose = context.getExtension('WEBGL_lose_context');
+            if (lose) lose.loseContext();
+          }
+        } catch {}
+        if (context.canvas) canvases.add(context.canvas);
+      }
+      for (const canvas of canvases) {
+        try { canvas.width = 0; canvas.height = 0; } catch {}
+      }
+      contexts.clear();
+    };
+    window.addEventListener('pagehide', (event) => {
+      if (!event.persisted) window.__chattyTeardown();
+    });
     const propertyNames = new WeakMap();
     function realProperties(proto) {
       if (propertyNames.has(proto)) return propertyNames.get(proto);
@@ -3083,15 +3690,92 @@ export class JavascriptRuntime {
         return el.toDataURL() === blank.toDataURL();
       } catch { return false; }
     }
-    function hasVisualNow() {
-      const rootEl = document.getElementById('root');
-      const shows = (n) => n.nodeType === 3 ? n.textContent.trim().length > 0 : n.nodeType === 1 && !isEmptyStandIn(n);
-      return Boolean(rootEl && Array.from(rootEl.childNodes).some(shows)) ||
-        Array.from(document.querySelectorAll('canvas, svg, table, img, video, form, button, input, div:not(#root)')).some((el) => !isEmptyStandIn(el)) ||
-        Array.from(document.body.children).some(c => c !== rootEl && c.tagName !== 'SCRIPT' && c.tagName !== 'STYLE' && !isEmptyStandIn(c));
+    // A canvas with no drawing call on it so far. One with another kind of context (WebGL,
+    // bitmaps) is never called blank here: its drawing isn't seen.
+    function __chattyBlank(el) {
+      try {
+        if (!el || el.tagName !== 'CANVAS' || !el.width || !el.height) return false;
+        for (const context of contexts) if (context.canvas === el && !(context instanceof CanvasRenderingContext2D)) return false;
+        // Nothing the program drew on it (a canvas it never got a context from has had no drawing either)
+        return !__chattyDrawn.get(el);
+      } catch { return false; }
     }
-    // The host asks this page (see hasVisualContent)
+    // An element with nothing in it and no room of its own (an empty <div id="time">): nothing to
+    // see. A page without layout (a window that is not shown) can't say, so nothing is empty there.
+    function __chattyEmptyBox(el) {
+      try {
+        if (!/^(?:DIV|SPAN|P|H[1-6]|SECTION|ARTICLE|HEADER|FOOTER|MAIN|UL|OL|LI|LABEL)$/.test(el.tagName)) return false;
+        if ((el.textContent || '').trim() || el.querySelector('canvas, svg, img, video, input, button, select, textarea, table, iframe')) return false;
+        const box = el.getBoundingClientRect();
+        if (box.width > 0 && box.height > 0) return false;
+        return document.documentElement.getBoundingClientRect().height > 0;
+      } catch { return false; }
+    }
+    // With ignoreBlank, a canvas nothing was drawn on and an element with nothing in it show
+    // nothing (the outcome check's question)
+    function __chattyVisualNow(ignoreBlank) {
+      const rootEl = document.getElementById('root');
+      const hidden = (n) => isEmptyStandIn(n) || (ignoreBlank && (n.nodeType === 1 && (__chattyBlank(n) || __chattyEmptyBox(n) || n.tagName === 'SCRIPT' || n.tagName === 'STYLE')));
+      const shows = (n) => n.nodeType === 3 ? n.textContent.trim().length > 0 : n.nodeType === 1 && !hidden(n);
+      return Boolean(rootEl && Array.from(rootEl.childNodes).some(shows)) ||
+        Array.from(document.querySelectorAll('canvas, svg, table, img, video, form, button, input, div:not(#root)')).some((el) => !hidden(el)) ||
+        Array.from(document.body.children).some(c => c !== rootEl && c.tagName !== 'SCRIPT' && c.tagName !== 'STYLE' && !hidden(c));
+    }
+    function hasVisualNow() {
+      return __chattyVisualNow(false);
+    }
+    // How many things the user can press, type in or choose from are on the page
+    window.__chattyControls = () => document.querySelectorAll('button, input:not([type="hidden"]), select, textarea, a[href], [onclick], [contenteditable="true"], summary').length;
+    // The elements on the page that have nothing in them and no room, as selectors with counts
+    // (div.bar ×5, div#time): what the outcome check names when nothing shows
+    window.__chattyEmptyElements = () => {
+      const counts = new Map();
+      for (const el of Array.from(document.querySelectorAll('div, span, p, h1, h2, h3, section, ul, li, label'))) {
+        if (!__chattyEmptyBox(el) || el.id === 'root') continue;
+        const name = el.tagName.toLowerCase() + (el.id ? '#' + el.id : el.classList.length ? '.' + el.classList[0] : '');
+        counts.set(name, (counts.get(name) || 0) + 1);
+      }
+      return Array.from(counts, ([name, n]) => (n > 1 ? name + ' ×' + n : name)).slice(0, 4);
+    };
+    // The host asks this page (see hasVisualContent, hasDrawnContent)
     window.__chattyHasVisual = hasVisualNow;
+    window.__chattyHasDrawing = () => __chattyVisualNow(true);
+    // What the card looks like right now, as one string: its markup and each canvas's pixels. Two
+    // that differ mean the screen changed. Null when it can't be told (a WebGL canvas can't be read
+    // back); never equal while a CSS or SVG animation runs, which change the screen without touching it.
+    function __chattyHash(text) {
+      let h = 2166136261;
+      for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619);
+      return (h >>> 0).toString(36) + ':' + text.length;
+    }
+    // A canvas as a 24 x 24 picture, in text: enough to tell that what is drawn moved, and a few
+    // hundred bytes however big the canvas (a dataURL of it is megabytes, polled every few hundred ms)
+    let __chattyThumbCanvas = null;
+    function __chattyThumb(canvas) {
+      if (!canvas.width || !canvas.height) return '';
+      if (!__chattyThumbCanvas) {
+        __chattyThumbCanvas = createElementNative.call(document, 'canvas');
+        __chattyThumbCanvas.width = 24;
+        __chattyThumbCanvas.height = 24;
+      }
+      const context = __chattyThumbCanvas.getContext('2d', { willReadFrequently: true });
+      context.clearRect(0, 0, 24, 24);
+      context.drawImage(canvas, 0, 0, 24, 24);
+      return Array.from(context.getImageData(0, 0, 24, 24).data).join(',');
+    }
+    window.__chattySignature = () => {
+      try {
+        const canvases = Array.from(document.querySelectorAll('canvas'));
+        for (const context of contexts) if (canvases.includes(context.canvas) && !(context instanceof CanvasRenderingContext2D)) return null;
+        if (document.querySelector('animate, animateTransform, animateMotion, set')) return 'svg-animation:' + performance.now();
+        if (typeof document.getAnimations === 'function' && document.getAnimations().some((a) => a.playState === 'running')) return 'animation:' + performance.now();
+        const parts = [__chattyHash(window.root.innerHTML)];
+        for (const canvas of canvases) parts.push(__chattyHash(__chattyThumb(canvas)));
+        return parts.join('|');
+      } catch {
+        return null;
+      }
+    };
 
     // clear(): empties the card, so a program can start the screen over
     window.clear = () => {
@@ -3116,13 +3800,22 @@ export class JavascriptRuntime {
     document.close = () => {};
 
     // Errors after the run started (timers, handlers, async code) would otherwise fail silently
+    // (an error that comes again every animation frame is told once, not sixty times a second)
+    const __chattyReported = new Set();
+    function __chattyReportLate(message, line) {
+      // (the runaway page is told once, whether it was the watcher or the next createElement that said so)
+      const key = /elements and the program keeps adding more/.test(message) ? message : message + '@' + line;
+      if (__chattyReported.has(key) || __chattyReported.size >= 20) return;
+      __chattyReported.add(key);
+      __chattyHost.postMessage({ type: 'program_error', message, line }, '*');
+    }
     window.addEventListener('error', (event) => {
       const err = event.error;
-      __chattyHost.postMessage({ type: 'program_error', message: err ? (err.message || String(err)) : event.message, line: errorLine(err) }, '*');
+      __chattyReportLate(err ? (err.message || String(err)) : event.message, errorLine(err));
     });
     window.addEventListener('unhandledrejection', (event) => {
       const err = event.reason;
-      __chattyHost.postMessage({ type: 'program_error', message: err ? (err.message || String(err)) : 'Promise rejected', line: errorLine(err) }, '*');
+      __chattyReportLate(err ? (err.message || String(err)) : 'Promise rejected', errorLine(err));
     });
 
     window.addEventListener('message', async (event) => {
@@ -3171,6 +3864,11 @@ export class JavascriptRuntime {
       rejected = null;
       rejectedReported = false;
       createdThisRun = [];
+      __chattyRanScripts.clear();
+      __chattyReported.clear();
+      __chattyStartWatch();
+      __chattyResetMade();
+      __chattyWatchTone();
       runningProgram = true;
       const logs = [];
       const origLog = console.log;
@@ -3181,8 +3879,14 @@ export class JavascriptRuntime {
         logs.push(args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
         origLog(...args);
       };
-      console.warn = (...args) => logs.push('[warn] ' + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
-      console.error = (...args) => logs.push('[error] ' + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
+      console.warn = (...args) => {
+        __chattyNoteLibrary('warned', logText(args));
+        logs.push('[warn] ' + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
+      };
+      console.error = (...args) => {
+        __chattyNoteLibrary('reported', logText(args));
+        logs.push('[error] ' + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '));
+      };
 
       programWork.add('run');
       workChanged();
@@ -3254,6 +3958,7 @@ export class JavascriptRuntime {
           hasVisual: hasVisualElements,
         }, '*');
       } catch (err) {
+        if (err && err.stack) __chattyNoteLibrary('threw', err.message || String(err), err.stack);
         __chattyHost.postMessage({
           type: 'result',
           id,
@@ -3324,6 +4029,7 @@ export class JavascriptRuntime {
 
     // Notify parent that iframe is ready
     __chattyHost.postMessage({ type: 'iframe_ready' }, '*');
+  })();
   </script>
 </body>
 </html>`;
@@ -3663,6 +4369,8 @@ export class JavascriptRuntime {
         } catch {
           // frame went away
         }
+        // The page frees its canvases and sound first (only this trial's own page, not a later one)
+        this.teardownPage(iframe, id);
         // An empty page replaces the program's, which ends its timers, animation frames and audio
         try {
           iframe.srcdoc = '';
@@ -3681,8 +4389,11 @@ export class JavascriptRuntime {
         stopTimer = setTimeout(() => finish(null), ms);
         try {
           // Not if the trial ended while a library loaded: the frame is the next trial's by then
-          void withLibraries(code, iframe.contentWindow, () => !finished).then(() => {
-            if (!finished) iframe.contentWindow?.postMessage({ type: 'execute', id, code, idKinds: elementKinds(code), idChecked: checkedIds(code) }, '*');
+          void withLibraries(code, iframe.contentWindow, () => !finished).then(async () => {
+            // The program as it would really run (see executeNow): a test run that stops where the
+            // real one gets past (a const the program changes later) says nothing about the program
+            const runnable = await letReassignedConsts(await makeAwaitingFunctionsAsync(code));
+            if (!finished) iframe.contentWindow?.postMessage({ type: 'execute', id, code: runnable, idKinds: elementKinds(code), idChecked: checkedIds(code) }, '*');
           });
         } catch (err) {
           finish(err instanceof Error ? err.message : String(err));
@@ -3792,6 +4503,7 @@ export class JavascriptRuntime {
       this.worker = null;
     }
     if (this.activeIframe) {
+      this.teardownPage(this.activeIframe);
       this.activeIframe.remove();
       this.activeIframe = null;
     }

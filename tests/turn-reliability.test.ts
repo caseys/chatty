@@ -7,7 +7,7 @@ import {
   FORMAT_TURNS,
   type RunStatus,
 } from '../src/core/orchestrator.ts';
-import { prefersLineFix, promptRules, runScore } from '../src/core/orchestrator.ts';
+import { prefersLineFix, promptRules, runScore, sameMissingMember } from '../src/core/orchestrator.ts';
 import { FIX_SYSTEM_PROMPT } from '../src/core/line-fix.ts';
 import { StateMachineCoordinator } from '../src/core/state-machine.ts';
 import { runLogText } from '../src/core/run-log.ts';
@@ -1043,11 +1043,299 @@ describe('the order of a request\'s fix questions', () => {
     expect(llm.turns[4].fixShape).toBe('line');
     expect(ask).toContain("Write a fix different from these, which didn't work:");
     expect(ask).toContain('`boom();`');
-    expect(ask).toContain('`function draw() {`');
+    // A whole function sent back unchanged begins with the program's own first line: no entry
+    expect(ask).not.toContain('`function draw() {`');
     expect(ask).toContain('`Sure, let me fix that for you right away.`');
   }, 30000);
 });
 
+
+describe('an error about a value made on another line', () => {
+  // The failing program from the owner's log: a Tone.Loop given options, then asked to play notes
+  const LOOP = [
+    'const loop = new Tone.Loop({ duration: 4, tempo: 120 });',
+    'loop.triggerAttackRelease("G4", 0.5);',
+    'loop.triggerAttackRelease("B4", 0.5);',
+    'loop.triggerAttackRelease("D5", 0.5);',
+    'loop.start();',
+  ].join('\n');
+  const ERROR = { error: 'loop.triggerAttackRelease is not a function', errorLine: 2 };
+
+  it('does not ask the unchanged line again at other temperatures: the next try marks where the value is made', async () => {
+    const llm = new QueueLlm([LOOP, '// Cause: not a function\nloop.triggerAttackRelease("G4", 0.5);', '// Cause: loops cannot play\nconst loop = new Tone.Loop((time) => {}, "4n");']);
+    const { runtime, executed } = fakeRuntime([ERROR, ERROR, {}]);
+    // The page's Tone: a Loop has no triggerAttackRelease(), a Synth has (so the class made there may be the mistake)
+    class Loop {
+      start() {}
+    }
+    class Synth {
+      triggerAttackRelease() {}
+    }
+    Object.assign(runtime, { pageScope: () => ({ Tone: { Loop, Synth } }) });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Build a loop that plays G4');
+    await vi.waitFor(() => expect(llm.turns.length).toBeGreaterThanOrEqual(3), { timeout: 20000 });
+    // One ask of the failing line (no re-asks at other temperatures), then the line that makes loop
+    expect(llm.reasks.length).toBe(0);
+    const made = llm.turns[2].messages.at(-1)!.content;
+    expect(made).toContain('The error at line 2 comes from loop, which is made on the marked line.');
+    expect(made).toContain('// >>> ERROR');
+    expect(made.split('\n').findIndex((l) => l.includes('// >>> ERROR'))).toBeLessThan(made.split('\n').findIndex((l) => l.includes('loop.triggerAttackRelease("G4"')));
+    expect(runLogText()).toContain('asking the model for the line that makes loop (line 1)');
+  }, 30000);
+
+  it('does not ask for the line that makes a drawing context: its method belongs on the line that calls it', async () => {
+    const program = 'const canvas = document.createElement("canvas");\nconst ctx = canvas.getContext("2d");\nctx.fillCircle(10, 10, 5);';
+    const llm = new QueueLlm([program, '// Cause: x\nctx.fillCircle(10, 10, 5);', '// Cause: x\nctx.fillCircle(10, 10, 5);', '// Cause: x\nctx.fillCircle(10, 10, 5);']);
+    const { runtime } = fakeRuntime([{ error: 'ctx.fillCircle is not a function', errorLine: 3 }, { error: 'ctx.fillCircle is not a function', errorLine: 3 }]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Draw a circle');
+    await vi.waitFor(() => expect(llm.turns.length + llm.reasks.length).toBeGreaterThanOrEqual(3), { timeout: 20000 });
+    expect(runLogText().slice(runLogText().lastIndexOf('Draw a circle'))).not.toContain('the line that makes ctx');
+  }, 30000);
+
+  it('keeps asking the line at other temperatures when the value is made on the failing line itself', async () => {
+    const same = 'const synth = new Tone.Synth();\nsynth.nope();';
+    const llm = new QueueLlm([same, '// Cause: x\nsynth.nope();', '// Cause: x\nsynth.nope();', '// Cause: x\nsynth.nope();']);
+    const { runtime } = fakeRuntime([{ error: 'synth.nope is not a function', errorLine: 2 }, { error: 'synth.nope is not a function', errorLine: 2 }]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Play a note');
+    await vi.waitFor(() => expect(llm.turns.length + llm.reasks.length).toBeGreaterThanOrEqual(3), { timeout: 20000 });
+    expect(runLogText().slice(runLogText().lastIndexOf('Play a note'))).not.toContain('the line that makes synth');
+  }, 30000);
+});
+
+describe('library class names in the errors the model reads', () => {
+  it('Chrome’s "Class constructor Cu" reaches the model as the library’s own name, and a test run’s error compares as the same', async () => {
+    // A call no rule can repair (the class is held in a variable of the program): the model is asked
+    const program = 'const make = Tone.PolySynth;\nconst synth = make();\nsynth.toDestination();';
+    const error = { error: "Class constructor Cu cannot be invoked without 'new'", errorLine: 2 };
+    const llm = new QueueLlm([program, '// Cause: a class needs new\nconst synth = new make();']);
+    const { runtime, trialled } = fakeRuntime([error, {}], { trials: () => ({ error: error.error, errorLine: 2 }) });
+    class Cu {
+      triggerAttackRelease() {}
+    }
+    Object.assign(runtime, { pageScope: () => ({ Tone: { PolySynth: Cu } }) });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Play a chord');
+    await vi.waitFor(() => expect(llm.turns.length).toBeGreaterThanOrEqual(2), { timeout: 20000 });
+    const asked = llm.turns[1].messages.at(-1)!.content;
+    expect(asked).toContain("Class constructor Tone.PolySynth cannot be invoked without 'new'");
+    expect(asked).not.toContain('Class constructor Cu');
+    // The fix's test run failed the same way as the real run did (both named alike): it was not accepted
+    await vi.waitFor(() => expect(trialled.length).toBeGreaterThanOrEqual(1), { timeout: 20000 });
+    expect(runLogText()).toContain('the fix failed the same way in a test run');
+  }, 30000);
+});
+
+describe('the member blank stage', () => {
+  class Synth {}
+  class PolySynth extends Synth {}
+  class MembraneSynth extends Synth {}
+  const Tone = { Synth, PolySynth, MembraneSynth, Transport: { start() {} } };
+  // A made-up call with no sure slip in it: three classes share the word "synth"
+  const PROGRAM = 'const synth = Tone.buildSynth("C4");\nsynth.triggerAttackRelease("C4", "8n");';
+  const ERROR = { error: 'Tone.buildSynth is not a function', errorLine: 1 };
+
+  it('scores the real members, tests the likeliest, and runs the one that passes, made with new', async () => {
+    const llm = new ScoringLlm([PROGRAM], [0.1, 0.8, 0.1]);
+    const { executed, trialled, runtime } = fakeRuntime([ERROR, {}], { trials: (code) => (/new (?:\(\(globalThis\.__chattyReached = true\), Tone\)|Tone)\.PolySynth\("C4"\)/.test(code) ? { error: null, reached: true } : { ...ERROR }) });
+    Object.assign(runtime, { pageScope: () => ({ Tone }) });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Make a synth');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 15000 });
+    expect(executed[1]).toBe('const synth = new Tone.PolySynth("C4");\nsynth.triggerAttackRelease("C4", "8n");');
+    // One scoring pass of the choice question over the real members; no expression asked for
+    expect(llm.scored.length).toBe(1);
+    expect(llm.scored[0].labels).toEqual(['A', 'B', 'C']);
+    const asked = llm.scored[0].options.messages[0].content;
+    expect(asked).toContain('Tone has no buildSynth(). These members of Tone are available:');
+    expect(asked).toContain('B. PolySynth');
+    expect(asked).toContain('Reply with the letter of the member that belongs in place of `buildSynth`.');
+    expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined]);
+    expect(trialled.length).toBe(1);
+    const mine = runLogText().slice(runLogText().indexOf('Make a synth'));
+    expect(mine).toContain('trying the real members for the blank `buildSynth` (Tone has no buildSynth())');
+    expect(mine).toContain('buildSynth → PolySynth: corrected by a test run');
+  }, 30000);
+
+  it('does not apply a pick whose use the test run never reached (a Loop callback under a Transport that never advances)', async () => {
+    // The reviewer's case: the failing use sits in a callback; the quiet trial runs clean without calling it
+    const program = 'const synth = Tone.PolySynth;\nconst loop = new Tone.Loop((time) => {\n  Tone.buildSynth("C4").triggerAttackRelease("C4", "8n", time);\n}, "4n");\nloop.start(0);';
+    const llm = new ScoringLlm([program, '// Cause: no such member\nTone.buildSynth("C4").triggerAttackRelease("C4", "8n", time);'], [0.1, 0.8, 0.1]);
+    const marked: string[] = [];
+    const { executed, runtime } = fakeRuntime([{ error: 'Tone.buildSynth is not a function', errorLine: 3 }, {}], {
+      trials: (code) => {
+        marked.push(code);
+        return /__chattyReached/.test(code) ? { error: null, reached: false } : { error: null };
+      },
+    });
+    Object.assign(runtime, { pageScope: () => ({ Tone }) });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Make a synth');
+    await vi.waitFor(() => expect(llm.turns.length).toBeGreaterThanOrEqual(2), { timeout: 15000 });
+    // The tested copy marks the object (`Tone`), keeping `this` and `new`; nothing was applied
+    expect(marked[0]).toContain('new ((globalThis.__chattyReached = true), Tone).PolySynth("C4")');
+    expect(executed.every((code) => !/PolySynth\("C4"\)/.test(code))).toBe(true);
+    expect(runLogText()).toContain('no error, but the blank never ran (not applied)');
+    expect(runLogText()).toContain('no expression passed a test run');
+  }, 30000);
+
+  it('is not asked when a sure near-miss already corrects it, or when nothing real is related', async () => {
+    // playSynth is one slip from PolySynth: corrected by rule, no model asked
+    const llm = new ScoringLlm(['const synth = Tone.playSynth("C4");'], [0.5, 0.5, 0]);
+    const { executed, runtime } = fakeRuntime([{ error: 'Tone.playSynth is not a function', errorLine: 1 }, {}], { trials: () => ({ error: null }) });
+    Object.assign(runtime, { pageScope: () => ({ Tone }) });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Make a synth');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 15000 });
+    expect(executed[1]).toBe('const synth = Tone.PolySynth("C4");');
+    expect(llm.scored.length).toBe(0);
+  }, 30000);
+});
+
+describe('a silent Tone program', () => {
+  const BLUES = [
+    'const synth = new Tone.PolySynth(Tone.Synth).toDestination();',
+    'const loop = new Tone.Loop((time) => {',
+    '  synth.triggerAttackRelease(["G3", "Bb3", "D4"], "8n", time);',
+    '}, "4n");',
+    'loop.start(0);',
+    'speak("Playing a blues loop.");',
+  ].join('\n');
+  const REQUEST = 'Build a blues music loop with piano, bass, and drums in G minor, 120 bpm, 4 measures';
+  const silentRuntime = (trial: (code: string) => { error: string | null }) => {
+    const { runtime, executed, trialled } = fakeRuntime([{}, {}], { trials: trial });
+    // Each run asks for sound and stays silent
+    let sounds = 0;
+    const execute = runtime.execute.bind(runtime);
+    runtime.execute = async (...args: Parameters<typeof execute>) => {
+      sounds++;
+      return execute(...args);
+    };
+    Object.assign(runtime, {
+      soundUseCount: () => sounds,
+      soundHeardCount: () => 0,
+      soundSilentCount: () => sounds,
+      hasVisualContent: () => false,
+      soundSetup: () => ({
+        things: [{ kind: 'Tone.Loop', system: 'tone', role: 'scheduler', starts: true, started: true, connected: true }],
+        tone: { transport: 'stopped', transportStarted: false, scheduled: 1 },
+        library: [],
+      }),
+    });
+    return { runtime, executed, trialled };
+  };
+
+  it('is given Tone.Transport.start() by rule when that is the one step missing, after a clean test run', async () => {
+    const llm = new QueueLlm([BLUES]);
+    const { runtime, executed, trialled } = silentRuntime(() => ({ error: null }));
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput(REQUEST);
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    expect(executed[1]).toBe(`${BLUES}\nTone.Transport.start();`);
+    expect(trialled).toEqual([executed[1]]);
+    // No model call for the repair
+    expect(llm.turns.length).toBe(1);
+    const mine = runLogText().slice(runLogText().indexOf('Build a blues'));
+    expect(mine).toContain('error: Tone.Loop was started, but Tone.Transport never was: call Tone.Transport.start().');
+    expect(mine).toContain('imagined: Tone.Transport.start() added at the end: the steps its sound was missing: corrected and run again');
+  });
+
+  it('is not changed when the test run of the corrected program fails, and the model is asked with the step named', async () => {
+    const llm = new QueueLlm([BLUES, '// Cause: x\nTone.Transport.start();']);
+    const { runtime, executed } = silentRuntime(() => ({ error: 'Tone is not defined' }));
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput(REQUEST);
+    await vi.waitFor(() => expect(llm.turns.length).toBeGreaterThanOrEqual(2), { timeout: 10000 });
+    // The corrected program was not run for real (the model's reply may have been)
+    expect(executed).not.toContain(`${BLUES}\nTone.Transport.start();`);
+    expect(llm.turns[1].messages.at(-1)!.content).toContain('It failed: Tone.Loop was started, but Tone.Transport never was: call Tone.Transport.start()');
+  });
+
+  it('hands what the library printed to the fix request as facts', async () => {
+    const llm = new QueueLlm(['const synth = new Tone.Synth().toDestination();\nsynth.triggerAttackRelease(note, "8n");', '// Cause: x\n  synth.triggerAttackRelease("C4", "8n");']);
+    const { runtime, executed } = fakeRuntime([{ error: 'Reflect.has called on non-object', errorLine: 2 }, {}]);
+    Object.assign(runtime, { soundSetup: () => ({ things: [], tone: null, library: ['Tone.js warned: The AudioContext is "suspended". Invoke Tone.start() from a user action'] }) });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Play a note');
+    await vi.waitFor(() => expect(llm.turns.length).toBeGreaterThanOrEqual(2), { timeout: 10000 });
+    expect(llm.turns[1].messages.at(-1)!.content).toContain('Tone.js warned: The AudioContext is "suspended". Invoke Tone.start() from a user action');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+  });
+});
+
+describe('a question that asks for something to be made', () => {
+  it('is not answered by talk alone: "Can you make a timer?" needs the timer', async () => {
+    // The echo is asked for again as a program; talk is not that program (it is not a question's answer)
+    const llm = new QueueLlm(['speak("Can you make a timer?")', 'speak("Sure, I can make a timer for you.");', 'speak("A timer.");']);
+    const { runtime } = fakeRuntime([{}, {}, {}]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Can you make a timer?');
+    await vi.waitFor(() => expect(runLogText().slice(runLogText().lastIndexOf('Can you make a timer?'))).toContain('The fix lost the program'), { timeout: 15000 });
+  }, 30000);
+});
+
+describe('a reply that says the question back', () => {
+  it('is asked for again as a whole program, and the answer that follows runs', async () => {
+    const llm = new QueueLlm(['speak("Who was Ada Lovelace?")', 'speak("Ada Lovelace was an English mathematician who wrote the first algorithm for a machine.");']);
+    const { runtime, executed } = fakeRuntime([{}, {}]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Who was Ada Lovelace?');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    // (the question is asked again as a program, the way a reply that only talked is)
+    expect(llm.turns[1].messages.at(-1)!.content).toContain('Write the complete JavaScript program for: Who was Ada Lovelace?');
+    expect(runLogText()).toContain('error: The reply only said the question back to the user, with no answer');
+    expect(executed[1]).toContain('English mathematician');
+  }, 20000);
+});
+
+describe('Tone repairs before running', () => {
+  it('come after the general ones, and are logged like them', async () => {
+    // A name declared twice (a general repair) and a note value added to a time (Tone's)
+    const program = [
+      'const synth = new Tone.Synth().toDestination();',
+      'const synth = new Tone.Synth().toDestination();',
+      'const loop = new Tone.Loop((time) => {',
+      '  synth.triggerAttackRelease("C4", "8n", time);',
+      '  time += "8n";',
+      '}, "4n").start(0);',
+      'Tone.Transport.start();',
+    ].join('\n');
+    const llm = new QueueLlm([program]);
+    const { runtime, executed } = fakeRuntime([{}]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Play a C note every beat');
+    await vi.waitFor(() => expect(executed.length).toBe(1), { timeout: 10000 });
+    expect(executed[0]).toContain('time += Tone.Time("8n").toSeconds();');
+    expect(executed[0]).not.toContain('const synth = new Tone.Synth().toDestination();\nconst synth');
+    const mine = runLogText().slice(runLogText().indexOf('Play a C note every beat'));
+    const general = mine.indexOf('synth declared again');
+    const library = mine.indexOf('time += "8n" → time += Tone.Time("8n").toSeconds(): corrected before running');
+    expect(general).toBeGreaterThan(-1);
+    expect(library).toBeGreaterThan(general);
+  });
+});
+
+describe('a fix’s test run', () => {
+  it('judges the program with the repairs a real run gets: a require of Tone that the run takes out', async () => {
+    // The live failure: the whole-program fix brought back `const Tone = require('tone');`, and its test run
+    // stopped at "require is not defined" although the real run reads the ready-made Tone
+    const trialled: string[] = [];
+    const llm = new QueueLlm(['const x = 1;\nboom();', "// Cause: nothing\nconst Tone = require('tone');\nconst synth = new Tone.Synth();"]);
+    llm.modelId = 'gemma-4-e2b-it-web';
+    const { runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 2 }, {}], {
+      trials: (code) => {
+        trialled.push(code);
+        return /require/.test(code) ? { error: 'require is not defined', errorLine: 1 } : { error: null };
+      },
+    });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Play a note');
+    await vi.waitFor(() => expect(trialled.some((code) => code.includes('const synth = new Tone.Synth();'))).toBe(true), { timeout: 15000 });
+    expect(trialled.every((code) => !/require/.test(code))).toBe(true);
+  }, 30000);
+});
 
 describe('the blank stage', () => {
   const TOTAL = [
@@ -1196,6 +1484,50 @@ describe('the blank stage', () => {
       'const total = bill + bill * tip / 100;',
     ]);
   }, 30000);
+
+  it('does not take a swapped-in object that leaves the same method missing at the same line as progress', async () => {
+    // Qwen3 0.6B, "Make a game where I click on moving targets to score points": audio is an
+    // Audio element, which has no start(). document.getElementById('score') once "got further"
+    // because the browser words its failure as document.getElementById(...).start, not audio.start.
+    const GAME = [
+      'const canvas = document.createElement("canvas");',
+      'document.body.appendChild(canvas);',
+      'let scoreText = document.getElementById("score");',
+      'function beep() {',
+      "  const audio = new Audio('beep.mp3');",
+      '  audio.start();',
+      '}',
+      'beep();',
+    ].join('\n');
+    const llm = new QueueLlm([GAME, 'A', 'x', 'x', 'x']);
+    const { executed, runtime } = fakeRuntime([{ error: 'audio.start is not a function', errorLine: 6 }, {}], {
+      trials: (code) =>
+        code.includes("(globalThis.__chattyReached = true), document.getElementById('score')")
+          ? { error: '(globalThis.__chattyReached , document.getElementById(...)).start is not a function', errorLine: 6 }
+          : { error: '(globalThis.__chattyReached , canvas).start is not a function', errorLine: 6 },
+      ids: ['score'],
+    });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Make a game where I click on moving targets to score points');
+    await vi.waitFor(() => expect(runLogText()).toContain('no expression passed a test run'), { timeout: 10000 });
+    // (the log keeps every test's entries: only this request's count)
+    const mine = runLogText().slice(runLogText().indexOf('Make a game where I click'));
+    expect(mine).not.toContain('corrected by a test run');
+    expect(executed.every((code) => code.includes('audio.start();'))).toBe(true);
+  }, 20000);
+
+  it('tells the same member missing from another one, whatever object was put in front of it', () => {
+    expect(sameMissingMember('audio.start is not a function', '(globalThis.__chattyReached , document.getElementById(...)).start is not a function')).toBe(true);
+    expect(sameMissingMember('audio.start is not a function', '(globalThis.__chattyReached , canvas).loop is not a function')).toBe(false);
+    // (a swapped-in object that is null fails the same way: the same member is read from nothing)
+    expect(sameMissingMember('audio.start is not a function', "Cannot read properties of null (reading 'start')")).toBe(true);
+    expect(sameMissingMember('audio.start is not a function', "Cannot read properties of null (reading 'play')")).toBe(false);
+    expect(sameMissingMember('x is not a function', 'y is not a function')).toBe(false);
+    // A swapped-in expression that is undefined: the real trial from Qwen3 0.6B's blues loop (Tone for Tone.createSynth)
+    expect(sameMissingMember('Tone.createSynth is not a function', "Cannot read properties of undefined (reading 'createSynth')")).toBe(true);
+    expect(sameMissingMember('Tone.createSynth is not a function', "Cannot read properties of undefined (reading 'PolySynth')")).toBe(false);
+    expect(sameMissingMember('s.play is not a function', "undefined is not an object (evaluating 'Tone.Synth.play')")).toBe(true);
+  });
 
   it('falls back to the line fix as the next attempt when no candidate passes', async () => {
     const llm = new QueueLlm([BOARD, 'A', 'document.body', 'scores', 'view.parentNode', '// Cause: guard\nif (view) view.textContent = scores.length;']);
@@ -1574,6 +1906,18 @@ describe('a correction by rule, test-run first', () => {
     expect(llm.turns.length).toBe(1);
   }, 15000);
 
+  it('is held to the request when it runs: a card that shows nothing goes on to the fix loop', async () => {
+    // The corrected program ran without an error, but its page has only empty elements
+    const llm = new QueueLlm([TYPO, "// Cause: nothing shown\nlabel.textContent = 'Total: ' + total;"]);
+    const { executed, runtime } = fakeRuntime([err, {}, {}], { trials: () => ({ error: null }) });
+    Object.assign(runtime, { soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => false, emptyElements: () => ['p'] });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Draw the total as a red label');
+    await vi.waitFor(() => expect(llm.turns.length).toBeGreaterThanOrEqual(2), { timeout: 15000 });
+    expect(executed[1]).toBe(CORRECTED);
+    expect(llm.turns[1].messages.at(-1)!.content).toContain('The program put nothing visible on screen');
+  }, 30000);
+
   it('is not run when its test run fails the same way: the model is asked instead', async () => {
     const llm = new QueueLlm([TYPO, "// Cause: typo\nlabel.textContent = 'Total: ' + total;"]);
     llm.modelId = 'gemma-4-e2b-it-web';
@@ -1585,4 +1929,17 @@ describe('a correction by rule, test-run first', () => {
     expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'line']);
     expect(runLogText()).toContain('totl → total: a test run of the correction failed the same way');
   }, 15000);
+});
+
+describe('a reply cut off inside a template string', () => {
+  it('runs with the template closed, logged, instead of failing with "Unexpected end of input"', async () => {
+    const cut = 'document.body.innerHTML = `\n  <div id="todo-app">\n    <h2>Make a to-do list</h2>\n    <div class="todo-item">Today\'s Tasks</div>';
+    const llm = new QueueLlm(['```javascript\n' + cut]);
+    const { runtime, executed } = fakeRuntime([{}]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Make a to-do list where I can add and remove items');
+    await vi.waitFor(() => expect(executed.length).toBeGreaterThanOrEqual(1), { timeout: 15000 });
+    expect(executed[0]).toContain('`;');
+    expect(runLogText()).toContain('the reply was cut off: its open template string closed: corrected before running');
+  }, 30000);
 });

@@ -8,7 +8,7 @@
 // ============================================================================
 
 /** One turn's least: the trimmed prompt (system prompt and request) and room for a reply */
-export const MIN_CONTEXT = 3072;
+export const MIN_CONTEXT = 2048;
 
 /** The device, as far as the browser tells */
 export interface DeviceMemory {
@@ -32,10 +32,13 @@ const MB = 1024 * 1024;
 /**
  * The memory a model's KV cache may take. iPhone and iPad: a fixed share of Safari's tab limit
  * (the weights, WebLLM's worker and the page need the rest). Other phones and computers: by
- * their RAM where the browser says (Chrome), else a computer's usual.
+ * their RAM where the browser says (Chrome), else a computer's usual. On a phone, `setMb` (from
+ * localStorage chatty_phone_budget_mb) replaces it, for trying sizes on the device itself.
  */
-export function workingMemoryBudget(device: DeviceMemory): number {
-  if (device.appleMobile) return 384 * MB;
+export function workingMemoryBudget(device: DeviceMemory, setMb?: string | null): number {
+  const set = Number(setMb);
+  if ((device.appleMobile || device.phone) && setMb && Number.isFinite(set) && set >= 64 && set <= 4096) return set * MB;
+  if (device.appleMobile) return 256 * MB;
   const gb = device.memoryGb;
   if (device.phone) return gb !== undefined && gb >= 8 ? 768 * MB : 512 * MB;
   return gb !== undefined && gb <= 4 ? 512 * MB : 1536 * MB;

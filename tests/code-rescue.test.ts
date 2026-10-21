@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { callUncalledFunctions, exposeFunctionsToInlineHandlers, inspectExecutableCode, stripComments } from '../src/tools/javascript-runtime.ts';
+import { callUncalledFunctions, exposeFunctionsToInlineHandlers, hoistPageScripts, inspectExecutableCode, stripComments } from '../src/tools/javascript-runtime.ts';
 
 describe('running code the model wrapped or forgot to call', () => {
   it('runs a fenced block, saying the talk before and after it with speak()', () => {
@@ -80,8 +80,8 @@ describe('running code the model wrapped or forgot to call', () => {
     const body = 'const ctx = 1;\n\nfunction play(note) {\n    const o = 1;\n\n    o.type = 2;\n}\n\nfunction loop() {\n    play();\n\n    id = setInterval(loop, 1000); // Loop';
     const code = inspectExecutableCode('speak("Here is a loop.");\n```javascript\n' + body).code;
     // Never empty, and none of the program is said aloud. Cut inside loop() after a whole line:
-    // its block is closed
-    expect(code).toBe('speak("Here is a loop.");\n' + body + '\n}');
+    // its block is closed, and loop(), which nothing calls (the word in the speak() text is no call), is started
+    expect(code).toBe('speak("Here is a loop.");\n' + body + '\n}\nawait loop();');
   });
 
   it('runs a page written into innerHTML whose template string was never closed', () => {
@@ -121,6 +121,119 @@ describe('running code the model wrapped or forgot to call', () => {
     // Started from outside its body: left alone
     const started = 'function playLoop() {\n  setTimeout(playLoop, 500);\n}\nplayLoop();';
     expect(callUncalledFunctions(started)).toBe(started);
+  });
+
+  it('calls the one function nothing refers to when it calls the others, whatever it is named', () => {
+    // The shape of Qwen3 0.6B's Pong: a loop that runs update and draw, never started
+    const pong = [
+      'const canvas = document.createElement("canvas");',
+      'document.body.appendChild(canvas);',
+      'const ctx = canvas.getContext("2d");',
+      'function updateBall() {',
+      '  ball.x -= ball.speed;',
+      '}',
+      'function draw() {',
+      '  ctx.fillRect(100, 100, 100, 10);',
+      '}',
+      'function gameLoop() {',
+      '  updateBall();',
+      '  draw();',
+      '  requestAnimationFrame(gameLoop);',
+      '}',
+    ].join('\n');
+    expect(callUncalledFunctions(pong)).toBe(`${pong}\nawait gameLoop();`);
+    // The word in a string (an element's id, speech) is no reference to the function
+    const countdown = 'document.getElementById("countdown").textContent = 10;\nfunction countdown() {\n  document.getElementById("countdown").textContent = 9;\n  setTimeout(countdown, 1000);\n}';
+    expect(callUncalledFunctions(countdown)).toBe(`${countdown}\nawait countdown();`);
+    // A handler (named in an inline handler or a listener) is referred to: not the head of the calls
+    const tip = 'function formatMoney() { return 1; }\nfunction calculate() {\n  formatMoney();\n}\ndocument.body.innerHTML = \'<button onclick="calculate()">Go</button>\';';
+    expect(callUncalledFunctions(tip)).toBe(tip);
+    // Two functions nothing refers to, or one that calls none of the others
+    const two = 'function a() { b(); }\nfunction b() {}\nfunction c() { b(); }';
+    expect(callUncalledFunctions(two)).toBe(two);
+    const lone = 'function onKey() { return 1; }\nfunction unrelated() { return 2; }\nconst handlers = { onKey };';
+    expect(callUncalledFunctions(lone)).toBe(lone);
+  });
+
+  it('does not call a function a string calls: inline handlers of every shape, and setAttribute', () => {
+    const shapes = [
+      'document.body.innerHTML = `<form onsubmit="return checkAnswer()"><button>Go</button></form>`;\nfunction checkAnswer() { return false; }',
+      'document.body.innerHTML = \'<button onclick="score++; update()">+</button>\';\nfunction update() { show(); }\nfunction show() {}',
+      "const b = document.createElement('button');\nb.setAttribute('onclick', 'rollDice()');\ndocument.body.appendChild(b);\nfunction rollDice() { show(); }\nfunction show() {}",
+      'document.body.innerHTML = `<button onclick="if (confirm(\'Reset?\')) resetScores()">Reset</button>`;\nfunction resetScores() { show(); }\nfunction show() {}',
+    ];
+    for (const code of shapes) expect(callUncalledFunctions(code), code).toBe(code);
+    // The word alone, or a call in a comment, is still no use of it
+    const word = 'document.getElementById("countdown").textContent = 10;\nfunction countdown() {\n  setTimeout(countdown, 1000);\n}';
+    expect(callUncalledFunctions(word)).toBe(`${word}\nawait countdown();`);
+  });
+
+  it('runs a <script> in markup the program sets as part of the program, so its functions are called too', () => {
+    // The real program from Qwen3 0.6B for "Draw a smiling cat face": a script that only defines its functions
+    const cat = [
+      'speak("Draw a smiling cat face.");',
+      'document.body.innerHTML = `',
+      '  <canvas id="catCanvas" width="200" height="200"></canvas>',
+      '  <script>',
+      "    const canvas = document.getElementById('catCanvas');",
+      "    const ctx = canvas.getContext('2d');",
+      '    function drawCat() {',
+      "      ctx.fillStyle = 'rgb(255, 255, 255)';",
+      '      ctx.fillRect(50, 100, 100, 60);',
+      '    }',
+      '    function update() {',
+      '      drawCat();',
+      '      requestAnimationFrame(update);',
+      '    }',
+      '  </script>`;',
+    ].join('\n');
+    const fixed = hoistPageScripts(cat);
+    expect(fixed.hoisted).toBe(1);
+    expect(fixed.code).toBe(
+      [
+        'speak("Draw a smiling cat face.");',
+        'document.body.innerHTML = `',
+        '  <canvas id="catCanvas" width="200" height="200"></canvas>',
+        '  `;',
+        "    const canvas = document.getElementById('catCanvas');",
+        "    const ctx = canvas.getContext('2d');",
+        '    function drawCat() {',
+        "      ctx.fillStyle = 'rgb(255, 255, 255)';",
+        '      ctx.fillRect(50, 100, 100, 60);',
+        '    }',
+        '    function update() {',
+        '      drawCat();',
+        '      requestAnimationFrame(update);',
+        '    }',
+      ].join('\n')
+    );
+    const prepared = inspectExecutableCode(cat);
+    expect(prepared.code.endsWith('requestAnimationFrame(update);\n    }\nawait update();')).toBe(true);
+    expect(prepared.called).toEqual(['update']);
+    expect(prepared.hoistedScripts).toBe(1);
+  });
+
+  it('leaves a script with a source, escapes or placeholders, one inside a function, and other strings, alone', () => {
+    const sourced = 'document.body.innerHTML = `<script src="a.js"></script>`;';
+    expect(hoistPageScripts(sourced).hoisted).toBe(0);
+    const placeholder = 'const n = 3;\ndocument.body.innerHTML = `<script>function draw() { return ${n}; }</script>`;';
+    expect(hoistPageScripts(placeholder).hoisted).toBe(0);
+    const inFunction = 'function show() {\n  document.body.innerHTML = `<script>go();</script>`;\n}\nshow();';
+    expect(hoistPageScripts(inFunction).hoisted).toBe(0);
+    const text = 'const note = "<script>function draw() { return 1; }</script>";\nspeak(note);';
+    expect(hoistPageScripts(text).hoisted).toBe(0);
+    const empty = 'document.body.innerHTML = `<p>hi</p><script></script>`;';
+    expect(hoistPageScripts(empty).hoisted).toBe(0);
+    // A data block or a template is read, not run: it stays in the markup
+    const data = 'document.body.innerHTML = `<script type="application/json" id="data">{"a": 1}</script><script type="text/template" id="row"><li>x</li></script>`;';
+    expect(hoistPageScripts(data).hoisted).toBe(0);
+    const mixed = 'document.body.innerHTML = `<script type="application/json" id="data">{"a": 1}</script><script type="text/javascript">run();</script>`;';
+    expect(hoistPageScripts(mixed)).toEqual({ code: 'document.body.innerHTML = `<script type="application/json" id="data">{"a": 1}</script>`;\nrun();', hoisted: 1 });
+    // Modules can't be moved (they import)
+    expect(hoistPageScripts('document.body.innerHTML = `<script type="module">go();</script>`;').hoisted).toBe(0);
+    // Several, in order; the markup keeps the rest
+    const two = 'document.body.insertAdjacentHTML("beforeend", "<b>x</b><script>a();</script><script>b();</script>");';
+    expect(hoistPageScripts(two).code).toBe('document.body.insertAdjacentHTML("beforeend", "<b>x</b>");\na();\nb();');
   });
 
   it('still treats chat as prose', () => {

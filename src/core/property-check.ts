@@ -10,8 +10,9 @@
  * which programs legitimately give properties of their own (button.count = 0), only method
  * calls are checked.
  */
-import { parse } from 'acorn';
-import { closestMembers, describeMember, memberKind, namesSources, nearMiss, objectType, typeLabel, usedMembers } from './method-hints.ts';
+import { parse, parseExpressionAt } from 'acorn';
+import { analyse, resolve, type Tree } from './blank-fix.ts';
+import { closestMembers, CONTEXT_2D_METHODS, describeMember, memberKind, namesSources, nearMiss, objectType, typeLabel, usedMembers } from './method-hints.ts';
 import { sureMatch } from './fuzzy-match.ts';
 
 const PROPERTY_CHECKED = new Set([
@@ -165,6 +166,64 @@ export function unknownMembers(code: string, scope?: Record<string, unknown>): U
 }
 
 /**
+ * Drawing calls and settings made on a canvas element itself (`canvas.beginPath()`, `canvas.fillStyle
+ * = 'red'`): they belong to its 2D context, which the same element gives back (`canvas.getContext
+ * ("2d")`, always the same one). The browser's own types say which names are the context's alone
+ * (the context has them, the element does not). Only objects the program made as canvas elements;
+ * every use of such a name on them goes through the context at once (the errors name one at a
+ * time). Kept only when the result parses.
+ */
+export function moveToContext(code: string, scope?: Record<string, unknown>): { code: string; moved: Array<{ object: string; members: string[] }> } {
+  const none = { code, moved: [] as Array<{ object: string; members: string[] }> };
+  if (!/\bgetContext\b|createElement\s*\(\s*['"]canvas['"]|<canvas/.test(code)) return none;
+  const element = new Set(memberNames('HTMLCanvasElement', scope));
+  const real = memberNames('CanvasRenderingContext2D', scope).filter((name) => !element.has(name));
+  // (where the browser lacks the type, the methods every context has)
+  const contextOnly = new Set(real.length > 0 ? real : [...CONTEXT_2D_METHODS]);
+  contextOnly.delete('canvas');
+  let ast: AnyNode;
+  try {
+    ast = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true }) as unknown as AnyNode;
+  } catch {
+    return none;
+  }
+  const spots: Array<{ at: number; object: string; member: string }> = [];
+  // A method is the context's when it is called, a setting when it is read or written: `canvas.scale
+  // = 2` (a number kept on the element, named like the method) is neither
+  const kindOf = (member: string) => (real.length > 0 ? memberKind('CanvasRenderingContext2D', member, scope) : 'method');
+  const visit = (node: AnyNode, parent: AnyNode | null) => {
+    if (node.type === 'MemberExpression' && !node.computed && (node.property as AnyNode).type === 'Identifier' && (node.object as AnyNode).type === 'Identifier') {
+      const object = (node.object as AnyNode).name as string;
+      const member = (node.property as AnyNode).name as string;
+      const called = parent?.type === 'CallExpression' && parent.callee === node;
+      if (contextOnly.has(member) && kindOf(member) === (called ? 'method' : 'property')) spots.push({ at: (node.object as AnyNode).end, object, member });
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && visit(child, node);
+      else if (value && typeof value === 'object' && typeof (value as AnyNode).type === 'string') visit(value as AnyNode, node);
+    }
+  };
+  visit(ast, null);
+  const canvases = new Map<string, boolean>();
+  const isCanvas = (object: string) => {
+    if (!canvases.has(object)) canvases.set(object, ['HTMLCanvasElement', 'element:canvas'].includes(objectType(code, object) ?? ''));
+    return canvases.get(object)!;
+  };
+  const chosen = spots.filter((spot) => isCanvas(spot.object));
+  if (chosen.length === 0) return none;
+  let fixed = code;
+  for (const spot of [...chosen].sort((a, b) => b.at - a.at)) fixed = `${fixed.slice(0, spot.at)}.getContext("2d")${fixed.slice(spot.at)}`;
+  const moved = new Map<string, Set<string>>();
+  for (const spot of chosen) moved.set(spot.object, (moved.get(spot.object) ?? new Set()).add(spot.member));
+  try {
+    parse(fixed, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true });
+  } catch {
+    return none;
+  }
+  return { code: fixed, moved: [...moved].map(([object, members]) => ({ object, members: [...members] })) };
+}
+
+/**
  * The program with each member renamed (object.from → object.to): at the uses the parser found
  * when they are given, else wherever the text occurs
  */
@@ -259,6 +318,103 @@ const STYLE_KEYWORDS: Record<string, string[]> = {
 
 const kebab = (name: string) => name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
 
+/** The named colors of CSS (each is checked against the browser's own CSS.supports before it is used) */
+const COLOR_NAMES = (
+  'aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson cyan ' +
+  'darkblue darkcyan darkgoldenrod darkgray darkgreen darkgrey darkkhaki darkmagenta darkolivegreen darkorange darkorchid darkred darksalmon darkseagreen darkslateblue darkslategray darkslategrey ' +
+  'darkturquoise darkviolet deeppink deepskyblue dimgray dimgrey dodgerblue firebrick floralwhite forestgreen fuchsia gainsboro ghostwhite gold goldenrod gray green greenyellow grey honeydew hotpink ' +
+  'indianred indigo ivory khaki lavender lavenderblush lawngreen lemonchiffon lightblue lightcoral lightcyan lightgoldenrodyellow lightgray lightgreen lightgrey lightpink lightsalmon lightseagreen ' +
+  'lightskyblue lightslategray lightslategrey lightsteelblue lightyellow lime limegreen linen magenta maroon mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen mediumslateblue ' +
+  'mediumspringgreen mediumturquoise mediumvioletred midnightblue mintcream mistyrose moccasin navajowhite navy oldlace olive olivedrab orange orangered orchid palegoldenrod palegreen paleturquoise ' +
+  'palevioletred papayawhip peachpuff peru pink plum powderblue purple rebeccapurple red rosybrown royalblue saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue slateblue slategray ' +
+  'slategrey snow springgreen steelblue tan teal thistle tomato turquoise violet wheat white whitesmoke yellow yellowgreen'
+).split(' ');
+
+/** Words a model puts in front of a color name to ask for another shade of it ('deeppurple', 'dark purple', 'bright-red') */
+const SHADE_WORDS = ['deep', 'dark', 'light', 'bright', 'pale', 'vivid'];
+
+/**
+ * A color name made of a shade word and a CSS color that isn't a CSS color itself ('deeppurple':
+ * CSS has purple, darkviolet and deeppink, no deeppurple), as the color alone ('purple'), the one
+ * name the browser knows that the value says. The case, spaces, hyphens and underscores don't
+ * matter ('Deep Purple'). Null when the value isn't that shape or the browser doesn't know the rest.
+ */
+function colorWithoutShade(value: string, known: (name: string) => boolean): string | null {
+  const flat = value.toLowerCase().replace(/[\s_-]+/g, '');
+  for (const shade of SHADE_WORDS) {
+    const base = flat.startsWith(shade) ? flat.slice(shade.length) : '';
+    if (base && COLOR_NAMES.includes(base) && known(base)) return base;
+  }
+  return null;
+}
+
+/** The canvas context's color properties (they take any CSS color, and keep their old value for one the browser doesn't know) */
+const CANVAS_COLOR_PROPS = new Set(['fillStyle', 'strokeStyle', 'shadowColor']);
+
+/** Names a color expression may use besides the program's own */
+const COLOR_MATH = new Set(['Math', 'Number', 'parseInt', 'parseFloat', 'Infinity', 'NaN']);
+
+/**
+ * A CSS color function whose arguments are written as JavaScript inside quotes
+ * (`'rgb(255, 255, 255 - 255 * (i / 60))'`, where a template literal was meant) as that template
+ * literal (`` `rgb(255, 255, ${255 - 255 * (i / 60)})` ``): each argument that is not a plain number
+ * or percentage becomes a `${…}` of the expression it parses as. Only when every such argument is
+ * one whole expression whose names the program has in scope (or Math's), and the result parses.
+ */
+function colorTemplate(value: string, assignment: { start: number; end: number }, tree: Tree | null): string | null {
+  const call = value.match(/^(rgba?|hsla?)\(([^`$]*)\)$/i);
+  if (!call || !tree) return null;
+  // The same assignment in the scope analysis's own tree (its scopes are looked up from there)
+  const at = tree.nodes.find((n) => n.type === 'AssignmentExpression' && n.start === assignment.start && n.end === assignment.end);
+  if (!at) return null;
+  // The arguments, split at the commas outside brackets
+  const args: string[] = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < call[2].length; i++) {
+    const ch = call[2][i];
+    if ('([{'.includes(ch)) depth++;
+    else if (')]}'.includes(ch)) depth--;
+    else if (ch === ',' && depth === 0) {
+      args.push(call[2].slice(from, i));
+      from = i + 1;
+    }
+  }
+  args.push(call[2].slice(from));
+  if (depth !== 0 || args.length < 3 || args.length > 4) return null;
+  let computed = 0;
+  const parts: string[] = [];
+  for (const arg of args.map((a) => a.trim())) {
+    if (/^[\d.]+%?$/.test(arg)) {
+      parts.push(arg);
+      continue;
+    }
+    let expression: AnyNode;
+    try {
+      expression = parseExpressionAt(arg, 0, { ecmaVersion: 'latest' }) as unknown as AnyNode;
+    } catch {
+      return null;
+    }
+    if (expression.end !== arg.length) return null;
+    // Every name in it is the program's own (or Math's)
+    let known = true;
+    const visit = (node: AnyNode, parent: AnyNode | null) => {
+      if (node.type === 'Identifier' && !(parent?.type === 'MemberExpression' && parent.property === node && !parent.computed)) {
+        if (!COLOR_MATH.has(node.name as string) && !resolve(tree, at, node.name as string)) known = false;
+      }
+      for (const child of Object.values(node)) {
+        if (Array.isArray(child)) for (const c of child) c && typeof c.type === 'string' && visit(c, node);
+        else if (child && typeof child === 'object' && typeof (child as AnyNode).type === 'string') visit(child as AnyNode, node);
+      }
+    };
+    visit(expression, null);
+    if (!known) return null;
+    computed++;
+    parts.push(`\${${arg}}`);
+  }
+  return computed > 0 ? `\`${call[1]}(${parts.join(', ')})\`` : null;
+}
+
 /** Assignments to read-only properties and to style properties with values they can't take */
 export function unusableAssignments(code: string, scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>): AssignmentIssue[] {
   let ast: AnyNode;
@@ -275,9 +431,43 @@ export function unusableAssignments(code: string, scope: Record<string, unknown>
       else if (value && typeof value === 'object' && typeof (value as AnyNode).type === 'string') visit(value as AnyNode);
     }
   };
+  // el.setAttribute('fill', 'whit'): the SVG and HTML color attributes, as the style properties are
+  const colorCalls: AnyNode[] = [];
+  const visitCalls = (node: AnyNode) => {
+    const callee = node.callee as AnyNode | undefined;
+    if (node.type === 'CallExpression' && callee?.type === 'MemberExpression' && !callee.computed && (callee.property as AnyNode).name === 'setAttribute') colorCalls.push(node);
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && visitCalls(child);
+      else if (value && typeof value === 'object' && typeof (value as AnyNode).type === 'string') visitCalls(value as AnyNode);
+    }
+  };
+  visitCalls(ast);
   visit(ast);
   const supports = (scope.CSS as { supports?: (property: string, value: string) => boolean } | undefined)?.supports;
   const issues: AssignmentIssue[] = [];
+  for (const call of colorCalls) {
+    const [name, value] = call.arguments as AnyNode[];
+    if (!supports || name?.type !== 'Literal' || value?.type !== 'Literal' || typeof name.value !== 'string' || typeof value.value !== 'string') continue;
+    if (!/^(?:fill|stroke|stop-color|flood-color|lighting-color|color|bgcolor)$/i.test(name.value)) continue;
+    try {
+      if (supports('color', value.value)) continue;
+      const named = nearMiss(value.value, COLOR_NAMES.filter((candidate) => supports('color', candidate))) ?? colorWithoutShade(value.value, (candidate) => supports('color', candidate));
+      if (!named) continue;
+      const object = pathOf((call.callee as AnyNode).object as AnyNode, code) ?? 'el';
+      issues.push({
+        line: (call.loc as { start: { line: number } }).start.line,
+        object,
+        member: name.value,
+        kind: 'invalid-value',
+        message: `'${value.value}' is not a color the browser knows (${object}.setAttribute('${name.value}')), so it is ignored. '${named}' is.`,
+        fix: { start: value.start, end: value.end, text: `'${named}'`, note: `${object}.setAttribute('${name.value}', '${value.value}') → '${named}'` },
+      });
+    } catch {
+      // CSS.supports refused its input
+    }
+  }
+  // (the program's scopes, read when a color needs them)
+  let tree: Tree | null | undefined;
   for (const assignment of assignments) {
     const left = assignment.left as AnyNode;
     if (left.type !== 'MemberExpression' || left.computed || (left.property as AnyNode).type !== 'Identifier') continue;
@@ -302,7 +492,8 @@ export function unusableAssignments(code: string, scope: Record<string, unknown>
       });
       continue;
     }
-    if (type !== 'CSSStyleDeclaration' || !supports || !/^[a-z][a-zA-Z]*$/.test(member)) continue;
+    const canvasColor = type === 'CanvasRenderingContext2D' && CANVAS_COLOR_PROPS.has(member);
+    if ((type !== 'CSSStyleDeclaration' && !canvasColor) || !supports || !/^[a-z][a-zA-Z]*$/.test(member)) continue;
     const right = assignment.right as AnyNode;
     const literal =
       right.type === 'Literal' && typeof right.value === 'string'
@@ -312,11 +503,50 @@ export function unusableAssignments(code: string, scope: Record<string, unknown>
           : null;
     const value = literal?.replace(/\s*!important\s*$/i, '').trim();
     if (!value) continue;
+    if (canvasColor) {
+      // A canvas color the browser doesn't know is ignored without a word
+      try {
+        if (supports('color', value)) continue;
+      } catch {
+        continue;
+      }
+      tree = tree === undefined ? analyse(code) : tree;
+      const template = colorTemplate(value, assignment, tree);
+      if (template) {
+        issues.push({
+          line,
+          object,
+          member,
+          kind: 'invalid-value',
+          message: `'${value}' is not a color the browser knows (${object}.${member}): it is JavaScript inside quotes, so the browser ignores it.`,
+          fix: { start: right.start, end: right.end, text: template, note: `${object}.${member} = '${value}' → ${template}: JavaScript in a color needs a template literal` },
+        });
+        continue;
+      }
+      // A named color one slip away (whit for white)
+      const named = nearMiss(value, COLOR_NAMES.filter((name) => supports('color', name))) ?? colorWithoutShade(value, (name) => supports('color', name));
+      if (named) {
+        issues.push({
+          line,
+          object,
+          member,
+          kind: 'invalid-value',
+          message: `'${value}' is not a color the browser knows (${object}.${member}), so it is ignored. '${named}' is.`,
+          fix: { start: right.start, end: right.end, text: `'${named}'`, note: `${object}.${member} = '${value}' → '${named}'` },
+        });
+      }
+      continue;
+    }
     try {
       // The property must be one the browser knows (anything else is an unknown member's business)
       if (!supports(kebab(member), 'inherit') || supports(kebab(member), value)) continue;
       const candidates = (STYLE_KEYWORDS[member] ?? []).filter((candidate) => supports(kebab(member), candidate));
-      const near = nearMiss(value, candidates);
+      // (a color property: backgroundColor, fill, stroke, and background when it is a single word)
+      const colored = /(?:color|^fill|^stroke)$/i.test(member) || (member === 'background' && /^[A-Za-z]+$/.test(value));
+      const near = nearMiss(value, colored ? COLOR_NAMES.filter((name) => supports(kebab(member), name)) : candidates) ?? (colored ? colorWithoutShade(value, (name) => supports(kebab(member), name)) : null);
+      // (a color function with JavaScript in its arguments: a template literal was meant)
+      tree = tree === undefined ? analyse(code) : tree;
+      const template = near || !colored ? null : colorTemplate(value, assignment, tree);
       issues.push({
         line,
         object,
@@ -324,6 +554,7 @@ export function unusableAssignments(code: string, scope: Record<string, unknown>
         kind: 'invalid-value',
         message: `'${value}' is not a valid ${kebab(member)} value (${object}.${member}), so the browser ignores it.${candidates.length ? ` Values it accepts include: ${candidates.slice(0, 8).join(', ')}.` : ''}`,
         ...(near ? { fix: { start: right.start, end: right.end, text: `'${near}'`, note: `${object}.${member} = '${value}' → '${near}'` } } : {}),
+        ...(template ? { fix: { start: right.start, end: right.end, text: template, note: `${object}.${member} = '${value}' → ${template}: JavaScript in a color needs a template literal` } } : {}),
       });
     } catch {
       // CSS.supports refused its input: nothing to say

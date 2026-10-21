@@ -273,6 +273,19 @@ describe('misspelt writes and refused keywords, repaired while running', () => {
 });
 
 describe('errors from browser calls', () => {
+  it('name a library object by the library’s export, not its bundle’s shortened class name', async () => {
+    const { win, posted } = loadRunner(false);
+    // The bundle's Tone.PolySynth is a class called Cu; the program's own class keeps its name
+    win.eval('window.Tone = { PolySynth: class Cu {} }; window.Ball = class Ball {};');
+    win.postMessage({ type: 'execute', id: 'n1', code: 'const list = document.createElement("ul");\ndocument.body.append(list);\nlist.appendChild(new Tone.PolySynth());' }, '*');
+    await wait(30);
+    expect(JSON.stringify(posted.find((m) => m.type === 'program_error' || (m.type === 'result' && m.error)))).toMatch(/appendChild\(a Tone\.PolySynth\) failed: /);
+    win.postMessage({ type: 'execute', id: 'n2', code: 'document.body.querySelector("ul").appendChild(new Ball());' }, '*');
+    await wait(30);
+    expect(JSON.stringify(posted.filter((m) => m.type === 'program_error' || (m.type === 'result' && m.error)).at(-1))).toMatch(/appendChild\(a Ball\) failed: /);
+    win.close();
+  });
+
   it('say what the call was given', async () => {
     const { win, posted } = loadRunner(false);
     win.postMessage({ type: 'execute', id: 'x1', code: 'const list = document.createElement("ul");\ndocument.body.append(list);\nlist.appendChild("Buy milk");' }, '*');
@@ -281,4 +294,85 @@ describe('errors from browser calls', () => {
     expect(JSON.stringify(error)).toMatch(/appendChild\(a string 'Buy milk'\) failed: /);
     win.close();
   });
+});
+
+describe('the timers a stuck screen may still be waiting for', () => {
+  it('counts a timer or interval of a second or more, not a frame loop or a fast interval, and drops each when it ends', async () => {
+    const { win } = loadRunner(false);
+    win.postMessage(
+      {
+        type: 'execute',
+        id: 's1',
+        code: [
+          'let frames = 0;',
+          'function loop() { frames++; requestAnimationFrame(loop); }',
+          'loop();',
+          'window.__fast = setInterval(() => {}, 50);',
+          'window.__quick = setTimeout(() => {}, 300);',
+          'window.__slow = setTimeout(() => {}, 4000);',
+          'window.__tick = setInterval(() => {}, 1000);',
+        ].join('\n'),
+      },
+      '*'
+    );
+    await wait(30);
+    // (the page's own timers: the slow timeout and the one-second interval)
+    expect(win.__chattySlowWork()).toBe(2);
+    win.clearTimeout(win.__slow);
+    expect(win.__chattySlowWork()).toBe(1);
+    win.clearInterval(win.__tick);
+    expect(win.__chattySlowWork()).toBe(0);
+    win.close();
+  });
+
+  it('is what the host calls scheduled work: a frame loop alone is not', async () => {
+    const runtime = new JavascriptRuntime({ mode: 'iframe', timeoutMs: 100 });
+    expect(runtime.hasScheduledWork()).toBe(false);
+    const frame = (runtime as unknown as { ensureIframe(): HTMLIFrameElement }).ensureIframe();
+    (frame.contentWindow as any).__chattySlowWork = () => 0;
+    expect(runtime.hasScheduledWork()).toBe(false);
+    (frame.contentWindow as any).__chattySlowWork = () => 1;
+    expect(runtime.hasScheduledWork()).toBe(true);
+    runtime.dispose();
+  });
+});
+
+describe('a program that keeps adding elements however it does it', () => {
+  const growing = (code: string) => async () => {
+    // (a low limit, to keep the test short: the real one is 20,000 elements)
+    const runtime = new JavascriptRuntime();
+    const html = (runtime as unknown as Internals).buildRunnerHtml(false, undefined, 'tok');
+    const dom = new JSDOM(html, { runScripts: 'dangerously', pretendToBeVisual: true, url: 'http://localhost/', beforeParse: (w: any) => (w.__chattyMaxLive = 300) });
+    const win: any = dom.window;
+    const posted: any[] = [];
+    win.addEventListener('message', (e: MessageEvent) => posted.push(e.data));
+    win.postMessage({ type: 'execute', id: 'g1', code }, '*');
+    const told = () => posted.filter((m) => m.type === 'program_error' && /keeps adding more/.test(m.message));
+    // The watcher counts twice a second and stops a count that has grown four times above the limit
+    await vi.waitFor(() => expect(told().length).toBeGreaterThan(0), { timeout: 9000, interval: 100 });
+    const first = win.document.getElementsByTagName('*').length;
+    await wait(700);
+    // Stopped: nothing more is added, and it is told once
+    expect(win.document.getElementsByTagName('*').length).toBe(first);
+    expect(told().length).toBe(1);
+    win.close();
+  };
+
+  it('is stopped when it grows through insertAdjacentHTML in a timer', growing('setInterval(() => { document.body.insertAdjacentHTML("beforeend", "<i></i>".repeat(100)); }, 100);'), 15000);
+
+  it('is stopped when it grows through cloneNode in an animation frame loop', growing('const seed = document.createElement("div");\nfunction loop() { for (let i = 0; i < 10; i++) document.body.appendChild(seed.cloneNode(true)); requestAnimationFrame(loop); }\nloop();'), 15000);
+
+  it('leaves a program that stays under the limit alone', async () => {
+    const runtime = new JavascriptRuntime();
+    const html = (runtime as unknown as Internals).buildRunnerHtml(false, undefined, 'tok');
+    const dom = new JSDOM(html, { runScripts: 'dangerously', pretendToBeVisual: true, url: 'http://localhost/', beforeParse: (w: any) => (w.__chattyMaxLive = 300) });
+    const win: any = dom.window;
+    const posted: any[] = [];
+    win.addEventListener('message', (e: MessageEvent) => posted.push(e.data));
+    // A particle system that takes away what it made
+    win.postMessage({ type: 'execute', id: 'q1', code: 'setInterval(() => { document.body.querySelectorAll("i").forEach((el) => el.remove()); document.body.insertAdjacentHTML("beforeend", "<i></i>".repeat(250)); }, 50);' }, '*');
+    await wait(2800);
+    expect(posted.some((m) => /keeps adding more/.test(String(m.message ?? '')))).toBe(false);
+    win.close();
+  }, 10000);
 });

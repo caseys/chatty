@@ -56,7 +56,7 @@ import type {
   SystemTelemetry,
 } from '../types/index.ts';
 import { clearSpeechModelCache } from './model-cache.ts';
-import { AFTER_HEAVY_MS, AFTER_LOAD_MS, settle, settleAfterLoad } from './settle.ts';
+import { AFTER_HEAVY_MS, AFTER_LOAD_MS, settle, settleAfterLoad, settleOnIos } from './settle.ts';
 
 const WELCOME_MESSAGE = 'Welcome to Chatty, I can do anything your browser can do.';
 /** Returning users get the short greeting (set after the first full welcome) */
@@ -678,6 +678,8 @@ export class VoiceAssistantEngine {
           if (this.phoneModels || step === lastStep) return;
           lastStep = step;
           writeLoadStage(`${modelName} (${step})`);
+          // On a phone, also in the console, where Web Inspector shows the last step before a crash
+          if (isConstrained) console.info(`[Chatty] loading ${modelName}: ${step}`);
         };
         return provider
           .initialize((loaded, total, current?: { label: string; loaded: number; total: number }) => {
@@ -697,6 +699,7 @@ export class VoiceAssistantEngine {
             noteStep('warming up the model');
             return this.warmUpChat(provider).then(() => {
               noteStep('getting the sandbox ready');
+              if (isConstrained) console.info(`[Chatty] loading ${modelName}: ready`);
               if (ticket !== this.llmLoadTicket) return;
               this.stateCoordinator.setModelState('llm', 'ready');
               this.greetWithoutSpeech();
@@ -1613,19 +1616,16 @@ export class VoiceAssistantEngine {
   /**
    * One tiny generation right after a WebLLM model loads, so the first-generation GPU cost
    * (pipeline compiles, KV cache) is paid while nothing else is happening. Not a chat turn:
-   * not streamed, logged or remembered. Failures are ignored. WebLLM only (LiteRT skipped).
+   * not streamed, logged or remembered. It runs in the WebLLM worker, which catches and logs a
+   * failure. WebLLM only (LiteRT skipped).
    */
   private async warmUpChat(provider: LlmRuntimeProvider): Promise<void> {
     if (!(provider instanceof WebLlmProvider) || provider !== this.localChat) return;
+    // iPhone/iPad Safari: a full second after the load before the first run (the load's own pause
+    // is AFTER_LOAD_MS), the step where its tab was being killed
+    await settleOnIos(1000 - AFTER_LOAD_MS);
     try {
-      await withActivity('warming up the model', () =>
-        provider.generate({
-          turnId: `warmup-${Date.now()}`,
-          systemPrompt: '',
-          messages: [{ role: 'user', content: 'Hi' }],
-          maxOutputTokens: 1,
-        })
-      );
+      await withActivity('warming up the model', () => provider.warmUp());
     } catch (err) {
       console.warn('Model warm-up failed (ignored):', err);
     }

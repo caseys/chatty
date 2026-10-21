@@ -87,6 +87,17 @@ export function createWebLlmHost(parts: WebLlmHostParts, post: (event: WebLlmEve
           };
         });
         return;
+      case 'warm-up':
+        void settle(request.id, async () => {
+          // The first run after a load pays the GPU's one-time costs; if it fails, the next request
+          // will say so itself, so it's only logged here
+          try {
+            await engine.chat.completions.create({ ...request.request, stream: false });
+          } catch (err) {
+            console.warn('[WebLLM] warm-up failed (ignored):', err);
+          }
+        });
+        return;
       case 'interrupt':
         void Promise.resolve(engine.interruptGenerate()).catch(() => {});
         return;

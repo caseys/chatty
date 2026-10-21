@@ -244,3 +244,50 @@ describe('a whole-program fix that drops declarations it still uses', () => {
     expect(fixed).toContain('bang();');
   });
 });
+
+describe('a whole-program reply with several code blocks', () => {
+  // The failing program (a Tone.Loop made with options, then asked to play notes) and the reply Qwen3 gave for the whole program:
+  // a two-line fragment first, then the complete program
+  const failed = [
+    'const loop = new Tone.Loop({ duration: 4, tempo: 120 });',
+    'loop.triggerAttackRelease("G4", 0.5);',
+    'loop.triggerAttackRelease("B4", 0.5);',
+    'loop.triggerAttackRelease("D5", 0.5);',
+    'loop.start();',
+  ].join('\n');
+  const complete = [
+    'const synth = new Tone.PolySynth().toDestination();',
+    'const loop = new Tone.Loop((time) => {',
+    '  synth.triggerAttackRelease("G4", 0.5, time);',
+    '}, "4n");',
+    'loop.start();',
+    'Tone.Transport.start();',
+  ].join('\n');
+  const reply = ['// Cause: loops have no triggerAttackRelease', '```js', 'const synth = new Tone.PolySynth();', 'synth.toDestination();', '```', '', 'The complete program:', '```js', complete, '```'].join('\n');
+
+  it('takes the complete program, not the fragment that came first', () => {
+    expect(applyFixReply(failed, reply, undefined, undefined, true)).toBe(complete);
+  });
+
+  it('takes the block that keeps most of the program’s own lines', () => {
+    const own = ['```js', 'loop.start();', '```', '```js', failed.replace('{ duration: 4, tempo: 120 }', '(time) => {}, "4n"'), '```'].join('\n');
+    expect(applyFixReply(failed, own, undefined, undefined, true)).toBe(failed.replace('{ duration: 4, tempo: 120 }', '(time) => {}, "4n"'));
+  });
+
+  it('does not take the program itself, quoted as "Before it was:", for the fix', () => {
+    const fix = 'const synth = new Tone.PolySynth().toDestination();\nsynth.triggerAttackRelease("G4", "8n");\nTone.Transport.start();';
+    const quoted = ['Fixed:', '```js', fix, '```', 'Before it was:', '```js', failed, '```'].join('\n');
+    expect(applyFixReply(failed, quoted, undefined, undefined, true)).toBe(fix);
+    // Quoted first, the fix after it
+    const before = ['Before it was:', '```js', failed, '```', 'Now:', '```js', fix, '```'].join('\n');
+    expect(applyFixReply(failed, before, undefined, undefined, true)).toBe(fix);
+    // Only the program given back: nothing better to take
+    expect(applyFixReply(failed, ['```js', failed, '```', '```js', failed, '```'].join('\n'), undefined, undefined, true)).toBe(failed);
+  });
+
+  it('is unchanged for a reply with one block, and for a line fix with several (the first is the corrected line)', () => {
+    expect(applyFixReply(failed, ['```js', complete, '```'].join('\n'), undefined, undefined, true)).toBe(complete);
+    // Not asked for the whole program: the first block, as before
+    expect(applyFixReply(failed, reply, 2)).toBe(applyFixReply(failed, reply.split('The complete program:')[0], 2));
+  });
+});
