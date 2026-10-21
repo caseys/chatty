@@ -46,7 +46,7 @@ describe('missing methods', () => {
   it('gives the fix request the candidates, and a correction for a slip', () => {
     const code = "const ctx = c.getContext('2d');\nctx.fillCircle(1, 2, 3);";
     const hint = methodHint(code, 'ctx.fillCircle is not a function', scope)!;
-    expect(hint.text).toMatch(/^ctx is a CanvasRenderingContext2D, which has no fillCircle\(\)\. Its closest methods: /);
+    expect(hint.text).toMatch(/^ctx is a CanvasRenderingContext2D, which has no fillCircle\(\)\. It has .*\(a method\).*: use the one you meant\.$/);
     expect(hint.text).toContain('fill()');
     expect(hint.correction).toBeUndefined();
     const slip = methodHint("const ctx = c.getContext('2d');\nctx.fillrect(0, 0, 9, 9);", 'ctx.fillrect is not a function', scope)!;
@@ -114,5 +114,43 @@ describe('a value computed from an element is not the element', () => {
     expect(objectType(code, 'total')).toBeNull();
     expect(objectType(code, 'text')).toBeNull();
     expect(objectType(code, 'box')).not.toBeNull();
+  });
+});
+
+describe('names a model reshapes rather than mistypes', async () => {
+  const { sureMatch } = await import('../src/core/fuzzy-match.ts');
+  class Pages {
+    getPage() {}
+    getPages() {}
+    get page() { return 1; }
+  }
+  const pages = { CanvasRenderingContext2D: Pages } as unknown as Record<string, unknown>;
+  const code = (line: string) => `const ctx = c.getContext('2d');\n${line}`;
+
+  it('adds or drops a conventional verb, and a tie is no answer', () => {
+    expect(sureMatch('page', ['getPage', 'getPages'], { reshaped: true })).toBe('getPage');
+    expect(sureMatch('page', ['getPage', 'setPage'], { reshaped: true })).toBeNull();
+    expect(sureMatch('page', ['getPage'])).toBeNull();
+  });
+
+  it('takes a short form only when it points one way, or the program uses that name elsewhere', () => {
+    expect(sureMatch('val', ['value', 'validity'], { reshaped: true })).toBeNull();
+    expect(sureMatch('val', ['value', 'validity'], { reshaped: true, used: ['value'] })).toBe('value');
+  });
+
+  it('corrects a call to the verb form when that method is the only one', () => {
+    const hint = methodHint(code('ctx.page();'), 'ctx.page is not a function', pages);
+    // page is a property here: a call of it isn't page; getPage() is the method meant
+    expect(hint?.correction).toEqual({ object: 'ctx', from: 'page', to: 'getPage' });
+  });
+
+  it('lists a property first when a missing method is its verb form, without correcting the kind', () => {
+    class Book {
+      get page() { return 1; }
+      turn() {}
+    }
+    const hint = methodHint(code('ctx.getPage();'), 'ctx.getPage is not a function', { CanvasRenderingContext2D: Book } as unknown as Record<string, unknown>)!;
+    expect(hint.correction).toBeUndefined();
+    expect(hint.text).toMatch(/It has ctx\.page \(a property\)/);
   });
 });

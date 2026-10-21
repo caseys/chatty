@@ -25,7 +25,7 @@ describe('members an object does not have', () => {
   it('reports a made-up property with the closest real names', () => {
     const [issue] = unknownMembers(canvasCode("ctx.fillColor = 'red';"), scope);
     expect(issue.slip).toBeNull();
-    expect(unknownMemberError(issue)).toMatch(/^ctx\.fillColor is not a property of a CanvasRenderingContext2D\. Its closest: .*fillStyle/);
+    expect(unknownMemberError(issue)).toMatch(/^ctx is a CanvasRenderingContext2D, which has no fillColor\. It has .*ctx\.fillStyle \(a property\).*: use the one you meant\.$/);
   });
 
   it("checks style objects, and leaves elements' own properties alone", () => {

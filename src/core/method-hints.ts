@@ -7,7 +7,7 @@
  * a list instead of guessing again.
  */
 import { parseExpressionAt } from 'acorn';
-import { closestNames, sureMatch } from './fuzzy-match.ts';
+import { closestNames, flatName, NAME_VERBS, sureMatch } from './fuzzy-match.ts';
 
 /** The object and the method a "not a function" error names, or null */
 export function missingMethod(error: string): { object: string; method: string } | null {
@@ -135,6 +135,49 @@ export function namesSources(type: string, scope: Record<string, unknown> = glob
   return [(scope[type] as { prototype?: unknown } | undefined)?.prototype];
 }
 
+/** Every member name (methods and properties) of a browser type, own and inherited (not Object's own: valueOf, toString) */
+function memberNamesOf(type: string, scope?: Record<string, unknown>): string[] {
+  if (OWN_METHODS[type]) return OWN_METHODS[type];
+  const names = new Set<string>();
+  const plain = new Set(Object.getOwnPropertyNames(Object.prototype));
+  if (type === 'CSSStyleDeclaration') {
+    // Style properties live on the style object itself in some browsers: ask a real one
+    try {
+      const style = ((scope ?? globalThis) as { document?: Document }).document?.createElement('div').style as unknown as Record<string, unknown> | undefined;
+      if (style) for (const key in style) if (/^[A-Za-z_$][\w$]*$/.test(key) && !plain.has(key)) names.add(key);
+    } catch {
+      // No document here
+    }
+  }
+  for (const source of namesSources(type, scope)) {
+    let target: unknown = source;
+    while (target && target !== Object.prototype) {
+      for (const key of Object.getOwnPropertyNames(target)) {
+        if (key !== 'constructor' && !key.startsWith('_') && !plain.has(key) && /^[A-Za-z_$][\w$]*$/.test(key)) names.add(key);
+      }
+      target = Object.getPrototypeOf(target);
+    }
+  }
+  return [...names];
+}
+
+/**
+ * The members closest to a missing one, for a hint: of the kind its use asks for (methods for a
+ * call, properties for a read or write), with any of the other kind that is the same name
+ * reshaped put first (getPage() where the object has page)
+ */
+export function closestMembers(type: string, missing: string, isCall: boolean, scope?: Record<string, unknown>, count = 3): string[] {
+  const all = memberNamesOf(type, scope);
+  const wanted = all.filter((n) => (memberKind(type, n, scope) === 'method') === isCall);
+  const flat = flatName(missing);
+  const reshapedOther = all.filter((n) => {
+    if ((memberKind(type, n, scope) === 'method') === isCall) return false;
+    const f = flatName(n);
+    return NAME_VERBS.some((v) => f === v + flat || flat === v + f) || f === flat;
+  });
+  return [...new Set([...reshapedOther, ...closestNames(missing, wanted, count)])].slice(0, count);
+}
+
 /** Every method name of a browser type or known object (own and inherited) */
 export function methodNames(type: string, scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>): string[] {
   if (OWN_METHODS[type]) return OWN_METHODS[type];
@@ -198,10 +241,12 @@ export function methodHint(code: string, error: string, scope?: Record<string, u
       correction: { object: missing.object, from: missing.method, to: `getContext("2d").${missing.method}` },
     };
   }
-  const fix = nearMiss(missing.method, names);
-  const closest = closestMethods(missing.method, names);
+  // A sure method (a slip, or the name reshaped: page() for getPage()) is corrected; otherwise the
+  // closest members, methods or properties (getPage() where it has page), each shown as it is used
+  const fix = sureMatch(missing.method, names, { reshaped: true, used: usedMembers(code) });
+  const closest = closestMembers(type, missing.method, true, scope);
   return {
-    text: `${missing.object} is ${typeName}, which has no ${missing.method}(). Its closest methods: ${closest.map((n) => `${n}()`).join(', ')}.`,
+    text: `${missing.object} is ${typeName}, which has no ${missing.method}(). It has ${closest.map((n) => describeMember(type, missing.object, n, scope)).join(', ')}: use the one you meant.`,
     ...(fix ? { correction: { object: missing.object, from: missing.method, to: fix } } : {}),
   };
 }
@@ -252,6 +297,40 @@ function methodFunction(type: string, name: string, scope?: Record<string, unkno
   }
   // An element of unknown tag has many types: the count must be the same on all that have it
   return found.length > 0 && found.every((fn) => fn.length === found[0].length) ? found[0] : null;
+}
+
+/** Whether a type's member is a method or a property, from the browser's own descriptors (null when it has none) */
+export function memberKind(type: string, name: string, scope?: Record<string, unknown>): 'method' | 'property' | null {
+  if (OWN_METHODS[type]) return OWN_METHODS[type].includes(name) ? 'method' : null;
+  for (const source of namesSources(type, scope)) {
+    let target: unknown = source;
+    while (target && target !== Object.prototype) {
+      const descriptor = Object.getOwnPropertyDescriptor(target, name);
+      if (descriptor) return typeof descriptor.value === 'function' ? 'method' : 'property';
+      target = Object.getPrototypeOf(target);
+    }
+  }
+  // Style properties live on the style object itself in some browsers
+  return type === 'CSSStyleDeclaration' ? 'property' : null;
+}
+
+/**
+ * A member as the coder model reads it in a hint: `object.page (a property)`, or
+ * `object.fillRect(x, y, width, height) (a method)` with the parameter names where they are
+ * known, else how many values it takes
+ */
+export function describeMember(type: string, object: string, name: string, scope?: Record<string, unknown>): string {
+  const kind = memberKind(type, name, scope);
+  if (kind !== 'method') return `${object}.${name} (a property)`;
+  const fn = methodFunction(type, name, scope);
+  const known = PARAMETER_NAMES[tableKey(type, name)];
+  const params = known && fn && known.length === fn.length ? known.join(', ') : fn && fn.length > 0 ? `${fn.length} value${fn.length === 1 ? '' : 's'}` : '';
+  return `${object}.${name}(${params}) (a method)`;
+}
+
+/** Member names a program uses anywhere (`.value`): what breaks a tie between near names */
+export function usedMembers(code: string): string[] {
+  return [...new Set(Array.from(code.matchAll(/\.\s*([A-Za-z_$][\w$]*)/g), (m) => m[1]))];
 }
 
 /** The type's own name for the table above ('CanvasRenderingContext2D'), when the type is one */

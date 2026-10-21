@@ -11,7 +11,8 @@
  * calls are checked.
  */
 import { parse } from 'acorn';
-import { closestMethods, namesSources, nearMiss, objectType, typeLabel } from './method-hints.ts';
+import { closestMembers, describeMember, memberKind, namesSources, nearMiss, objectType, typeLabel, usedMembers } from './method-hints.ts';
+import { sureMatch } from './fuzzy-match.ts';
 
 const PROPERTY_CHECKED = new Set([
   'CanvasRenderingContext2D',
@@ -128,7 +129,10 @@ export function unknownMembers(code: string, scope?: Record<string, unknown>): U
     const names = namesOf.get(type)!;
     if (names.length === 0 || names.includes(use.member)) continue;
     seen.add(key);
-    const slip = nearMiss(use.member, names);
+    // A slip, or the name reshaped (val for value, page for getPage) when the kind fits: a
+    // method for a call, a property for a read or a write
+    const reshaped = sureMatch(use.member, names, { reshaped: true, used: usedMembers(code) });
+    const slip = nearMiss(use.member, names) ?? (reshaped && (memberKind(type, reshaped, scope) === 'method') === use.isCall ? reshaped : null);
     // A member the program sets and then uses itself is its own (Math.clamp = …; Math.clamp(x)),
     // unless it is a sure slip of a real one (style.backgroundColour). One only ever set
     // (ctx.fillColor = 'red') does nothing, and is reported.
@@ -141,7 +145,7 @@ export function unknownMembers(code: string, scope?: Record<string, unknown>): U
       type,
       isCall: use.isCall,
       slip,
-      closest: closestMethods(use.member, names),
+      closest: closestMembers(type, use.member, use.isCall, scope),
     });
   }
   return found;
@@ -158,10 +162,11 @@ export function renameMembers(code: string, renames: Array<{ object: string; fro
 }
 
 /** The error a program gets for a member its object doesn't have */
-export function unknownMemberError(issue: UnknownMember): string {
+export function unknownMemberError(issue: UnknownMember, scope?: Record<string, unknown>): string {
   const kind = typeLabel(issue.type, issue.object);
-  const what = issue.isCall ? 'method' : 'property';
-  return `${issue.object}.${issue.member} is not a ${what} of ${kind}. Its closest: ${issue.closest.join(', ')}.`;
+  const what = issue.isCall ? `${issue.member}()` : issue.member;
+  const has = issue.closest.map((n) => describeMember(issue.type, issue.object, n, scope)).join(', ');
+  return `${issue.object} is ${kind}, which has no ${what}. It has ${has}: use the one you meant.`;
 }
 
 /**

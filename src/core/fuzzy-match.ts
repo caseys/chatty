@@ -8,7 +8,13 @@
 //    third are not considered; a difference in letter case alone costs almost nothing
 //  - Ruby (did_you_mean): two candidates equally close is no suggestion at all
 //  - spell checkers: the first letter is rarely where the typo is
+// And for members, where models reshape a name rather than mistype it: the same name with a
+// conventional verb added or dropped (page / getPage), or cut short (val / value). Only for
+// callers that check the kind fits (a method for a call, a property for a read or write).
 // ============================================================================
+
+/** Verbs that begin conventional method and accessor names (getPage, setPage, createGain, isOpen) */
+export const NAME_VERBS = ['get', 'set', 'create', 'make', 'is', 'has', 'add', 'remove', 'to'] as const;
 
 /**
  * The one name `missing` is surely a slip of, or null. With `plural`, a plural and its singular
@@ -17,7 +23,11 @@
  *
  * Self-contained (no outer names): it is also inlined into the sandbox page by its source.
  */
-export function sureMatch(missing: string, names: readonly string[], options: { plural?: boolean } = {}): string | null {
+export function sureMatch(
+  missing: string,
+  names: readonly string[],
+  options: { plural?: boolean; reshaped?: boolean; used?: readonly string[] } = {}
+): string | null {
   const flat = (s: string) => s.toLowerCase().replace(/[-_\s]/g, '');
   const words = (s: string) =>
     s
@@ -54,7 +64,22 @@ export function sureMatch(missing: string, names: readonly string[], options: { 
   // 3. A plural or singular, where that counts
   const plurals = pool.filter((n) => isPlural(want, flat(n)) || isPlural(flat(n), want));
   if (options.plural && plurals.length > 0) return one(plurals);
-  // 4. Close in spelling: at most a third of the name in edits, lengths within about a third,
+  // 4. Reshaped (members): a verb added or dropped, or the name cut short. One answer is sure;
+  // among several, the one the program itself uses elsewhere (it uses .value: val is value)
+  if (options.reshaped && want.length >= 3) {
+    const verbs = ['get', 'set', 'create', 'make', 'is', 'has', 'add', 'remove', 'to'];
+    const pick = (found: string[]) => {
+      if (found.length === 1) return found[0];
+      const used = found.filter((n) => (options.used ?? []).includes(n));
+      return used.length === 1 ? used[0] : null;
+    };
+    const verbed = pool.filter((n) => verbs.some((v) => flat(n) === v + want || want === v + flat(n)));
+    if (verbed.length > 0) return pick(verbed);
+    const shortFor = pool.filter((n) => flat(n).length > want.length && flat(n).startsWith(want));
+    const short = pick(shortFor);
+    if (short) return short;
+  }
+  // 5. Close in spelling: at most a third of the name in edits, lengths within about a third,
   // the single closest (a tie is no answer). Names under 4 letters need the same letters: an
   // edit in 3 letters (zap, map) is another word, and this answer is applied without asking
   if (want.length < 4) return null;
@@ -114,8 +139,14 @@ export function editDistance(a: string, b: string): number {
 export function closestNames(missing: string, names: readonly string[], count = 3): string[] {
   const want = flatName(missing);
   const missingWords = new Set(nameWords(missing));
+  // A verb added or dropped, or the name cut short, comes first (page: getPage; val: value)
+  const reshaped = (name: string) => {
+    const f = flatName(name);
+    return NAME_VERBS.some((v) => f === v + want || want === v + f) || (want.length >= 3 && f.length > want.length && f.startsWith(want));
+  };
   // (a different first letter counts as two more edits: it is rarely the slip)
   const score = (name: string) =>
+    (reshaped(name) ? -20 : 0) +
     editDistance(want, flatName(name)) + (flatName(name)[0] === want[0] ? 0 : 2) - nameWords(name).filter((w) => missingWords.has(w)).length * 3;
   return [...new Set(names)].sort((a, b) => score(a) - score(b)).slice(0, count);
 }

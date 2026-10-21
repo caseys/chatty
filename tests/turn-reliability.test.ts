@@ -670,7 +670,7 @@ describe('missing methods', () => {
     const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
     await orchestrator.submitUserInput('Make the box vanish');
     await vi.waitFor(() => expect(llm.turns.length).toBe(2), { timeout: 5000 });
-    expect(llm.turns[1].messages.at(-1)!.content).toMatch(/box is a HTMLElement, which has no vanish\(\)\. Its closest methods: /);
+    expect(llm.turns[1].messages.at(-1)!.content).toMatch(/box is a HTMLElement, which has no vanish\(\)\. It has .*\(a method\).*: use the one you meant\./);
   });
 });
 

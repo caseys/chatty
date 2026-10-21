@@ -2089,6 +2089,162 @@ export class JavascriptRuntime {
         noteRejected(label + '.' + key + ' = ' + shown(value.slice(0, 60)) + ' is not a color the browser knows, so it was ignored');
       }
     }
+    // Values the browser quietly refuses: the property keeps its old value without a word
+    // (ctx.textAlign = 'middle', input.type = 'nubmer', ctx.lineWidth = 'thick'). Each is tried on
+    // a fresh object of the same kind, in a document of its own that shows and loads nothing, and
+    // read back: a value that doesn't take there didn't take here either. Style values and the
+    // canvas font go by CSS.supports, for the properties this browser has (one it lacks may be
+    // newer than it: not the program's error). Text and markup (which the browser rewrites), form
+    // state, and colors (checked above) are left out.
+    const UNCHECKED_KEYS = new Set(['value', 'checked', 'selectedIndex', 'innerHTML', 'outerHTML', 'innerText', 'outerText', 'textContent', 'nodeValue', 'data', 'style', 'cssText', 'fillStyle', 'strokeStyle', 'shadowColor']);
+    let inertDocument = null;
+    let probeContext = null;
+    const probeTemplates = new Map();
+    function probeFor(label, target) {
+      try {
+        if (!inertDocument) {
+          inertDocument = document.implementation.createHTMLDocument('');
+          // Relative addresses (form.action = '/x') resolve as on the page itself
+          const base = inertDocument.createElement('base');
+          base.href = document.baseURI;
+          inertDocument.head.append(base);
+        }
+        if (label === 'ctx' && target instanceof CanvasRenderingContext2D) {
+          probeContext = probeContext || inertDocument.createElement('canvas').getContext('2d');
+          return probeContext;
+        }
+        if (label === 'element' && target instanceof Element) {
+          const type = target.getAttribute('type') || '';
+          const kind = target.namespaceURI + ' ' + target.localName + ' ' + type;
+          if (!probeTemplates.has(kind)) {
+            const el = inertDocument.createElementNS(target.namespaceURI, target.localName);
+            if (type) el.setAttribute('type', type);
+            probeTemplates.set(kind, el);
+          }
+          // A fresh copy each time: a value set before can't pass for this one
+          return probeTemplates.get(kind).cloneNode(false);
+        }
+      } catch {}
+      return null;
+    }
+    // The values the specs give the common keyword properties: only candidates. Each is tried on
+    // this browser (read back on a fresh object, or CSS.supports), and only those it takes count:
+    // a refused value that is surely a slip of one of them (cneter, Center, space_between) is
+    // corrected while the program runs; otherwise its error lists them
+    const ALIGN = ['flex-start', 'flex-end', 'center', 'space-between', 'space-around', 'space-evenly', 'stretch', 'start', 'end', 'baseline', 'normal', 'left', 'right'];
+    const KEYWORDS = {
+      textAlign: ['start', 'end', 'left', 'right', 'center', 'justify'],
+      textBaseline: ['top', 'hanging', 'middle', 'alphabetic', 'ideographic', 'bottom'],
+      lineCap: ['butt', 'round', 'square'],
+      lineJoin: ['round', 'bevel', 'miter'],
+      globalCompositeOperation: ['source-over', 'source-in', 'source-out', 'source-atop', 'destination-over', 'destination-in', 'destination-out', 'destination-atop', 'lighter', 'copy', 'xor', 'multiply', 'screen', 'overlay', 'darken', 'lighten', 'color-dodge', 'color-burn', 'hard-light', 'soft-light', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity'],
+      direction: ['ltr', 'rtl', 'inherit'],
+      imageSmoothingQuality: ['low', 'medium', 'high'],
+      type: ['text', 'number', 'range', 'checkbox', 'radio', 'color', 'date', 'time', 'datetime-local', 'month', 'week', 'email', 'password', 'search', 'tel', 'url', 'file', 'hidden', 'button', 'submit', 'reset', 'image'],
+      preload: ['none', 'metadata', 'auto'],
+      crossOrigin: ['anonymous', 'use-credentials'],
+      loading: ['lazy', 'eager'],
+      decoding: ['sync', 'async', 'auto'],
+      dir: ['ltr', 'rtl', 'auto'],
+      target: ['_self', '_blank', '_parent', '_top'],
+      inputMode: ['none', 'text', 'decimal', 'numeric', 'tel', 'search', 'email', 'url'],
+      method: ['get', 'post', 'dialog'],
+      display: ['block', 'inline', 'inline-block', 'flex', 'inline-flex', 'grid', 'inline-grid', 'none', 'contents', 'table', 'table-row', 'table-cell', 'list-item', 'flow-root'],
+      position: ['static', 'relative', 'absolute', 'fixed', 'sticky'],
+      flexDirection: ['row', 'row-reverse', 'column', 'column-reverse'],
+      flexWrap: ['nowrap', 'wrap', 'wrap-reverse'],
+      justifyContent: ALIGN,
+      alignItems: ALIGN,
+      alignSelf: ALIGN,
+      alignContent: ALIGN,
+      overflow: ['visible', 'hidden', 'scroll', 'auto', 'clip'],
+      visibility: ['visible', 'hidden', 'collapse'],
+      cursor: ['auto', 'default', 'pointer', 'move', 'text', 'wait', 'crosshair', 'not-allowed', 'grab', 'grabbing', 'help', 'progress'],
+      fontWeight: ['normal', 'bold', 'bolder', 'lighter'],
+      fontStyle: ['normal', 'italic', 'oblique'],
+      textDecoration: ['none', 'underline', 'overline', 'line-through'],
+      textTransform: ['none', 'uppercase', 'lowercase', 'capitalize'],
+      whiteSpace: ['normal', 'nowrap', 'pre', 'pre-wrap', 'pre-line', 'break-spaces'],
+      boxSizing: ['content-box', 'border-box'],
+      borderStyle: ['none', 'solid', 'dashed', 'dotted', 'double', 'groove', 'ridge', 'inset', 'outset', 'hidden'],
+      userSelect: ['none', 'auto', 'text', 'all'],
+      pointerEvents: ['auto', 'none'],
+      objectFit: ['fill', 'contain', 'cover', 'none', 'scale-down'],
+      backgroundRepeat: ['repeat', 'no-repeat', 'repeat-x', 'repeat-y', 'space', 'round'],
+      backgroundSize: ['auto', 'cover', 'contain'],
+      cssFloat: ['left', 'right', 'none'],
+      float: ['left', 'right', 'none'],
+      verticalAlign: ['baseline', 'top', 'middle', 'bottom', 'text-top', 'text-bottom', 'sub', 'super'],
+    };
+    /** The refused value's sure correction among the values the browser takes, or null; and those values */
+    function keywordAnswer(key, value, takes) {
+      const words = KEYWORDS[key];
+      if (!words) return { fix: null, valid: [] };
+      const valid = words.filter((w) => { try { return takes(w); } catch { return false; } });
+      let fix = null;
+      // A single word only (a slip of one keyword, not a value of several parts)
+      if (/^[\\w-]+$/.test(value)) {
+        try { fix = sureMatch(value, valid); } catch {}
+      }
+      return { fix, valid };
+    }
+    const takesList = (valid) => (valid.length > 0 ? '. It takes: ' + valid.join(', ') : '');
+    /**
+     * A style value the browser doesn't take for a property it has (style.display = 'flexbox'):
+     * the value to set, corrected when it is surely a slip of one it takes
+     */
+    function checkStyleValue(key, value) {
+      if (typeof value !== 'string' || value === '' || key === 'cssText' || !window.CSS || !CSS.supports) return value;
+      const prop = key === 'cssFloat' ? 'float' : key.replace(/^webkit/, '-webkit-').replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
+      if (!CSS.supports(prop, 'initial') || CSS.supports(prop, value)) return value;
+      const camel = key.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      const { fix, valid } = keywordAnswer(camel, value, (w) => CSS.supports(prop, w));
+      if (fix) {
+        imagined('style.' + key + " = '" + value.slice(0, 60) + "' → '" + fix + "': corrected while running");
+        return fix;
+      }
+      noteRejected('style.' + key + ' = ' + shown(value.slice(0, 60)) + ' is not a value the browser takes for ' + prop + ', so it was ignored' + takesList(valid));
+      return value;
+    }
+    /** Whether the value takes when set on a fresh probe: read back, it is no longer what was there */
+    function takesOnProbe(label, d, target, value) {
+      const probe = probeFor(label, target);
+      if (!probe) return null;
+      try {
+        if (probe === probeContext) probe.save();
+        const before = d.get.call(probe);
+        if (typeof before !== 'string' && typeof before !== 'number' && typeof before !== 'boolean') return null;
+        if (String(before) === value) return true;
+        d.set.call(probe, value);
+        return { before, after: d.get.call(probe) };
+      } catch {
+        return null;
+      } finally {
+        if (probe === probeContext) try { probe.restore(); } catch {}
+      }
+    }
+    /** A value the browser quietly refuses (see above): the value to set, corrected when it is surely a slip */
+    function checkTook(label, key, d, target, value) {
+      if (typeof value !== 'string' || value === '' || !d.get || UNCHECKED_KEYS.has(key)) return value;
+      const cssKnows = !!(window.CSS && CSS.supports);
+      if (label === 'style') return checkStyleValue(key, value);
+      if (label === 'ctx' && key === 'font') {
+        if (cssKnows && !CSS.supports('font', value)) noteRejected('ctx.font = ' + shown(value.slice(0, 60)) + ' is not a font the browser can use (a size and a family, like "20px sans-serif"), so it was ignored');
+        return value;
+      }
+      const tried = takesOnProbe(label, d, target, value);
+      if (!tried || tried === true || tried.after !== tried.before) return value;
+      const { fix, valid } = keywordAnswer(key, value, (w) => {
+        const t = takesOnProbe(label, d, target, w);
+        return t === true || (!!t && t.after !== t.before);
+      });
+      if (fix) {
+        imagined(label + '.' + key + " = '" + value.slice(0, 60) + "' → '" + fix + "': corrected while running");
+        return fix;
+      }
+      noteRejected(label + '.' + key + ' = ' + shown(value.slice(0, 60)) + " didn't take: the browser kept " + shown(String(tried.after)) + ', so it is not a value ' + key + ' can have' + takesList(valid));
+      return value;
+    }
     // A value the browser can't use: NaN or Infinity, text that says so, or undefined where the
     // call needs a value (a required parameter: within required)
     function checkCall(label, key, required, args) {
@@ -2106,7 +2262,10 @@ export class JavascriptRuntime {
         Object.defineProperty(proto, key, {
           ...d,
           set(value) {
-            if (checking) checkSet(label, key, value);
+            if (checking) {
+              checkSet(label, key, value);
+              value = checkTook(label, key, d, this, value);
+            }
             return d.set.call(this, value);
           },
         });
@@ -2221,7 +2380,10 @@ export class JavascriptRuntime {
                 return typeof value === 'function' ? value.bind(target) : value;
               },
               set(target, prop, value) {
-                return Reflect.set(target, prop, LENGTH_SET.has(prop) ? asLength(prop, value) : value, target);
+                let given = LENGTH_SET.has(prop) ? asLength(prop, value) : value;
+                // (the properties are the style object's own in Chrome: the prototype's watchers don't see them)
+                if (checking && typeof prop === 'string') given = checkStyleValue(prop, given);
+                return Reflect.set(target, prop, given, target);
               },
             });
             styled.set(real, proxy);
@@ -2477,6 +2639,57 @@ export class JavascriptRuntime {
     // 'start-btn') means that element, not a new empty one
     // (Chatty's shared name matcher, the same rules as every repair: fuzzy-match.ts)
     const sureMatch = ${sureMatch.toString()};
+
+    // A misspelt property written to a browser object doesn't fail: it makes a new property and
+    // nothing happens (button.onClick = go, el.innerHtml = '…', ctx.fillstyle = 'red'). Once the
+    // program's top level has run, each element's and drawing context's own properties are read:
+    // one the browser didn't define that is surely a slip of a real property (not a method) gets
+    // its value moved there, and stays as a passage to it. The program's own extras
+    // (el.speed = 3) aren't close to any real name, and stay as they are.
+    const contexts = new Set();
+    {
+      const realGetContext = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function () {
+        const made = realGetContext.apply(this, arguments);
+        if (made) contexts.add(made);
+        return made;
+      };
+    }
+    const propertyNames = new WeakMap();
+    function realProperties(proto) {
+      if (propertyNames.has(proto)) return propertyNames.get(proto);
+      const names = [];
+      for (let o = proto; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+        for (const k of Object.getOwnPropertyNames(o)) {
+          const d = Object.getOwnPropertyDescriptor(o, k);
+          if (d && (d.get || d.set || typeof d.value !== 'function') && k !== 'constructor') names.push(k);
+        }
+      }
+      propertyNames.set(proto, names);
+      return names;
+    }
+    function repairMisspeltWrites() {
+      const objects = [...Array.from(document.querySelectorAll('*')).slice(0, 2000), ...contexts];
+      for (const obj of objects) {
+        let own;
+        try { own = Object.getOwnPropertyNames(obj); } catch { continue; }
+        if (own.length === 0) continue;
+        const real = realProperties(Object.getPrototypeOf(obj));
+        for (const name of own) {
+          const d = Object.getOwnPropertyDescriptor(obj, name);
+          if (!d || !('value' in d) || real.includes(name)) continue;
+          let to = null;
+          try { to = sureMatch(name, real); } catch {}
+          if (!to) continue;
+          const label = obj instanceof Element ? obj.localName : 'ctx';
+          try {
+            obj[to] = d.value;
+            Object.defineProperty(obj, name, { configurable: true, get: () => obj[to], set: (v) => { obj[to] = v; } });
+            imagined(label + '.' + name + ' → ' + label + '.' + to + ': corrected while running');
+          } catch {}
+        }
+      }
+    }
     function slipOfId(id) {
       const ids = [...document.querySelectorAll('[id]')].map((el) => el.id).filter((other) => other && other !== 'root' && !placeholders.has(other));
       return sureMatch(id, ids);
@@ -2555,8 +2768,41 @@ export class JavascriptRuntime {
     const HANDLER_PROPS = ['onclick', 'oninput', 'onchange', 'onsubmit', 'onkeyup', 'onkeydown'];
     const FORWARDED_PROPS = ['value', 'checked', 'textContent', 'innerText', 'innerHTML'];
     const wiring = new WeakMap();
+    // An event name written as its handler property ('onclick') or in other letter case or with
+    // separators ('keyDown', 'mouse_down') never fires: it becomes the event the target does fire,
+    // as the browser lists them (its on… properties). Only the same letters count, so a real
+    // event without an on… property (focusin, DOMContentLoaded) stays as written, and so does a
+    // name the program fires itself (new Event('…'), new CustomEvent('…')).
+    let ownEvents = new Set();
+    const repairedEvents = new Set();
+    function eventNameFor(target, type) {
+      if (typeof type !== 'string' || !type || ownEvents.has(type)) return type;
+      try {
+        if (('on' + type) in target) return type;
+        const fired = new Set();
+        for (let o = target; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+          for (const k of Object.getOwnPropertyNames(o)) if (k.length > 2 && k.slice(0, 2) === 'on') fired.add(k.slice(2));
+        }
+        const flat = (name) => name.toLowerCase().replace(/[-_\\s]/g, '');
+        for (const candidate of [type, /^on/i.test(type) ? type.slice(2) : '']) {
+          const to = candidate && flat(candidate);
+          if (!to || !fired.has(to)) continue;
+          if (!repairedEvents.has(type)) {
+            repairedEvents.add(type);
+            imagined("addEventListener('" + type + "') → '" + to + "': corrected while running");
+          }
+          return to;
+        }
+      } catch {}
+      return type;
+    }
+    const nativeRemoveListener = EventTarget.prototype.removeEventListener;
+    EventTarget.prototype.removeEventListener = function (type, listener, options) {
+      return nativeRemoveListener.call(this, eventNameFor(this, type), listener, options);
+    };
     const nativeAddListener = EventTarget.prototype.addEventListener;
     EventTarget.prototype.addEventListener = function (type, listener, options) {
+      type = eventNameFor(this, type);
       if (this instanceof Element) {
         if (!wiring.has(this)) wiring.set(this, []);
         wiring.get(this).push([type, listener, options]);
@@ -2686,6 +2932,8 @@ export class JavascriptRuntime {
       if (data.type !== 'execute') return;
       const { id, code } = data;
       currentExecId = id;
+      // The events it fires itself are its own names (see eventNameFor)
+      ownEvents = new Set(Array.from(String(code).matchAll(/new\\s+(?:Custom)?Event\\s*\\(\\s*['"\`]([^'"\`]+)['"\`]/g), (m) => m[1]));
       // console.log() speaks only for a program that doesn't speak itself (see logSpeaks)
       logSpeaks = !/\\bspeak\\s*\\(/.test(code);
       lastLog = '';
@@ -2750,6 +2998,7 @@ export class JavascriptRuntime {
         }
 
         attachOrphanedControls();
+        repairMisspeltWrites();
         const hasVisualElements = hasVisualNow();
 
         // A function (often the program's last line defines or exposes one) is never a reply

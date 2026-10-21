@@ -95,7 +95,7 @@ describe('value checks on browser calls', () => {
   it('catch a bug in the first seconds of a run', async () => {
     const { win, posted } = loadRunner(false);
     win.postMessage({ type: 'execute', id: 'a', code: 'document.createElement("div").setAttribute("title", undefined);' }, '*');
-    await wait(20);
+    await vi.waitFor(() => expect(posted.find((m) => m.type === 'result')).toBeDefined(), { timeout: 1000 });
     expect(posted.find((m) => m.type === 'result')).toMatchObject({ success: false });
     win.close();
   });
@@ -184,5 +184,90 @@ describe('console.log and the speech check', () => {
     await wait(30);
     expect(failed(bug.posted)).toBeDefined();
     bug.win.close();
+  });
+});
+
+describe('values the browser quietly refuses, and event names it never fires', () => {
+  const failed = (posted: any[]) => posted.find((m) => m.type === 'program_error' || (m.type === 'result' && m.error));
+
+  it('reports a value that did not take, read back on a fresh element', async () => {
+    const { win, posted } = loadRunner(false);
+    win.postMessage({ type: 'execute', id: 'r1', code: 'const i = document.createElement("input");\ni.type = "phone";\ndocument.body.append(i);' }, '*');
+    await wait(30);
+    expect(JSON.stringify(failed(posted))).toMatch(/type = 'phone' didn't take/);
+    win.close();
+  });
+
+  it('leaves values that took alone, a URL set again included', async () => {
+    const { win, posted } = loadRunner(false);
+    win.postMessage({ type: 'execute', id: 'r2', code: 'const im = document.createElement("img");\nim.src = "a.png";\nim.src = "a.png";\nim.alt = "x";\nconst i = document.createElement("input");\ni.type = "Number";\ni.placeholder = "Bill";\ndocument.body.append(im, i);' }, '*');
+    await wait(30);
+    expect(failed(posted)).toBeUndefined();
+    win.close();
+  });
+
+  it('turns a handler-property name or a case slip into the event, and leaves real and own events alone', async () => {
+    const { win, posted } = loadRunner(false);
+    const code = [
+      'const b = document.createElement("button");',
+      'document.body.append(b);',
+      'window.__hits = [];',
+      'b.addEventListener("onclick", () => __hits.push("click"));',
+      'b.addEventListener("mouse_down", () => __hits.push("down"));',
+      'b.addEventListener("focusin", () => __hits.push("focusin"));',
+      'b.addEventListener("Ready", () => __hits.push("ready"));',
+      'b.dispatchEvent(new MouseEvent("click"));',
+      'b.dispatchEvent(new MouseEvent("mousedown"));',
+      'b.dispatchEvent(new Event("Ready"));',
+    ].join('\n');
+    win.postMessage({ type: 'execute', id: 'e1', code }, '*');
+    await wait(30);
+    expect(win.__hits).toEqual(['click', 'down', 'ready']);
+    const notes = posted.filter((m) => m.type === 'imagined').map((m) => m.text);
+    expect(notes).toEqual(["addEventListener('onclick') → 'click': corrected while running", "addEventListener('mouse_down') → 'mousedown': corrected while running"]);
+    win.close();
+  });
+});
+
+describe('misspelt writes and refused keywords, repaired while running', () => {
+  const failed = (posted: any[]) => posted.find((m) => m.type === 'program_error' || (m.type === 'result' && m.error));
+  const notes = (posted: any[]) => posted.filter((m) => m.type === 'imagined').map((m) => m.text);
+
+  it('moves a misspelt handler or property to the real one, and leaves the program\'s own extras', async () => {
+    const { win, posted } = loadRunner(false);
+    const code = [
+      'const b = document.createElement("button");',
+      'document.body.append(b);',
+      'window.__hits = 0;',
+      'b.onClick = () => __hits++;',
+      'b.innerHtml = "<i>Go</i>";',
+      'b.speed = 3;',
+      'b.vx = 2;',
+      'window.__b = b;',
+    ].join('\n');
+    win.postMessage({ type: 'execute', id: 'w1', code }, '*');
+    await wait(30);
+    win.__b.click();
+    expect(win.__hits).toBe(1);
+    expect(win.__b.innerHTML).toBe('<i>Go</i>');
+    expect(win.__b.speed).toBe(3);
+    expect(win.__b.vx).toBe(2);
+    expect(notes(posted)).toEqual(['button.onClick → button.onclick: corrected while running', 'button.innerHtml → button.innerHTML: corrected while running']);
+    win.close();
+  });
+
+  it('corrects a refused keyword that is surely a slip, and lists the ones that work otherwise', async () => {
+    const slip = loadRunner(false);
+    slip.win.postMessage({ type: 'execute', id: 'k1', code: 'const i = document.createElement("input");\ni.type = "nubmer";\ndocument.body.append(i);\nwindow.__i = i;' }, '*');
+    await wait(30);
+    expect(slip.win.__i.type).toBe('number');
+    expect(failed(slip.posted)).toBeUndefined();
+    expect(notes(slip.posted)).toContain("element.type = 'nubmer' → 'number': corrected while running");
+    slip.win.close();
+    const other = loadRunner(false);
+    other.win.postMessage({ type: 'execute', id: 'k2', code: 'const i = document.createElement("input");\ni.type = "slider";\ndocument.body.append(i);' }, '*');
+    await wait(30);
+    expect(JSON.stringify(failed(other.posted))).toMatch(/It takes: text, number, range/);
+    other.win.close();
   });
 });
