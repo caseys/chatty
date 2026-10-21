@@ -14,13 +14,31 @@ import { sureMatch } from '../core/fuzzy-match.ts';
 import { elementKinds } from './element-kinds.ts';
 
 /**
+ * Wraps fn so that however often the result is called, fn runs at most once per animation frame,
+ * on the next one, and so sees the state at the end of the burst.
+ */
+export function oncePerFrame(fn: () => void, raf: (callback: () => void) => unknown): () => void {
+  let queued = false;
+  return () => {
+    if (queued) return;
+    queued = true;
+    raf(() => {
+      queued = false;
+      fn();
+    });
+  };
+}
+
+/**
  * three.js for 3D programs: a program that uses THREE finds it ready, as a global in its page.
  * It's bundled with Chatty (works offline) and loads only the first time a program uses it.
  */
-async function withThree(code: string, win: Window | null): Promise<void> {
+async function withThree(code: string, win: Window | null, live: () => boolean = () => true): Promise<void> {
   if (!win || !/\bTHREE\b/.test(code)) return;
   try {
     const THREE = await import('three');
+    // A reused frame's window is the next page's by now
+    if (!live()) return;
     (win as unknown as { THREE?: unknown }).THREE = THREE;
   } catch (err) {
     console.warn('three.js could not load:', err);
@@ -145,9 +163,12 @@ export interface PreparedExecutableCode {
  * What a trial run's sandbox page talks to instead of the app window: messages still go to the
  * app (which only watches for errors), and sound has nowhere to go. Web Audio is an
  * OfflineAudioContext that never renders, MIDI is a port that swallows everything, and speech and
- * media elements do nothing. (Source text for the sandbox page, evaluated there.)
+ * media elements do nothing. (Source text for the sandbox page, evaluated there.) Trials share one
+ * iframe, so the page carries its trial's token and stamps it on every message: a straggler from
+ * an earlier trial's page can't pass for this one's.
  */
-const TRIAL_HOST = `(() => {
+const trialHost = (token: string) => `(() => {
+  window.__chattyTrialToken = ${JSON.stringify(token)};
   let audio = null;
   const quiet = () => {
     if (audio) return audio;
@@ -173,7 +194,7 @@ const TRIAL_HOST = `(() => {
   try { HTMLMediaElement.prototype.play = () => Promise.resolve(); } catch {}
   try { window.speechSynthesis.speak = () => {}; } catch {}
   return {
-    postMessage: (message) => window.parent.postMessage(message, '*'),
+    postMessage: (message) => window.parent.postMessage({ ...message, __trial: window.__chattyTrialToken }, '*'),
     __chattySharedAudio: quiet,
     __chattyMidi: () => Promise.resolve({
       inputs: new Map(), outputs: new Map([['quiet', port]]), sysexEnabled: false,
@@ -184,6 +205,9 @@ const TRIAL_HOST = `(() => {
 
 /** How long a program runs without an error before it can be downloaded */
 const DOWNLOAD_AFTER_MS = 2500;
+
+/** How long the shared trial frame stays after its last trial, so a run of trials reuses it */
+const TRIAL_FRAME_IDLE_MS = 10_000;
 
 const AsyncFunctionCtor = Object.getPrototypeOf(async function () {}).constructor;
 
@@ -954,6 +978,9 @@ export class JavascriptRuntime {
   private cardShadow: HTMLElement | null = null;
   // Trial runs go one at a time: the end of the last one queued
   private trialQueue: Promise<unknown> = Promise.resolve();
+  // The hidden frame trials run in (each gets a new page in it), and when it is dropped for being idle
+  private trialFrame: HTMLIFrameElement | null = null;
+  private trialFrameIdle: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options?: JavascriptRuntimeOptions) {
     this.mode = options?.mode ?? 'iframe';
@@ -1187,16 +1214,20 @@ export class JavascriptRuntime {
       shadow.hidden = !shown;
       Object.assign(shadow.style, { top: `${r.top}px`, left: `${r.left}px`, width: `${r.width}px`, height: `${r.height}px` });
     };
+    // A program animating by style changes fires these every frame: measure once a frame, at its
+    // end state. The page's frames, not the program's (the sandbox counts those as its work).
+    const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame.bind(window) : (cb: () => void) => setTimeout(cb, 16);
+    const soon = oncePerFrame(update, raf);
     // Size changes (images loading, layout) and content changes (which also cover a page that
     // isn't rendering yet, when resize callbacks wait)
-    new win.ResizeObserver(update).observe(card);
-    new win.MutationObserver(() => setTimeout(update, 0)).observe(card, {
+    new win.ResizeObserver(soon).observe(card);
+    new win.MutationObserver(soon).observe(card, {
       childList: true,
       subtree: true,
       attributes: true,
       characterData: true,
     });
-    win.addEventListener('resize', update);
+    win.addEventListener('resize', soon);
     update();
   }
 
@@ -1694,8 +1725,8 @@ export class JavascriptRuntime {
   // 3. Sandboxed IFrame Runner (Visual DOM/Canvas rendering + Safe Execution)
   // --------------------------------------------------------------------------
 
-  /** The sandbox page. A trial one (hidden, muted) differs only in where the page's host calls go (TRIAL_HOST). */
-  private buildRunnerHtml(trial: boolean, host?: string): string {
+  /** The sandbox page. A trial one (hidden, muted) differs only in where the page's host calls go (trialHost, stamped with the trial's token). */
+  private buildRunnerHtml(trial: boolean, host?: string, token = ''): string {
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -1816,7 +1847,8 @@ export class JavascriptRuntime {
 <body>
   <div id="root"></div>
   <script>
-    const __chattyHost = ${host ?? (trial ? TRIAL_HOST : 'window.parent')};
+    const __chattyHost = ${host ?? (trial ? trialHost(token) : 'window.parent')};
+    const __chattyTrial = ${trial};
     const hasTopLevelReturn = ${hasTopLevelReturn.toString()};
     let currentExecId = null;
     const pendingAsyncCalls = new Map();
@@ -1953,6 +1985,30 @@ export class JavascriptRuntime {
     }
     const shown = (v) => (typeof v === 'string' ? "'" + v + "'" : String(v));
     const COLOR_PROPS = new Set(['fillStyle', 'strokeStyle', 'shadowColor']);
+    // These checks run on every canvas, audio and DOM call, which a heavy animation makes
+    // thousands of times a second. The bugs they catch show in a program's first seconds, so they
+    // stop CHECK_MS after each run starts (a new run turns them on again). A trial page checks
+    // for its whole length.
+    const CHECK_MS = 5000;
+    let checking = true;
+    let checkTimer = null;
+    function checkSet(label, key, value) {
+      if (badValue(value)) noteRejected(label + '.' + key + ' = ' + shown(typeof value === 'string' ? value.slice(0, 60) : value) + ': almost surely a bug');
+      // A canvas color the browser doesn't know is ignored without a word (the drawing keeps
+      // its old color): that is the program's error
+      else if (COLOR_PROPS.has(key) && typeof value === 'string' && window.CSS && CSS.supports && !CSS.supports('color', value)) {
+        noteRejected(label + '.' + key + ' = ' + shown(value.slice(0, 60)) + ' is not a color the browser knows, so it was ignored');
+      }
+    }
+    // A value the browser can't use: NaN or Infinity, text that says so, or undefined where the
+    // call needs a value (a required parameter: within required)
+    function checkCall(label, key, required, args) {
+      const at = args.findIndex((a, i) => (typeof a === 'number' && !Number.isFinite(a)) || (typeof a === 'string' && badValue(a)) || (a === undefined && i < required));
+      if (at >= 0) {
+        const bad = args[at];
+        noteRejected(label + '.' + key + '(' + args.map((a) => (typeof a === 'number' ? String(a) : typeof a === 'string' ? shown(a.slice(0, 40)) : a === undefined ? 'undefined' : '…')).join(', ') + ') got ' + (bad === undefined ? 'undefined' : shown(typeof bad === 'string' ? bad.slice(0, 40) : bad)) + ': almost surely a bug');
+      }
+    }
     function watchSetters(proto, label) {
       if (!proto) return;
       for (const key of Object.getOwnPropertyNames(proto)) {
@@ -1961,12 +2017,7 @@ export class JavascriptRuntime {
         Object.defineProperty(proto, key, {
           ...d,
           set(value) {
-            if (badValue(value)) noteRejected(label + '.' + key + ' = ' + shown(typeof value === 'string' ? value.slice(0, 60) : value) + ': almost surely a bug');
-            // A canvas color the browser doesn't know is ignored without a word (the drawing keeps
-            // its old color): that is the program's error
-            else if (COLOR_PROPS.has(key) && typeof value === 'string' && window.CSS && CSS.supports && !CSS.supports('color', value)) {
-              noteRejected(label + '.' + key + ' = ' + shown(value.slice(0, 60)) + ' is not a color the browser knows, so it was ignored');
-            }
+            if (checking) checkSet(label, key, value);
             return d.set.call(this, value);
           },
         });
@@ -1978,15 +2029,10 @@ export class JavascriptRuntime {
         const d = Object.getOwnPropertyDescriptor(proto, key);
         if (!d || typeof d.value !== 'function' || key === 'constructor' || !d.configurable) continue;
         const fn = d.value;
-        proto[key] = function (...args) {
-          // A value the browser can't use: NaN or Infinity, text that says so, or undefined where
-          // the call needs a value (a required parameter: within fn.length)
-          const at = args.findIndex((a, i) => (typeof a === 'number' && !Number.isFinite(a)) || (typeof a === 'string' && badValue(a)) || (a === undefined && i < fn.length));
-          if (at >= 0) {
-            const bad = args[at];
-            noteRejected(label + '.' + key + '(' + args.map((a) => (typeof a === 'number' ? String(a) : typeof a === 'string' ? shown(a.slice(0, 40)) : a === undefined ? 'undefined' : '…')).join(', ') + ') got ' + (bad === undefined ? 'undefined' : shown(typeof bad === 'string' ? bad.slice(0, 40) : bad)) + ': almost surely a bug');
-          }
-          return fn.apply(this, args);
+        // arguments, not a rest parameter: past the checking window a call allocates nothing
+        proto[key] = function () {
+          if (checking) checkCall(label, key, fn.length, Array.prototype.slice.call(arguments));
+          return fn.apply(this, arguments);
         };
       }
     }
@@ -2551,6 +2597,10 @@ export class JavascriptRuntime {
       if (data.type !== 'execute') return;
       const { id, code } = data;
       currentExecId = id;
+      // The value checks run for this program's first seconds (see CHECK_MS)
+      checking = true;
+      realClearTimeout(checkTimer);
+      if (!__chattyTrial) checkTimer = realSetTimeout(() => { checking = false; }, CHECK_MS);
       // What kind of element each looked-up id is used as (element-kinds.ts)
       idKinds = data.idKinds || {};
       // The names the music rule tells programs to declare (bpm, beat, start, out): a program
@@ -3005,11 +3055,15 @@ export class JavascriptRuntime {
   }
 
   /**
-   * Runs code in a separate hidden, muted iframe for up to ms, then removes it. Nothing is shown,
-   * spoken or played, and nothing reaches the run log or the visible card (see TRIAL_HOST).
+   * Runs code in a separate hidden, muted iframe for up to ms. Nothing is shown, spoken or played,
+   * and nothing reaches the run log or the visible card (see trialHost).
    * Resolves with the first error (as a real run reports it, including the sandbox's own checks),
    * or null when it ran that long without one. Trials queue: one at a time. If the trial page
    * can't be set up at all (no DOM), that is null too: nothing was shown to be wrong.
+   * Trials share one iframe element, kept TRIAL_FRAME_IDLE_MS after the last, and each gets a
+   * brand-new page in it. The page isn't wiped in place: the sandbox patches the built-in
+   * prototypes and a program can too (globals, listeners, timers), and only a new window is
+   * certain to be clean.
    */
   trialRun(code: string, ms = 1500): Promise<{ error: string | null; errorLine?: number; reached?: boolean }> {
     const run = this.trialQueue.then(() => this.trialNow(code, ms));
@@ -3019,14 +3073,7 @@ export class JavascriptRuntime {
 
   private trialNow(code: string, ms: number): Promise<{ error: string | null; errorLine?: number; reached?: boolean }> {
     if (typeof document === 'undefined' || !document.body) return Promise.resolve({ error: null });
-    const iframe = document.createElement('iframe');
-    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
-    iframe.setAttribute('aria-hidden', 'true');
-    iframe.setAttribute('tabindex', '-1');
-    iframe.setAttribute('title', 'Chatty trial run');
-    // Off screen, but laid out at a fixed size (canvas and DOM code reads sizes)
-    iframe.style.cssText =
-      'position:fixed;left:-10000px;top:0;width:400px;height:300px;border:0;visibility:hidden;pointer-events:none;';
+    const iframe = this.takeTrialFrame();
     const id = `trial_${++this.reqCounter}_${Date.now()}`;
 
     return new Promise((resolve) => {
@@ -3044,20 +3091,22 @@ export class JavascriptRuntime {
         clearTimeout(stopTimer);
         clearTimeout(readyTimer);
         window.removeEventListener('message', onMessage);
+        iframe.removeEventListener('load', onLoad);
         // Whether the code marked with globalThis.__chattyReached ran (see blankStage)
         let reached = false;
         try {
-          reached = !!(iframe.contentWindow as unknown as { __chattyReached?: boolean } | null)?.__chattyReached;
+          const page = iframe.contentWindow as unknown as { __chattyReached?: boolean; __chattyTrialToken?: string } | null;
+          reached = page?.__chattyTrialToken === id && !!page.__chattyReached;
         } catch {
           // frame went away
         }
-        // Removing the frame ends its timers, animation frames and audio with it
+        // An empty page replaces the program's, which ends its timers, animation frames and audio
         try {
-          iframe.src = 'about:blank';
+          iframe.srcdoc = '';
         } catch {
           // already gone
         }
-        iframe.remove();
+        this.trialFrameIdle = setTimeout(() => this.dropTrialFrame(), TRIAL_FRAME_IDLE_MS);
         resolve(error === null ? { error: null, reached } : { error, errorLine, reached });
       };
 
@@ -3068,18 +3117,30 @@ export class JavascriptRuntime {
         clearTimeout(readyTimer);
         stopTimer = setTimeout(() => finish(null), ms);
         try {
-          void withThree(code, iframe.contentWindow).then(() =>
-            iframe.contentWindow?.postMessage({ type: 'execute', id, code, idKinds: elementKinds(code) }, '*')
-          );
+          // Not if the trial ended while three.js loaded: the frame is the next trial's by then
+          void withThree(code, iframe.contentWindow, () => !finished).then(() => {
+            if (!finished) iframe.contentWindow?.postMessage({ type: 'execute', id, code, idKinds: elementKinds(code) }, '*');
+          });
         } catch (err) {
           finish(err instanceof Error ? err.message : String(err));
         }
       };
 
+      // The frame also loads the empty page between trials: only this trial's page counts
+      const onLoad = (): void => {
+        const page = iframe.contentWindow as unknown as { __chattyTrialToken?: string } | null;
+        if (page?.__chattyTrialToken !== id) return;
+        setTimeout(() => {
+          if (!ready) start();
+        }, 50);
+      };
+
       const onMessage = (event: MessageEvent<any>): void => {
         if (event.source !== iframe.contentWindow) return;
         const data = event.data;
-        if (!data || typeof data !== 'object') return;
+        // The frame's window outlives its pages: a late message from an earlier trial's page
+        // arrives from the same source, but with that trial's token
+        if (!data || typeof data !== 'object' || data.__trial !== id) return;
         const line = typeof data.line === 'number' ? data.line : typeof data.errorLine === 'number' ? data.errorLine : undefined;
         if (data.type === 'iframe_ready') {
           ready = true;
@@ -3119,19 +3180,38 @@ export class JavascriptRuntime {
 
       try {
         window.addEventListener('message', onMessage);
-        iframe.addEventListener('load', () => {
-          setTimeout(() => {
-            if (!ready) start();
-          }, 50);
-        });
+        iframe.addEventListener('load', onLoad);
         // Fallback if the ready signal never comes
         readyTimer = setTimeout(start, 600);
-        document.body.appendChild(iframe);
-        iframe.srcdoc = this.buildRunnerHtml(true);
+        iframe.srcdoc = this.buildRunnerHtml(true, undefined, id);
       } catch (err) {
         finish(err instanceof Error ? err.message : String(err));
       }
     });
+  }
+
+  /** The shared trial frame, made when there isn't one: off screen, but laid out at a fixed size (canvas and DOM code reads sizes) */
+  private takeTrialFrame(): HTMLIFrameElement {
+    if (this.trialFrameIdle) clearTimeout(this.trialFrameIdle);
+    this.trialFrameIdle = null;
+    if (this.trialFrame?.isConnected) return this.trialFrame;
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.setAttribute('tabindex', '-1');
+    iframe.setAttribute('title', 'Chatty trial run');
+    iframe.style.cssText =
+      'position:fixed;left:-10000px;top:0;width:400px;height:300px;border:0;visibility:hidden;pointer-events:none;';
+    document.body.appendChild(iframe);
+    this.trialFrame = iframe;
+    return iframe;
+  }
+
+  private dropTrialFrame(): void {
+    if (this.trialFrameIdle) clearTimeout(this.trialFrameIdle);
+    this.trialFrameIdle = null;
+    this.trialFrame?.remove();
+    this.trialFrame = null;
   }
 
   dispose(): void {
@@ -3152,6 +3232,7 @@ export class JavascriptRuntime {
       this.activeIframe.remove();
       this.activeIframe = null;
     }
+    this.dropTrialFrame();
   }
 }
 

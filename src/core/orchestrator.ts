@@ -472,6 +472,8 @@ export function prefersLineFix(modelId: string): boolean {
 
 /** The run status once every fix try has failed (the page clears the card on it) */
 export const GAVE_UP_STATUS = `(gave up after ${MAX_FIX_TRIES} tries)`;
+/** The run note for a fresh ask after a talk-only reply: not a fix */
+export const GENERATING_NOTE = 'Generating…';
 
 /** What Chatty says when the last fix attempt failed too */
 function gaveUpText(error: string): string {
@@ -1165,7 +1167,7 @@ export class ConversationOrchestrator {
             // chat, and aloud in speech mode
             if (!announcedCoding && !options?.autoFix && (CODING_LINE.test(currentFull) || STREAM_MARKUP.test(currentFull))) {
               announcedCoding = true;
-              this.addFixNote('Generating…', turnId);
+              this.addFixNote(GENERATING_NOTE, turnId);
               void this.speakOutOfTurn('Generating.');
             }
 

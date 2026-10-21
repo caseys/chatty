@@ -6,6 +6,7 @@
 // ============================================================================
 
 import { SharedAudioSubsystem } from '../audio/audio-subsystem.ts';
+import type { InterfaceSound } from '../audio/interface-sounds.ts';
 import { ConversationMemoryStore } from './memory-store.ts';
 import { ModelManager } from './model-manager.ts';
 import { classifyTranscript, ConversationOrchestrator, type RunStatus } from './orchestrator.ts';
@@ -62,6 +63,20 @@ const WELCOME_MESSAGE = 'Welcome to Chatty, I can do anything your browser can d
 const WELCOMED_KEY = 'chatty_welcomed';
 /** Events in which browsers let a page start sound */
 const AUDIO_GESTURES = ['pointerdown', 'pointerup', 'touchend', 'click', 'keydown'];
+/** The play_music tool and playNotes schedule a whole tune on the audio clock and report nothing: the context stays awake this long after one starts */
+const TOOL_AUDIO_HOLD_MS = 120_000;
+
+/** A turn is under way: input being taken in, context built, or a reply (or a fix) being written */
+function turnWorking(snap: CoordinatedStateSnapshot): boolean {
+  return (
+    snap.interaction === 'finalizing_input' ||
+    snap.interaction === 'building_context' ||
+    snap.interaction === 'compacting' ||
+    snap.interaction === 'generating' ||
+    snap.turn === 'processing_input' ||
+    snap.turn === 'generating'
+  );
+}
 /** Chats kept: a new chat beyond this deletes the one used least recently */
 const MAX_CHATS = 10;
 const WELCOME_BACK_MESSAGE = 'Welcome back, what would you like to do with this browser?';
@@ -247,9 +262,11 @@ export class VoiceAssistantEngine {
     });
     // The audio session follows the mic and what plays (see updateAudioSession)
     this.stateCoordinator.subscribe((snap) => {
-      if (snap.microphone === this.lastSessionMic && snap.playback === this.lastSessionPlayback) return;
+      const working = turnWorking(snap);
+      if (snap.microphone === this.lastSessionMic && snap.playback === this.lastSessionPlayback && working === this.lastSessionWorking) return;
       this.lastSessionMic = snap.microphone;
       this.lastSessionPlayback = snap.playback;
+      this.lastSessionWorking = working;
       this.updateAudioSession();
     });
     // Browsers start audio only in a tap or key press: every one, anywhere in Chatty (the
@@ -265,7 +282,8 @@ export class VoiceAssistantEngine {
       // A program that asks for audio before the first tap gets the one shared context too (made
       // now, paused until a tap), never one of its own
       getSharedAudioContext: () => {
-        if (!this.audioSubsystem.getAudioContext()) void this.audioSubsystem.ensureAudioContext().catch(() => {});
+        // Also wakes a context the idle timer put to sleep (and restarts its idle clock)
+        if (this.audioSubsystem.getAudioContext()?.state !== 'running') void this.audioSubsystem.ensureAudioContext().catch(() => {});
         return this.audioSubsystem.getAudioContext();
       },
       onProgramError: (message, line) => this.orchestrator.reportProgramError(message, line),
@@ -274,11 +292,21 @@ export class VoiceAssistantEngine {
         this.updateAudioSession();
         this.events.onProgramSound?.(sounding);
       },
-      onProgramActivity: (active) => this.events.onProgramActivity?.(active),
+      onProgramActivity: (active) => {
+        this.programRunning = active;
+        this.updateAudioSession();
+        this.events.onProgramActivity?.(active);
+        if (!active && this.programReturned) this.programEnded();
+      },
       onDownloadableChange: (ready) => this.events.onProgramDownloadable?.(ready),
-      onRunLog: (kind, text) => appendRunLog(kind, text),
+      onRunLog: (kind, text) => {
+        appendRunLog(kind, text);
+        // Every run of a program starts with its code in the log
+        if (kind === 'program') this.programStarted();
+      },
       onResult: (res) => {
         this.events.onJavascriptExecution?.(res);
+        this.programFinishedTopLevel();
       },
       onVisualChange: (hasVisual, iframe) => {
         this.events.onJavascriptVisualChange?.(hasVisual, iframe);
@@ -340,7 +368,7 @@ export class VoiceAssistantEngine {
       enableSpeechOutput: this.speechEnabled,
       autoFixErrors: true,
       javascriptRuntime: this.jsRuntime,
-      audioContextAccessor: () => this.audioSubsystem.ensureAudioContext(),
+      audioContextAccessor: this.toolAudioContext,
       tools: [],
       getConversationId: () => this.activeConversationId,
       shouldAutoTitle: (conversationId) => {
@@ -407,7 +435,7 @@ export class VoiceAssistantEngine {
     // and helper calls fired by timers/handlers after their run has finished).
     this.jsRuntime.setDefaultOptions({
       onSpeak: (text) => void this.orchestrator.speakOutOfTurn(text),
-      audioContextAccessor: () => this.audioSubsystem.ensureAudioContext(),
+      audioContextAccessor: this.toolAudioContext,
     });
 
     // Subscribe to state machine changes
@@ -981,8 +1009,52 @@ export class VoiceAssistantEngine {
   }
 
   private programSounding = false;
+  // The program has timers, animation frames or async work pending (onProgramActivity)
+  private programRunning = false;
   private lastSessionMic: string | null = null;
   private lastSessionPlayback: string | null = null;
+  private lastSessionWorking = false;
+  // A program's run, for its start and end sounds: it started, its top level has finished, and
+  // the check for an end once its pending work is reported
+  private programLive = false;
+  private programReturned = false;
+  private programEndCheck: ReturnType<typeof setTimeout> | null = null;
+
+  /** A short, quiet interface sound (interface-sounds.ts) */
+  playInterfaceSound(sound: InterfaceSound): void {
+    this.audioSubsystem?.playInterfaceSound(sound);
+  }
+
+  private programStarted(): void {
+    if (this.programEndCheck) clearTimeout(this.programEndCheck);
+    this.programEndCheck = null;
+    this.programLive = true;
+    this.programReturned = false;
+    this.playInterfaceSound('start');
+  }
+
+  /**
+   * The program's top level is done: it has ended unless it left work pending. The sandbox
+   * reports pending work 200 ms after it starts, so this looks a little later than that.
+   */
+  private programFinishedTopLevel(): void {
+    if (!this.programLive) return;
+    this.programReturned = true;
+    if (this.programEndCheck) clearTimeout(this.programEndCheck);
+    this.programEndCheck = setTimeout(() => {
+      this.programEndCheck = null;
+      if (!this.programRunning) this.programEnded();
+    }, 400);
+  }
+
+  private programEnded(): void {
+    if (this.programEndCheck) clearTimeout(this.programEndCheck);
+    this.programEndCheck = null;
+    if (!this.programLive) return;
+    this.programLive = false;
+    this.programReturned = false;
+    this.playInterfaceSound('end');
+  }
 
   /**
    * The browser's audio session follows what is happening: 'play-and-record' only while the mic
@@ -995,7 +1067,17 @@ export class VoiceAssistantEngine {
     const micOn = snap.microphone === 'listening' || snap.microphone === 'requesting_permission';
     const sounding = this.programSounding || snap.playback === 'playing' || snap.playback === 'buffering';
     this.audioSubsystem?.setAudioSessionType(micOn ? 'play-and-record' : sounding ? 'playback' : 'auto');
+    // The shared context sleeps once none of these has held it awake for a while. A turn holds it
+    // from the tap that sent it: the program it writes may play sound long after that tap, and
+    // Safari may not wake a sleeping context outside one
+    this.audioSubsystem?.setAudioInUse(micOn || sounding || this.programRunning || turnWorking(snap));
   }
+
+  /** The audio for tools; asking for it holds the context awake for a tune (see TOOL_AUDIO_HOLD_MS) */
+  private toolAudioContext = (): Promise<AudioContext> => {
+    this.audioSubsystem.holdAudio(TOOL_AUDIO_HOLD_MS);
+    return this.audioSubsystem.ensureAudioContext();
+  };
 
   /** What programs did, as text (see run-log.ts) */
   getRunLog(): string {

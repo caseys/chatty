@@ -3,6 +3,8 @@
 // (Spec Sections 3.1, 3.4, 5)
 // ============================================================================
 
+import { playInterfaceSound, type InterfaceSound } from './interface-sounds.ts';
+
 export interface VadConfig {
   rmsThreshold: number;
   speechOnsetFrames: number;
@@ -165,8 +167,18 @@ export class VoiceActivityDetector {
   }
 }
 
+/** A running context keeps the audio hardware awake, which drains a phone: it sleeps after this long unused */
+export const AUDIO_IDLE_SUSPEND_MS = 30_000;
+
 export class SharedAudioSubsystem {
   private audioCtx: AudioContext | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private suspendInFlight: Promise<void> | null = null;
+  // Set when the idle timer suspended the context: the foreground and route handlers leave it asleep
+  private suspendedForIdle = false;
+  /** The host's say-so that something outside this class needs the audio (mic, Chatty's voice, a program) */
+  private audioInUse = false;
+  private holdUntil = 0;
   // Created before the mic was ever opened (typed input, a program): rebuilt once capture starts
   private contextPredatesCapture = false;
   private audioListenersInstalled = false;
@@ -190,6 +202,10 @@ export class SharedAudioSubsystem {
   private outputTimeDomainBuffer = new Float32Array(128);
   private sessionChunks: Float32Array[] = [];
   private sessionSamplesCount = 0;
+  // Interface sounds play one after another (from nextSoundAt, context time); while one rings
+  // (until soundHeardUntil, performance.now() time) the mic can't start an utterance
+  private nextSoundAt = 0;
+  private soundHeardUntil = 0;
 
   constructor(events?: AudioSubsystemEvents, vadConfig?: Partial<VadConfig>) {
     this.events = events ?? {};
@@ -224,12 +240,69 @@ export class SharedAudioSubsystem {
     }
   }
 
+  /** The host tells whether anything outside this class needs the audio now; the idle clock runs while nothing does. */
+  setAudioInUse(inUse: boolean): void {
+    if (this.audioInUse === inUse) return;
+    this.audioInUse = inUse;
+    this.updateIdleSuspend();
+  }
+
+  /**
+   * Keeps the context awake at least `ms` from now. For sound scheduled ahead on the audio clock
+   * that nothing reports on (the play_music tool and playNotes): a long tune must not be paused
+   * mid-song.
+   */
+  holdAudio(ms: number): void {
+    this.holdUntil = Math.max(this.holdUntil, Date.now() + ms);
+    this.updateIdleSuspend();
+  }
+
+  private audioBusy(): boolean {
+    return (
+      this.audioInUse ||
+      this.isCapturing ||
+      this.pendingMicStart !== null ||
+      this.activeSources.size > 0
+    );
+  }
+
+  /** Restarts the idle clock (or stops it while the audio is busy); when it runs out the context is suspended. */
+  private updateIdleSuspend(): void {
+    if (this.idleTimer !== null) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    const ctx = this.audioCtx;
+    if (!ctx || ctx.state !== 'running' || this.audioBusy()) return;
+    const wait = Math.max(AUDIO_IDLE_SUSPEND_MS, this.holdUntil - Date.now());
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (this.audioCtx !== ctx || ctx.state !== 'running') return;
+      // Every start of activity cancels this timer, so this only guards a missed one
+      if (this.audioBusy()) return;
+      console.debug('[AudioSubsystem] Audio idle: suspending the AudioContext');
+      this.suspendedForIdle = true;
+      const suspending = ctx
+        .suspend()
+        .catch(() => {
+          this.suspendedForIdle = false;
+        })
+        .finally(() => {
+          if (this.suspendInFlight === suspending) this.suspendInFlight = null;
+        });
+      this.suspendInFlight = suspending;
+    }, wait);
+  }
+
   /** Closes the shared context so the next ensureAudioContext() makes a fresh one. */
   private async replaceAudioContext(): Promise<void> {
     const old = this.audioCtx;
     if (!old) return;
     this.stopAllPlaybackImmediately();
     this.audioCtx = null;
+    if (this.idleTimer !== null) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+    this.suspendedForIdle = false;
     this.outputAnalyser = null;
     this.nextScheduledPlayTime = 0;
     await old.close().catch(() => {});
@@ -243,7 +316,8 @@ export class SharedAudioSubsystem {
    * needs before it lets later sound out of a running context
    */
   unlockInGesture(): void {
-    const running = this.audioCtx?.state === 'running';
+    // A suspend on its way counts as not running: resume in this gesture once it lands
+    const running = this.audioCtx?.state === 'running' && !this.suspendInFlight;
     if (!running) void this.ensureAudioContext().catch(() => {});
     const context = this.audioCtx;
     if (!context || this.gestureSoundPlayed) return;
@@ -285,7 +359,10 @@ export class SharedAudioSubsystem {
         if (state === 'interrupted') {
           this.events.onAudioInterrupted?.();
         } else if (state === 'running') {
+          this.suspendedForIdle = false;
           this.events.onAudioResumed?.();
+          // Woken by something (a tap, a program): asleep again after the idle time
+          this.updateIdleSuspend();
         }
       };
 
@@ -298,6 +375,7 @@ export class SharedAudioSubsystem {
           console.debug('[AudioSubsystem] Audio devices changed (Bluetooth / headset route switch)');
           if (
             this.audioCtx &&
+            !(this.suspendedForIdle && this.audioCtx.state === 'suspended') &&
             (this.audioCtx.state === 'suspended' || (this.audioCtx.state as string) === 'interrupted')
           ) {
             await this.audioCtx.resume().catch(() => {});
@@ -310,8 +388,8 @@ export class SharedAudioSubsystem {
         document.addEventListener('visibilitychange', async () => {
           if (!document.hidden && this.audioCtx) {
             if (
-              this.audioCtx.state === 'suspended' ||
-              (this.audioCtx.state as string) === 'interrupted'
+              !(this.suspendedForIdle && this.audioCtx.state === 'suspended') &&
+              (this.audioCtx.state === 'suspended' || (this.audioCtx.state as string) === 'interrupted')
             ) {
               await this.audioCtx.resume().catch(() => {});
             }
@@ -320,9 +398,13 @@ export class SharedAudioSubsystem {
       }
     }
 
+    // An idle suspend still landing finishes first, so this resume is the last word
+    if (this.suspendInFlight) await this.suspendInFlight;
     if (this.audioCtx.state === 'suspended' || (this.audioCtx.state as string) === 'interrupted') {
       await this.audioCtx.resume();
     }
+    this.suspendedForIdle = false;
+    this.updateIdleSuspend();
     if (!this.outputAnalyser && typeof this.audioCtx.createAnalyser === 'function') {
       this.outputAnalyser = this.audioCtx.createAnalyser();
       this.outputAnalyser.fftSize = 256;
@@ -443,7 +525,7 @@ export class SharedAudioSubsystem {
         this.sessionSamplesCount += resampled16k.length;
       }
 
-      const vadOutcome = this.vad.processFrame16k(resampled16k, performance.now());
+      const vadOutcome = this.vad.processFrame16k(this.heardByDetector(resampled16k), performance.now());
 
       this.events.onInputLevel?.(vadOutcome.rms, this.vad.speaking);
       this.events.onAudioChunk16k?.(resampled16k, vadOutcome.rms, this.vad.speaking);
@@ -462,6 +544,7 @@ export class SharedAudioSubsystem {
     this.processorSink.gain.value = 0;
     this.processorNode.connect(this.processorSink).connect(ctx.destination);
     this.isCapturing = true;
+    this.updateIdleSuspend();
   }
 
   /** What the browser actually applied to the mic (iOS can quietly ignore a requested setting). */
@@ -522,6 +605,7 @@ export class SharedAudioSubsystem {
     }
 
     this.events.onInputLevel?.(0, false);
+    this.updateIdleSuspend();
     return remainingUtterance;
   }
 
@@ -549,6 +633,7 @@ export class SharedAudioSubsystem {
     this.nextScheduledPlayTime = startAt + audioBuffer.duration;
 
     this.activeSources.add(source);
+    this.updateIdleSuspend();
     const rms = computeRmsLevel(samples);
     this.events.onOutputLevel?.(rms);
 
@@ -567,6 +652,7 @@ export class SharedAudioSubsystem {
           this.outputTimeDomainBuffer.fill(0);
           this.events.onOutputLevel?.(0);
           this.events.onPlaybackEnded?.();
+          this.updateIdleSuspend();
         }
         resolve();
       };
@@ -577,6 +663,46 @@ export class SharedAudioSubsystem {
         resolve();
       }
     });
+  }
+
+  /**
+   * What the speech detector hears of a mic frame. An interface sound can't start an utterance
+   * (Whistle would write the chime down as words): while one rings it hears silence. Speech
+   * already under way is heard as it is.
+   */
+  private heardByDetector(frame16k: Float32Array): Float32Array {
+    if (this.vad.speaking || performance.now() >= this.soundHeardUntil) return frame16k;
+    return new Float32Array(frame16k.length);
+  }
+
+  /**
+   * A short, quiet interface sound (interface-sounds.ts), after any still playing. Only on a
+   * context a tap has made: none is made for it. One asleep is woken, and a sound that would come
+   * late is dropped. Playing it restarts the idle clock.
+   */
+  playInterfaceSound(sound: InterfaceSound): void {
+    const ctx = this.audioCtx;
+    if (!ctx) return;
+    const asked = performance.now();
+    const play = (context: AudioContext) => {
+      if (context !== this.audioCtx || context.state !== 'running' || performance.now() - asked > 400) return;
+      // At once (the next block the context renders), unless one is still sounding: no delay of its
+      // own on top of the context's 'balanced' output latency
+      const at = Math.max(context.currentTime, this.nextSoundAt);
+      // Sounds piling up (a burst of events): drop this one rather than play it long after
+      if (at - context.currentTime > 1) return;
+      try {
+        const { next, end } = playInterfaceSound(context, context.destination, sound, at);
+        this.nextSoundAt = next;
+        // A little after it fades, for the room's echo
+        this.soundHeardUntil = Math.max(this.soundHeardUntil, performance.now() + (end - context.currentTime) * 1000 + 150);
+        this.updateIdleSuspend();
+      } catch {
+        // No sound this time
+      }
+    };
+    if (ctx.state === 'running' && !this.suspendInFlight) play(ctx);
+    else void this.ensureAudioContext().then(play, () => {});
   }
 
   /**
@@ -602,5 +728,6 @@ export class SharedAudioSubsystem {
       this.nextScheduledPlayTime = 0;
     }
     this.events.onOutputLevel?.(0);
+    this.updateIdleSuspend();
   }
 }

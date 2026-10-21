@@ -12,8 +12,10 @@ import { clearModelCache, getModelCacheBytes } from './core/model-cache.ts';
 import { isAppleMobile, SUPPORTED_CHAT_MODELS } from './core/settings.ts';
 import { AFTER_LOAD_MS, settle } from './core/settle.ts';
 import { decodeProgramHash, encodeProgramHash } from './share-link.ts';
+import { createFrameCoalescer } from './frame-coalescer.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
-import { GAVE_UP_STATUS, type RunStatus } from './core/orchestrator.ts';
+import { GAVE_UP_STATUS, GENERATING_NOTE, type RunStatus } from './core/orchestrator.ts';
+import type { InterfaceSound } from './audio/interface-sounds.ts';
 import { createToolSummaryElement, parseStreamingToolCall, stripToolCallMarkup } from './tools/tool-formatter.ts';
 
 type LoadKind = 'llm' | 'tts' | 'stt';
@@ -88,6 +90,8 @@ export class MinimalVoiceApp {
   private lastRawOutput = '';
   /** The newest program, speak() lines included (what Share links to) */
   private panelCode = '';
+  // Streamed tokens repaint the panel at most once a frame (see setRawOutput)
+  private rawOutputFrame = createFrameCoalescer<string>((code) => this.paintRawOutput(code));
   private sharedProgram: string | null = null;
   // Chat bubbles by message id and by turn (streamed text arrives before the reply is saved)
   private bubbles = new Map<string, HTMLElement>();
@@ -95,6 +99,9 @@ export class MinimalVoiceApp {
   private interimUserBubble: HTMLElement | null = null;
   /** True while a saved chat is redrawn, so its messages appear without the entering animation */
   private restoringChat = false;
+  // The interface sounds each chat bubble has played: one of each kind, when its text first shows
+  private bubbleSounds = new WeakMap<HTMLElement, Set<InterfaceSound>>();
+  private userSoundPlayed = false;
   private downloadRate = { label: '', bytes: 0, time: 0, rate: 0 };
   private inputCanvas = document.getElementById('input-waveform') as HTMLCanvasElement | null;
   private outputCanvas = document.getElementById('output-waveform') as HTMLCanvasElement | null;
@@ -208,7 +215,7 @@ export class MinimalVoiceApp {
           this.rawOutputTurnId = turnId;
           this.setRunStatus(null);
         }
-        this.setRawOutput(raw);
+        this.setRawOutput(raw, true);
       },
       onRunStatus: (_turnId, status) => {
         // Every fix failed: the run log shows what happened, without a tap
@@ -407,6 +414,9 @@ export class MinimalVoiceApp {
       if (this.chatInput) this.chatInput.value = '';
       // Sent: the field lets go (the card stays stepped back until the turn is done)
       this.chatInput?.blur();
+      // Its sound now, in the tap: the message can take a while to show (a long chat is compacted first)
+      this.engine.playInterfaceSound('user');
+      this.userSoundPlayed = true;
       void this.engine.submitText(text);
     });
     this.chatInput?.addEventListener('focus', () => {
@@ -823,6 +833,7 @@ export class MinimalVoiceApp {
     }
 
     if (displayText) {
+      this.soundForBubble(target, fromProgram ? 'output' : 'chat');
       // What a running program said (not the chat model) is marked as its Output
       if (fromProgram) {
         const source = document.createElement('div');
@@ -924,6 +935,7 @@ export class MinimalVoiceApp {
     note.prepend(source);
     this.chatLogEl?.appendChild(note);
     this.bubbles.set(msg.id, note);
+    this.soundForBubble(note, msg.fixNotice === GENERATING_NOTE ? 'output' : 'fix');
     this.scrollChatToBottom();
   }
 
@@ -935,7 +947,20 @@ export class MinimalVoiceApp {
     bubble.classList.remove('interim');
     bubble.textContent = msg.canonicalContent;
     this.bubbles.set(msg.id, bubble);
+    // A typed message sounded when it was sent; a spoken one sounds as it shows
+    if (this.userSoundPlayed) this.userSoundPlayed = false;
+    else this.soundForBubble(bubble, 'user');
     this.scrollChatToBottom();
+  }
+
+  /** A bubble's interface sound, the first time its text of that kind shows (not for a chat being restored) */
+  private soundForBubble(bubble: HTMLElement, sound: InterfaceSound): void {
+    if (this.restoringChat) return;
+    const played = this.bubbleSounds.get(bubble) ?? new Set<InterfaceSound>();
+    if (played.has(sound)) return;
+    played.add(sound);
+    this.bubbleSounds.set(bubble, played);
+    this.engine.playInterfaceSound(sound);
   }
 
   private bubbleForTurn(turnId: string): HTMLElement {
@@ -957,27 +982,40 @@ export class MinimalVoiceApp {
   /**
    * Shows the model's raw output as highlighted code, kept scrolled to the newest text.
    * speak() lines are left out: what was said is in the chat.
+   * Streamed tokens only update the text here; the painting (highlighting the whole program is
+   * slow) waits for the next frame, and every other call paints at once.
    */
-  private setRawOutput(text: string): void {
+  private setRawOutput(text: string, streaming = false): void {
     if (!this.rawOutputEl) return;
     this.lastRawOutput = text;
-    if (this.showingRunLog) {
-      this.rawOutputEl.textContent = `${formatRepairTally(repairTally())}\n\n${this.engine.getRunLog() || 'Nothing has run yet.'}`;
-      this.rawOutputEl.scrollTop = this.rawOutputEl.scrollHeight;
-      return;
+    let code = '';
+    if (!this.showingRunLog) {
+      // Without speak() lines (they're in the chat) and without code fences: an unmatched ``` reads
+      // as an open template string and would turn everything after it into one green string
+      const unfenced = text
+        .split('\n')
+        .filter((line) => !/^\s*(?:(?:javascript|js|html|css)[ \t:]*)?(?:```|~~~|"""|''')[\w-]*\s*$/i.test(line));
+      // Set now, not in the frame: Share reads it between frames
+      this.panelCode = unfenced.join('\n').trim();
+      code = unfenced
+        .filter((line) => !/^\s*(?:await\s+)?speak\(.*\);?\s*$/.test(line))
+        .join('\n')
+        .trim();
     }
-    // Without speak() lines (they're in the chat) and without code fences: an unmatched ``` reads
-    // as an open template string and would turn everything after it into one green string
-    const unfenced = text
-      .split('\n')
-      .filter((line) => !/^\s*(?:(?:javascript|js|html|css)[ \t:]*)?(?:```|~~~|"""|''')[\w-]*\s*$/i.test(line));
-    this.panelCode = unfenced.join('\n').trim();
-    const code = unfenced
-      .filter((line) => !/^\s*(?:await\s+)?speak\(.*\);?\s*$/.test(line))
-      .join('\n')
-      .trim();
-    this.rawOutputEl.innerHTML = Prism.highlight(code, Prism.languages.javascript, 'javascript');
-    this.rawOutputEl.scrollTop = this.rawOutputEl.scrollHeight;
+    this.rawOutputFrame.push(code);
+    if (!streaming) this.rawOutputFrame.flush();
+  }
+
+  /** Draws the run log or the highlighted code, scrolled to the end */
+  private paintRawOutput(code: string): void {
+    const el = this.rawOutputEl;
+    if (!el) return;
+    if (this.showingRunLog) {
+      el.textContent = `${formatRepairTally(repairTally())}\n\n${this.engine.getRunLog() || 'Nothing has run yet.'}`;
+    } else {
+      el.innerHTML = Prism.highlight(code, Prism.languages.javascript, 'javascript');
+    }
+    el.scrollTop = el.scrollHeight;
   }
 
   /** Shows a program from a #program= link in the code panel. It runs only when the user clicks. */
@@ -1042,6 +1080,8 @@ export class MinimalVoiceApp {
 
   /** Copies what the code panel shows (the run log, or the code) and says so on the link */
   private async copyRawPanel(link: HTMLElement): Promise<void> {
+    // It copies the panel's text: paint any streamed text still waiting for its frame
+    this.rawOutputFrame.flush();
     const text = this.showingRunLog ? this.engine.getRunLog() : (this.rawOutputEl?.textContent ?? '');
     let copied = false;
     try {
