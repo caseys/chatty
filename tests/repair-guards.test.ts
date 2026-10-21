@@ -522,3 +522,17 @@ describe('the app’s own greeting copied into a program', () => {
     expect(dropCopiedExample('speak("Welcome to the countdown!");\nroot.textContent = 1;').dropped).toBe(false);
   });
 });
+
+describe('the mark a test copy carries, as the browser prints it in an error', () => {
+  it('is taken out whether or not the browser shows its assignment, with the expression whole', async () => {
+    const { unmarkReached } = await import('../src/core/orchestrator.ts');
+    // The real messages: Chrome prints the call site without the assignment; the with-assignment form is the source text
+    expect(unmarkReached('(globalThis.__chattyReached , synth).create is not a function')).toBe('synth.create is not a function');
+    expect(unmarkReached('((globalThis.__chattyReached = true), synth).create is not a function')).toBe('synth.create is not a function');
+    expect(unmarkReached("(((globalThis.__chattyReached = true), document.getElementById('result'))).getContext is not a function")).toBe("(document.getElementById('result')).getContext is not a function");
+    expect(unmarkReached('(globalThis.__chattyReached , a.b(c, (d))).e is not a function. (In \'x\', \'y\' is undefined)')).toBe("a.b(c, (d)).e is not a function. (In 'x', 'y' is undefined)");
+    // Two marks in one message, and a message with none
+    expect(unmarkReached('(globalThis.__chattyReached , a) and ((globalThis.__chattyReached = true), b)')).toBe('a and b');
+    expect(unmarkReached('x.y is not a function')).toBe('x.y is not a function');
+  });
+});

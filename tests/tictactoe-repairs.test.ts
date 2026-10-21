@@ -189,3 +189,68 @@ const parsesAs = (code: string) => {
     return false;
   }
 };
+
+describe('a factory called on a class', () => {
+  class Loop {
+    start() {}
+  }
+  const scope = { Tone: { Loop } } as unknown as Record<string, unknown>;
+
+  it('becomes new Class(…), as in the C major scale Qwen3 0.6B wrote (Tone.Loop.create)', () => {
+    const code = 'const loop = Tone.Loop.create((time) => {}, "8n");\nloop.start(0);\nconst two = Tone.Loop.create(cb, "4n");';
+    const hint = errorHint(code, 'Tone.Loop.create is not a function', 1, { ids: [], scope });
+    expect(hint?.correction?.code).toBe('const loop = new Tone.Loop((time) => {}, "8n");\nloop.start(0);\nconst two = new Tone.Loop(cb, "4n");');
+    // The program's own class
+    const own = 'class Ball { constructor(x) { this.x = x; } }\nconst b = Ball.make(3);';
+    expect(errorHint(own, 'Ball.make is not a function', 2, { ids: [], scope })?.correction?.code).toBe('class Ball { constructor(x) { this.x = x; } }\nconst b = new Ball(3);');
+  });
+
+  it('is left alone: a factory the class has, a method that is no factory, a name that is no class, an object that is not one', () => {
+    class Made {
+      static create() {
+        return new Made();
+      }
+    }
+    expect(errorHint('Made.create();', 'Made.create is not a function', 1, { ids: [], scope: { Made } as unknown as Record<string, unknown> })?.correction).toBeUndefined();
+    expect(errorHint('Tone.Loop.start();', 'Tone.Loop.start is not a function', 1, { ids: [], scope })?.correction).toBeUndefined();
+    expect(errorHint('Tone.Nothing.create();', 'Tone.Nothing.create is not a function', 1, { ids: [], scope })?.correction).toBeUndefined();
+    expect(errorHint('const factory = { make() {} };\nfactory.build();', 'factory.build is not a function', 2, { ids: [], scope })?.correction).toBeUndefined();
+    expect(errorHint('Tone.Loop.create();', 'Tone.Loop.create is not a function', 1)?.correction).toBeUndefined();
+  });
+});
+
+describe('a page written in a template string, with a script that has template strings of its own', () => {
+  // The tic-tac-toe program Qwen3 0.6B wrote: its script's backtick ended the string
+  const PAGE = [
+    'document.body.innerHTML = `',
+    '  <div id="board"></div>',
+    '  <script>',
+    '    const cells = [];',
+    '    function draw() {',
+    '      cells.forEach((cell) => {',
+    '        cell.innerHTML = ` <span class="cell-text">${cell.innerText || \'\'}</span>`;',
+    '      });',
+    '    }',
+    '    draw();',
+    '  </script>',
+    '`;',
+  ].join('\n');
+
+  it('has the script’s backticks and ${ escaped, and then parses and holds the script whole', async () => {
+    const { escapeScriptBackticks } = await import('../src/core/error-hints.ts');
+    expect(PAGE).toBeTruthy();
+    const fixed = escapeScriptBackticks(PAGE)!;
+    expect(fixed.scripts).toBe(1);
+    expect(fixed.code).toContain('cell.innerHTML = \\` <span class="cell-text">\\${cell.innerText');
+    // The page it sets holds the script as the program wrote it
+    const html = new Function(`let out; const document = { body: { set innerHTML(v) { out = v; } } }; ${fixed.code}; return out;`)() as string;
+    expect(html).toContain("cell.innerHTML = ` <span class=\"cell-text\">${cell.innerText || ''}</span>`;");
+  });
+
+  it('is left alone: a program that parses, a script with no template string, a program that still does not parse', async () => {
+    const { escapeScriptBackticks } = await import('../src/core/error-hints.ts');
+    expect(escapeScriptBackticks('document.body.innerHTML = `<p>x</p><script>const a = 1;</script>`;')).toBeNull();
+    expect(escapeScriptBackticks('const t = `<script>${1}</script>`;')).toBeNull();
+    expect(escapeScriptBackticks('document.body.innerHTML = `<script>const a = 1;</script>`; const = ;')).toBeNull();
+  });
+});

@@ -268,6 +268,13 @@ function notDefined(code: string, error: string, errorLine?: number, page?: Page
   // or of a browser global (requestAnimationFrme) used as that global can be
   const tree = analyse(code);
   const uses = tree ? undeclaredUses(tree, name) : [];
+  // A library's name with its file's ending (ToneJS, Tone.js, THREEjs): the library the page has, by that name
+  const scope = page?.scope as Record<string, unknown> | undefined;
+  const library = ['Tone', 'THREE'].find((lib) => !!scope?.[lib] && name !== lib && name.replace(/js$/i, '').toLowerCase() === lib.toLowerCase());
+  if (tree && uses.length > 0 && library) {
+    const renamed = renameUndeclared(code, name, library);
+    if (renamed) return { correction: { code: renamed, note: `${name} → ${library}: the library the page has` } };
+  }
   if (tree && uses.length > 0) {
     const visible = [...new Set(uses.flatMap((use) => use.visible))];
     const slip = slipOf(name, visible) ?? [slipOf(name, Object.getOwnPropertyNames(globalThis))].find((global) => global && fitsGlobal(uses, tree, global));
@@ -1747,6 +1754,53 @@ function classCalledWithoutNew(code: string, error: string, _errorLine?: number,
 }
 
 /**
+ * A factory called on a class that has none (`Tone.Loop.create(cb, "4n")`, `Ball.make(1)`): a class is
+ * made with new, and its arguments are the same. The class is a real `class` the page or the program
+ * has, the method is a factory by its name (create, make, new, build, construct), and the class has no
+ * such member; every such call becomes `new Class(args)`. The result must parse.
+ */
+function classFactory(code: string, error: string, scope?: Record<string, unknown>): ErrorHint | null {
+  const missing = missingMethod(error);
+  if (!missing || !/^(?:create|make|new|build|construct|instance)$/.test(missing.method)) return null;
+  const value = scope ? valueOfPath(code, missing.object, scope) : undefined;
+  const own = !value && /^[A-Za-z_$][\w$]*$/.test(missing.object) && new RegExp(`\\bclass\\s+${missing.object.replace(/\$/g, '\\$')}\\b`).test(code);
+  if (!isEsClass(value) && !own) return null;
+  if (isEsClass(value) && typeof (value as Record<string, unknown>)[missing.method] === 'function') return null;
+  const ast = tryParse(code);
+  if (!ast) return null;
+  const edits: Array<{ start: number; end: number }> = [];
+  walk(ast, (node) => {
+    if (node.type !== 'CallExpression') return;
+    const callee = node.callee as AnyNode;
+    if (callee.type !== 'MemberExpression' || callee.computed || (callee.property as AnyNode).name !== missing.method) return;
+    if (code.slice((callee.object as AnyNode).start, (callee.object as AnyNode).end).replace(/\s+/g, '') !== missing.object) return;
+    edits.push({ start: callee.start, end: callee.end });
+  });
+  if (edits.length === 0) return null;
+  let fixed = code;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) fixed = `${fixed.slice(0, edit.start)}new ${missing.object}${fixed.slice(edit.end)}`;
+  return tryParse(fixed) ? { correction: { code: fixed, note: `${missing.object}.${missing.method}(…) → new ${missing.object}(…): a class is made with new` } } : null;
+}
+
+/**
+ * A page written inside a template literal that has a script in it, with template literals of its own
+ * (`document.body.innerHTML = \`<script> … cell.innerHTML = \`<span>${x}</span>\` … </script>\``): the first backtick in
+ * the script ends the outer string and the program stops with "Unexpected token". Inside each `<script>` of the
+ * program the backticks and `${` are escaped, so they are the script's own. Only when the program does not
+ * parse as it is and parses so; null otherwise.
+ */
+export function escapeScriptBackticks(code: string): { code: string; scripts: number } | null {
+  if (tryParse(code) || !/<script\b/i.test(code) || !/`/.test(code)) return null;
+  let scripts = 0;
+  const fixed = code.replace(/(<script\b[^>]*>)([\s\S]*?)(<\/script>)/gi, (whole, open: string, body: string, close: string) => {
+    if (!/`|\$\{/.test(body)) return whole;
+    scripts++;
+    return `${open}${body.replace(/\\?`/g, '\\`').replace(/\\?\$\{/g, '\\${')}${close}`;
+  });
+  return scripts > 0 && fixed !== code && tryParse(fixed) ? { code: fixed, scripts } : null;
+}
+
+/**
  * A factory the object doesn't have, handed the class it should make (`Tone.create(Tone.PolySynth)`,
  * `Tone.make("Synth")`): the object has no such function, but it has the class named in the first
  * argument, and a class is made with new, so the call becomes `new Tone.PolySynth(rest)`. The
@@ -2319,7 +2373,8 @@ function generalErrorHint(code: string, error: string, errorLine?: number, page?
     audioParamTime(code, error) ??
     classCalledWithoutNew(code, error, errorLine, page?.scope) ??
     newOnObject(code, error, page?.scope) ??
-    factoryOfClass(code, error, page?.scope);
+    factoryOfClass(code, error, page?.scope) ??
+    classFactory(code, error, page?.scope);
   if (rule) return rule;
   const helper = helperDeclared(code, error);
   if (helper) return helper;

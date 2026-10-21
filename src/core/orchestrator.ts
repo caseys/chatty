@@ -45,7 +45,7 @@ import { memberBlank, fillMember, blankChoices, blankRequest, choiceRequest, dec
 import { madeAsWrongClass, memberList, withLibraryClassNames, type RealMember } from './method-hints.ts';
 import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest, restoreWhole } from './line-fix.ts';
 import { missingStepsError, sameShortfallNote } from './sound-setup.ts';
-import { addNewToClasses, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
+import { addNewToClasses, escapeScriptBackticks, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
 import { applyAssignmentFixes, moveToContext, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { LOCAL_CHAT_MODELS } from './settings.ts';
@@ -785,24 +785,36 @@ function gaveUpText(error: string, tries = MAX_FIX_TRIES): string {
  * with calls in it comes out whole.
  */
 export function unmarkReached(text: string): string {
-  const open = '((globalThis.__chattyReached = true), ';
+  // The mark as the browser prints it in a message: with its assignment (`((globalThis.__chattyReached = true), x)`)
+  // or without (`(globalThis.__chattyReached , x)`: Chrome leaves the assignment out of a call site)
+  const name = 'globalThis.__chattyReached';
   let out = text;
-  for (let at = out.indexOf(open); at >= 0; at = out.indexOf(open)) {
+  for (let at = out.indexOf(name); at >= 0; at = out.indexOf(name)) {
+    let start = at;
+    while (start > 0 && out[start - 1] === '(') start--;
+    const opens = at - start;
+    let i = at + name.length;
+    const assigned = /^\s*=\s*true\s*\)/.exec(out.slice(i));
+    if (assigned) i += assigned[0].length;
+    // The bracket that opens the sequence: with the assignment shown, one pair is the assignment's own
+    const sequenceOpen = assigned ? (opens >= 2 ? at - 2 : -1) : opens >= 1 ? at - 1 : -1;
+    const comma = /^\s*,\s*/.exec(out.slice(i));
+    if (sequenceOpen < 0 || !comma) break;
+    i += comma[0].length;
     let depth = 0;
     let end = -1;
-    for (let i = at + open.length; i < out.length; i++) {
-      const ch = out[i];
-      if (ch === '(') depth++;
-      else if (ch === ')') {
+    for (let k = i; k < out.length; k++) {
+      if (out[k] === '(') depth++;
+      else if (out[k] === ')') {
         if (depth === 0) {
-          end = i;
+          end = k;
           break;
         }
         depth--;
       }
     }
     if (end < 0) break;
-    out = out.slice(0, at) + out.slice(at + open.length, end) + out.slice(end + 1);
+    out = out.slice(0, sequenceOpen) + out.slice(i, end) + out.slice(end + 1);
   }
   return out;
 }
@@ -916,6 +928,12 @@ export function repairBeforeRunning(code: string, isProse: boolean, note: (text:
       if (logical) {
         executableCode = logical.code;
         note(`${logical.lines.length > 1 ? `lines ${logical.lines.join(', ')}` : `line ${logical.lines[0]}`}: an assignment after && / || / ?? (a logical expression can't be assigned to) → wrapped in ( ): corrected before running`);
+      }
+      // Template literals inside a <script> inside a template literal (a page written as one string): escaped
+      const scripted = escapeScriptBackticks(executableCode);
+      if (scripted) {
+        executableCode = scripted.code;
+        note(`${scripted.scripts === 1 ? 'a <script>' : `${scripted.scripts} <script>s`} written inside a template string held backticks of its own → escaped: corrected before running`);
       }
       // A fence's language label left on a line of its own (`javascript`): taken out
       const labelled = dropFenceLabels(executableCode);

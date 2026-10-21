@@ -891,3 +891,22 @@ describe('a speak() of the request’s own words', () => {
     expect(dropRequestEcho(countdown, '').dropped).toBe(0);
   });
 });
+
+describe('a library named with its file’s ending', () => {
+  const scope = { Tone: {}, THREE: {} } as unknown as Record<string, unknown>;
+
+  it('is the library the page has (ToneJS for Tone), as in the Twinkle Twinkle program Qwen3 0.6B wrote', () => {
+    const code = 'const synth = new ToneJS.PolySynth();\nsynth.triggerAttackRelease("C4", "8n");\nToneJS.start();';
+    const hint = errorHint(code, 'ToneJS is not defined', 1, { ids: [], scope });
+    expect(hint?.correction?.code).toBe('const synth = new Tone.PolySynth();\nsynth.triggerAttackRelease("C4", "8n");\nTone.start();');
+    expect(errorHint('const m = new THREEjs.Mesh();', 'THREEjs is not defined', 1, { ids: [], scope })?.correction?.code).toBe('const m = new THREE.Mesh();');
+    expect(errorHint('ThreeJS.go();', "Can't find variable: ThreeJS", 1, { ids: [], scope })?.correction?.code).toBe('THREE.go();');
+  });
+
+  it('is left alone without the library in the page, for another name, or when the program declares the name', () => {
+    expect(errorHint('ToneJS.start();', 'ToneJS is not defined', 1, { ids: [], scope: {} })?.correction).toBeUndefined();
+    expect(errorHint('ToneJS.start();', 'ToneJS is not defined', 1)?.correction).toBeUndefined();
+    expect(errorHint('ToneKit.start();', 'ToneKit is not defined', 1, { ids: [], scope })?.correction).toBeUndefined();
+    expect(errorHint('const ToneJS = {};\nToneJS.start(); Tone2.go();', 'Tone2 is not defined', 2, { ids: [], scope })?.correction).toBeUndefined();
+  });
+});
