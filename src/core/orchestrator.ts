@@ -52,6 +52,7 @@ import { isAppleMobile, LOCAL_CHAT_MODELS } from './settings.ts';
 import { redeclaredCut } from './repeat-guard.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 import { MIDI_OUTPUT, MIDI_PLAIN_FORM, MIDI_RULE } from './midi-form.ts';
+import { copiedExampleNotes, wrongInstrument } from './example-copy.ts';
 
 /** "Error at line 7: x is not defined" (the line when the browser reported it) */
 function errorText(message: string, line?: number): string {
@@ -3108,6 +3109,9 @@ export class ConversationOrchestrator {
                 ? "The program's sound never reached the speakers: connect each Tone synth to the output with .toDestination(), and play notes with triggerAttackRelease(note, duration, time)."
                 : "The program's sound never reached the speakers: connect each sound to the audio context's destination (node.connect(audioContext.destination)).")
           : '',
+      // Heard, but the prompt's example copied: its notes, or its instrument where the request names another
+      wantsSound && soundKinds(request).music ? (copiedExampleNotes(code, request) ?? '') : '',
+      wantsSound && soundKinds(request).music ? (wrongInstrument(code, request) ?? '') : '',
       wantsVisual && !shown()
         ? 'The program showed nothing: what it adds to document.body appears in the card on screen.'
         : wantsVisual && !drawn()

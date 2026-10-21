@@ -413,7 +413,7 @@ export class SoftwareMIDIAccess extends StateChangeTarget {
 // ---- Names for the friendly send() form ----
 
 /** General MIDI programs by common name (a name containing one of these also matches it) */
-const INSTRUMENT_PROGRAMS: Record<string, number> = {
+export const INSTRUMENT_PROGRAMS: Record<string, number> = {
   piano: 0,
   'grand piano': 0,
   keys: 0,
