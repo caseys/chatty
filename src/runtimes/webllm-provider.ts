@@ -28,8 +28,9 @@ const WEBLLM_MIN_TEMPERATURE = 0.6;
 const WEBLLM_EXACT_TEMPERATURE = 0.2;
 
 /**
- * Sampling fields for a WebLLM request. Code repeats lines on purpose (`out.send(...)`, `ctx.`), so
- * a repetition penalty hurts: Qwen3 / Qwen3.5 get Qwen's recommended presence penalty instead, and
+ * Sampling fields for a WebLLM request. Code repeats lines and tokens on purpose (`out.send(...)`,
+ * `ctx.`), so a repetition or presence penalty hurts it: Qwen3 / Qwen3.5 get presence penalty 0
+ * (Qwen's recommended 0.5 targets thinking-mode loops, and these models run without thinking), and
  * other models (Qwen2.5-Coder ships 1.05) keep a mild repetition penalty. An exact turn is
  * near-greedy with no penalty at all.
  */
@@ -41,11 +42,11 @@ export function webLlmSampling(
   const top_p = options.topP ?? 0.8;
   if (options.exact) return { temperature: WEBLLM_EXACT_TEMPERATURE, top_p };
   // Small models get stuck repeating themselves on near-greedy decoding (Chatty asks for 0.1,
-  // which suits Gemma on LiteRT), so normal turns keep a floor.
+  // which LiteRT honours too), so normal turns keep a floor.
   const temperature = retryTemperature(Math.max(options.temperature ?? WEBLLM_MIN_TEMPERATURE, WEBLLM_MIN_TEMPERATURE), options.retry);
   const qwen3 = spec.noThinking || /^qwen3/i.test(spec.mlcId);
   return qwen3
-    ? { temperature, top_p, presence_penalty: 0.5 }
+    ? { temperature, top_p, presence_penalty: 0 }
     : { temperature, top_p, repetition_penalty: 1.05 };
 }
 

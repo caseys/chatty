@@ -41,6 +41,10 @@ class QueueLlm implements LlmRuntimeProvider {
   calls: LlmGenerationOptions[] = [];
   /** Requests made to write a reply (not compaction) */
   turns: LlmGenerationOptions[] = [];
+  /** Line fixes asked again within the same try */
+  reasks: LlmGenerationOptions[] = [];
+  private lastAsked = '';
+  private lastText = '';
   constructor(
     readonly replies: string[],
     readonly contextLimit = 8192,
@@ -51,8 +55,15 @@ class QueueLlm implements LlmRuntimeProvider {
     const recorded = structuredClone({ ...options, signal: undefined, onToken: undefined, tools: undefined });
     this.calls.push(recorded);
     const compacting = options.systemPrompt === COMPACTION_SYSTEM_PROMPT;
-    if (!compacting) this.turns.push(recorded);
-    const text = compacting ? 'The user chatted at length.' : (this.replies.shift() ?? 'speak("ok");');
+    // A line fix asked again at once (same prompt, same try): the same unusable reply comes back,
+    // and it is not one of the tries the tests below count
+    const askedKey = JSON.stringify([options.systemPrompt, options.messages]);
+    const again = !compacting && options.fixShape === 'line' && askedKey === this.lastAsked;
+    if (!compacting) this.lastAsked = askedKey;
+    if (again) this.reasks.push(recorded);
+    else if (!compacting) this.turns.push(recorded);
+    const text = compacting ? 'The user chatted at length.' : again ? this.lastText : (this.replies.shift() ?? 'speak("ok");');
+    if (!compacting) this.lastText = text;
     options.onToken?.(text, 0);
     return { turnId: options.turnId, text, aborted: false, timeToFirstTokenMs: 1, totalTimeMs: 1, tokensGenerated: 1, tokensPerSecond: 1 };
   }
@@ -590,7 +601,7 @@ describe('fix turns and compaction', () => {
 describe('the optional rules follow the request', () => {
   const canvas = 'Use <canvas>';
   const sound = 'Sound: music and instruments: out is ready to use';
-  const facts = 'public API';
+  const facts = 'searchWikipedia';
   const cases: Array<[string, { canvas?: boolean; sound?: boolean; facts?: boolean }]> = [
     ['Draw a rainbow over green hills on a canvas', { canvas: true }],
     ['Play a music loop with a G major chord on piano, a walking bass line and a boom-chuck drum track', { sound: true }],
@@ -765,8 +776,8 @@ describe('more than one fix attempt', () => {
     ]);
     expect(new Set(temps).size).toBe(4);
     expect(new Set(topPs).size).toBe(4);
-    // Each try asks the next kind of question
-    expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'line', 'function', 'program', 'line', 'program']);
+    // Each try asks the next kind of question; a new error starts again from the line
+    expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'line', 'line', 'function', 'line', 'line']);
     // The fifth fix is told each earlier error that differs from the current one, once
     const last = llm.turns[5].messages.at(-1)!.content;
     expect(last).toContain('The first program failed at line 2: boom is not defined');
@@ -839,7 +850,11 @@ describe('a fix reply that is unusable starts the next try at once', () => {
     expect(llm.turns[2].messages).not.toEqual(llm.turns[1].messages);
     expect(llm.turns[2].messages.at(-1)!.content).toContain('Your last reply was not a working fix (');
     expect(llm.turns[2].sampling).toEqual({ temperature: 1, topP: 0.99 });
-    expect(notices).toEqual(['Fixing (1 of 5): boom is not defined', 'Fixing (2 of 5): boom is not defined']);
+    // (the unchanged line fix is asked again twice within the first try)
+    expect(notices).toEqual([
+      'Fixing (1 of 5): boom is not defined',
+      'Fixing (2 of 5): boom is not defined',
+    ]);
     await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
   });
 
@@ -880,7 +895,8 @@ describe('the order of a request\'s fix questions', () => {
   /** A fix reply for a question that fails again with the error `name` (a different function body each time) */
   const bad = (name: string, shape: string) =>
     shape === 'line' ? `// Cause: ${name}\n  ${name}();` : `// Cause: ${name}\nfunction draw() {\n  ${name}();\n}${shape === 'program' ? '\ndraw();\nspeak("Drawn.");' : ''}`;
-  const errors = (names: string[]) => [{ error: 'boom is not defined', errorLine: 2 }, ...names.map((n) => ({ error: `${n} is not defined`, errorLine: 2 }))];
+  // (the same error on every try: a new error would start again from the first question)
+  const errors = (names: string[]) => [{ error: 'boom is not defined', errorLine: 2 }, ...names.map(() => ({ error: 'boom is not defined', errorLine: 2 }))];
 
   it('asks a small model the blank, line, function, program and a different question, then gives up', async () => {
     const TOTAL = [
@@ -940,7 +956,7 @@ describe('the order of a request\'s fix questions', () => {
     expect(llm.turns.slice(2).map((t) => t.sampling)).toEqual(SWINGS);
     expect(notices.map((n) => n.replace(/:.*/, ''))).toEqual(['Fixing (1 of 5)', 'Fixing (2 of 5)', 'Fixing (3 of 5)', 'Fixing (4 of 5)', 'Fixing (5 of 5)']);
     const said = orchestrator.memoryStore.getMessages().filter((m) => m.role === 'assistant').map((m) => m.canonicalContent).join('\n');
-    expect(said).toContain("I couldn't get this working after 5 tries (the last error: b5 is not defined)");
+    expect(said).toContain("I couldn't get this working after 5 tries (the last error: boom is not defined)");
     expect(said.match(/I couldn't get this working/g)).toHaveLength(1);
   }, 30000);
 
@@ -971,7 +987,7 @@ describe('the order of a request\'s fix questions', () => {
   it('skips a question that does not fit: no enclosing function moves from the line to the program', async () => {
     const flat = 'const a = 1;\nboom();\nspeak("Done.");';
     const llm = new QueueLlm([flat, '// Cause: x\nbang();', '// Cause: y\nconst a = 1;\nzap();\nspeak("Done.");']);
-    const { executed, runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 2 }, { error: 'bang is not defined', errorLine: 2 }, {}]);
+    const { executed, runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 2 }, { error: 'boom is not defined', errorLine: 2 }, {}]);
     const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
     await orchestrator.submitUserInput('Do it');
     await vi.waitFor(() => expect(executed.length).toBe(3), { timeout: 10000 });
@@ -1150,7 +1166,7 @@ describe('the blank stage', () => {
     await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
     expect(executed[1]).toContain('ok();');
     expect(executed.some((code) => code.includes('bang();'))).toBe(false);
-    expect(trialled.length).toBe(2); // one test run per reply
+    expect(trialled.length).toBe(4); // one test run per reply (the line fix asked three times)
     expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'line', 'function']);
     expect(llm.turns[2].sampling).toEqual({ temperature: 1, topP: 0.99 });
     expect(llm.turns[2].messages.at(-1)!.content).toContain('Your last reply was not a working fix');
@@ -1173,7 +1189,10 @@ describe('the blank stage', () => {
     // line, so the blank stage
     expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'line', 'choice']);
     expect(executed[1]).toContain("'Total: ' + sum;");
-    expect(notices).toEqual(['Fixing (1 of 5): sumTotal is not defined', 'Fixing (2 of 5): sumTotal is not defined']);
+    expect(notices).toEqual([
+      'Fixing (1 of 5): sumTotal is not defined',
+      'Fixing (2 of 5): sumTotal is not defined',
+    ]);
   });
 
   it('keeps the blank stage first for a small model', async () => {

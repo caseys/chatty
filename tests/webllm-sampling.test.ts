@@ -14,9 +14,9 @@ describe('webLlmSampling', () => {
       expect(s.presence_penalty).toBeUndefined();
     }
   });
-  it('Qwen3 normal: presence penalty, no repetition penalty, temperature floor', () => {
+  it('Qwen3 normal: no presence or repetition penalty (code repeats tokens), temperature floor', () => {
     const s = webLlmSampling({ temperature: 0.1 }, qwen3);
-    expect(s).toMatchObject({ temperature: 0.6, presence_penalty: 0.5 });
+    expect(s).toMatchObject({ temperature: 0.6, presence_penalty: 0 });
     expect(s.repetition_penalty).toBeUndefined();
   });
   it('Qwen2.5-Coder normal: repetition penalty 1.05', () => {

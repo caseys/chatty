@@ -570,15 +570,21 @@ export class LiteRtLlmProvider implements LlmRuntimeProvider {
         options.messages[options.messages.length - 1]?.content ?? '';
       const priorMessagesKey = historyKey(priorMessages);
 
-      // Google's recommended Gemma sampling, except near-greedy for an exact answer (a fix turn's
-      // corrected line). A fix turn has its own system prompt, so it starts a new conversation
-      // anyway: the different temperature costs nothing extra.
-      // A retry samples cooler (retryTemperature)
+      // The caller's temperature and top-p when it gives them (Chatty asks for a low temperature on
+      // a normal turn), else Google's recommended Gemma sampling; near-greedy for an exact answer
+      // (a fix turn's corrected line). A fix turn has its own system prompt, so it starts a new
+      // conversation anyway: the different temperature costs nothing extra, and a follow-up turn
+      // with another temperature recreates the conversation (canReuse below).
+      // A retry samples cooler than the requested base (retryTemperature)
       const sampler = options.sampling
         ? { ...GEMMA_SAMPLER, temperature: options.sampling.temperature, p: options.sampling.topP }
         : options.exact
-        ? { ...GEMMA_SAMPLER, temperature: RETRY_FLOOR_TEMPERATURE }
-        : { ...GEMMA_SAMPLER, temperature: retryTemperature(GEMMA_SAMPLER.temperature, options.retry) };
+        ? { ...GEMMA_SAMPLER, temperature: RETRY_FLOOR_TEMPERATURE, p: options.topP ?? GEMMA_SAMPLER.p }
+        : {
+            ...GEMMA_SAMPLER,
+            temperature: retryTemperature(options.temperature ?? GEMMA_SAMPLER.temperature, options.retry),
+            p: options.topP ?? GEMMA_SAMPLER.p,
+          };
       const targetTemperature = sampler.temperature;
       const targetMaxOutputTokens = options.maxOutputTokens ?? this.maxOutputTokens;
 

@@ -592,6 +592,17 @@ export async function letReassignedConsts(code: string): Promise<string> {
 }
 
 /**
+ * Whether code wires up handlers a trial run should use once (addEventListener, or an on-event
+ * property or inline attribute for the events a click or an input fires), so an error that only
+ * happens inside a handler is found before the user clicks.
+ */
+export function registersHandlers(code: string): boolean {
+  return /\baddEventListener\s*\(|\bon(?:click|dblclick|input|change|submit|keydown|keyup|keypress|mousedown|mouseup|pointerdown|pointerup|touchstart)\s*=/.test(
+    stripComments(code)
+  );
+}
+
+/**
  * Inline handlers in a program's HTML (onclick="calc()") look names up globally, but programs run
  * as function bodies, where their functions stay local: those functions are made global too.
  */
@@ -1107,6 +1118,9 @@ export class JavascriptRuntime {
     try {
       const doc = this.activeIframe?.contentDocument;
       if (!doc?.body) return false;
+      // The page knows which elements are only stand-ins for missing ids (empty, so not output)
+      const own = (this.activeIframe?.contentWindow as unknown as { __chattyHasVisual?: () => boolean } | null)?.__chattyHasVisual;
+      if (typeof own === 'function') return own();
       const root = doc.getElementById('root');
       if (root && root.childNodes.length > 0) return true;
       return Array.from(doc.body.children).some(
@@ -1741,11 +1755,20 @@ export class JavascriptRuntime {
     let rejected = null;
     let runningProgram = false;
     let rejectedReported = false;
+    // Text is bad only when the token is a stringified value: the whole text ("NaN"), or after a
+    // label, operator or "is" ("Total: NaN", "x = undefined", "The result is NaN", "$NaN", "NaN%")
+    // with no word following.
+    // The same words inside ordinary text ("Infinity War", "undefined behaviour is…") are fine.
+    const BAD_TEXT_WHOLE = /^\\s*[-+$€£]?\\s*(?:NaN|undefined|Infinity)\\s*(?:%|px|em|rem|ms|s|°|deg)?\\s*$/;
+    const BAD_TEXT_AFTER_LABEL = /(?:[:=(\\[,|\\/]|\\b(?:is|are|was|of)\\s)\\s*[-+$€£]?(?:NaN|undefined|Infinity)(?![\\w-])(?!\\s+[A-Za-z])/;
     const badValue = (v) =>
       v === undefined || (typeof v === 'number' && !Number.isFinite(v)) ||
-      (typeof v === 'string' && /\\b(?:NaN|undefined|Infinity)\\b/.test(v));
+      (typeof v === 'string' && (BAD_TEXT_WHOLE.test(v) || BAD_TEXT_AFTER_LABEL.test(v)));
+    // During the trial's smoke pass the sample input ('test', an empty display) can make a correct
+    // program show NaN: only thrown errors count then
+    let smoking = false;
     function noteRejected(message) {
-      if (rejected || rejectedReported) return;
+      if (rejected || rejectedReported || smoking) return;
       const line = errorLine(new Error(), true);
       if (runningProgram) {
         rejected = { message, line };
@@ -1927,6 +1950,39 @@ export class JavascriptRuntime {
       },
       play(...args) { this.send(...args); },
       playNote(...args) { this.send(...args); },
+      // out.loop(bars, lengthMs): bars(t) schedules one pass of notes starting at time t (in
+      // performance.now() ms; the global \`start\` is set to t too). It runs now, then again for
+      // every following pass with t moved on by lengthMs, called a little ahead of time so
+      // playback has no gap. Returns a function that stops it.
+      loop(bars, lengthMs) {
+        if (typeof bars !== 'function' || !(Number(lengthMs) >= 50)) {
+          imagined('out.loop(bars, lengthMs) needs a function and a length in ms (at least 50): did nothing');
+          return () => {};
+        }
+        const length = Number(lengthMs);
+        const lead = Math.min(250, length / 2);
+        // Passes are given their start time, as a program's own \`start\` can shadow the global
+        let next = performance.now() + 100;
+        let timer = null;
+        let stopped = false;
+        // Plain setTimeout calls: tracked as the program's work, and gone with its page on reset
+        const pass = () => {
+          timer = null;
+          if (stopped) return;
+          // Passes missed while the tab was in the background are skipped, not played late
+          if (next < performance.now()) next = performance.now() + 100;
+          window.start = next;
+          bars(next);
+          next += length;
+          timer = window.setTimeout(pass, Math.max(0, next - lead - performance.now()));
+        };
+        pass();
+        return () => {
+          stopped = true;
+          if (timer !== null) window.clearTimeout(timer);
+          timer = null;
+        };
+      },
     };
 
     // Models call methods Chatty's own helpers don't have (out.playChord(), out.setTempo(90)).
@@ -2182,12 +2238,29 @@ export class JavascriptRuntime {
     });
 
     // Whether the program has put anything on screen (canvas, svg, div, table, etc.)
+    // A stand-in made for a missing id that is still empty (no children, no text, nothing drawn)
+    // shows nothing, so it is not output
+    function isEmptyStandIn(el) {
+      if (!el || !placeholders.has(el.id) || placeholders.get(el.id) !== el) return false;
+      if (el.firstChild || (el.textContent || '').trim()) return false;
+      if (el.tagName !== 'CANVAS') return true;
+      try {
+        // Compared with a blank canvas of its size (toDataURL leaves the context type free)
+        const blank = document.createElement('canvas');
+        blank.width = el.width;
+        blank.height = el.height;
+        return el.toDataURL() === blank.toDataURL();
+      } catch { return false; }
+    }
     function hasVisualNow() {
       const rootEl = document.getElementById('root');
-      return Boolean(rootEl && rootEl.childNodes.length > 0 && rootEl.innerHTML.trim().length > 0) ||
-        Boolean(document.querySelector('canvas, svg, table, img, video, form, button, input, div:not(#root)')) ||
-        Array.from(document.body.children).some(c => c !== rootEl && c.tagName !== 'SCRIPT' && c.tagName !== 'STYLE');
+      const shows = (n) => n.nodeType === 3 ? n.textContent.trim().length > 0 : n.nodeType === 1 && !isEmptyStandIn(n);
+      return Boolean(rootEl && Array.from(rootEl.childNodes).some(shows)) ||
+        Array.from(document.querySelectorAll('canvas, svg, table, img, video, form, button, input, div:not(#root)')).some((el) => !isEmptyStandIn(el)) ||
+        Array.from(document.body.children).some(c => c !== rootEl && c.tagName !== 'SCRIPT' && c.tagName !== 'STYLE' && !isEmptyStandIn(c));
     }
+    // The host asks this page (see hasVisualContent)
+    window.__chattyHasVisual = hasVisualNow;
 
     // clear(): empties the card, so a program can start the screen over
     window.clear = () => {
@@ -2231,6 +2304,12 @@ export class JavascriptRuntime {
           pendingAsyncCalls.delete(data.callId);
           resolver(data.result);
         }
+        return;
+      }
+
+      // Trial runs only: use every control once, so an error inside a handler shows up now
+      if (data.type === 'smoke') {
+        smokeControls();
         return;
       }
 
@@ -2347,6 +2426,49 @@ export class JavascriptRuntime {
         workChanged();
       }
     });
+
+    // Clicks every button and feeds every field an input and a change event (at most 20
+    // controls), then reports when done; a handler that throws reaches the window error listener
+    function smokeControls() {
+      const MAX_CONTROLS = 20;
+      const CLICKABLE = 'button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"], [onclick]';
+      const FIELDS = 'input:not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="file"]):not([type="hidden"]), select, textarea';
+      const SAMPLES = { number: '5', range: '5', email: 'a@b.co', date: '2024-01-15', time: '12:00', color: '#336699', url: 'https://example.com', tel: '5551234567' };
+      // A submit would load a new page over this one
+      const noSubmit = (e) => e.preventDefault();
+      document.addEventListener('submit', noSubmit, true);
+      smoking = true;
+      try {
+        // Links aren't clicked: one would load a new page over this one
+        const controls = [...document.querySelectorAll(CLICKABLE + ', ' + FIELDS)]
+          .filter((el) => !el.disabled && !el.matches('a[href]'))
+          .slice(0, MAX_CONTROLS);
+        for (const el of controls) {
+          try {
+            if (el.matches(CLICKABLE)) {
+              el.click();
+              continue;
+            }
+            if (el.tagName === 'SELECT') {
+              const other = [...el.options].find((o) => o.value !== el.value);
+              if (other) el.value = other.value;
+            } else if (el.type === 'checkbox' || el.type === 'radio') {
+              el.checked = !el.checked;
+            } else {
+              el.value = SAMPLES[el.type] || 'test';
+            }
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          } catch {}
+        }
+      } finally {
+        realSetTimeout(() => {
+          document.removeEventListener('submit', noSubmit, true);
+          smoking = false;
+          __chattyHost.postMessage({ type: 'smoke_done' }, '*');
+        }, 300);
+      }
+    }
 
     // A tap or key press in the card starts Chatty's audio too (browsers only start it in one)
     for (const type of ['pointerdown', 'pointerup', 'touchend', 'click', 'keydown']) {
@@ -2668,6 +2790,8 @@ export class JavascriptRuntime {
       let finished = false;
       let ready = false;
       let started = false;
+      let smoked = false;
+      let startedAt = 0;
       let stopTimer: ReturnType<typeof setTimeout> | undefined;
       let readyTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -2697,6 +2821,7 @@ export class JavascriptRuntime {
       const start = (): void => {
         if (started || finished) return;
         started = true;
+        startedAt = Date.now();
         clearTimeout(readyTimer);
         stopTimer = setTimeout(() => finish(null), ms);
         try {
@@ -2720,6 +2845,22 @@ export class JavascriptRuntime {
           finish(String(data.message ?? 'Unknown error'), line);
         } else if (data.type === 'result') {
           if (!data.success) finish(String(data.error ?? 'Unknown error'), line);
+          else if (!smoked && registersHandlers(code)) {
+            // The program ran and wired up handlers: use each control once. An error inside one
+            // arrives like any other (program_error, with its line).
+            smoked = true;
+            clearTimeout(stopTimer);
+            stopTimer = setTimeout(() => finish(null), Math.max(ms - (Date.now() - startedAt), 0) + 500);
+            try {
+              iframe.contentWindow?.postMessage({ type: 'smoke' }, '*');
+            } catch {
+              // frame went away
+            }
+          }
+        } else if (data.type === 'smoke_done') {
+          // Every control was used: done once the trial's own time is up too
+          clearTimeout(stopTimer);
+          stopTimer = setTimeout(() => finish(null), Math.max(ms - (Date.now() - startedAt), 0));
         } else if (data.type === 'playNotes' || data.type === 'searchWikipedia') {
           // Nothing plays and nothing is fetched; the program just gets an answer
           try {

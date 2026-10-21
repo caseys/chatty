@@ -360,7 +360,11 @@ export class ConversationMemoryStore {
   // Selective Retrieval & Reference Resolution (Addendum Section 3.2 & 5)
   // --------------------------------------------------------------------------
 
-  resolveContextForQuery(userQuery: string, tokenBudget = this.defaultTokenBudget): ResolvedTurnContext {
+  /**
+   * `programTokens`: room kept for a program the prompt will show in full (the one being edited),
+   * which the history's one-line summaries don't account for: older history gives way to it first
+   */
+  resolveContextForQuery(userQuery: string, tokenBudget = this.defaultTokenBudget, programTokens = 0): ResolvedTurnContext {
     const queryWords = new Set(
       userQuery
         .toLowerCase()
@@ -394,7 +398,7 @@ export class ConversationMemoryStore {
     const resolvedReferencesNote = this.resolveAnaphoraAndOptions(userQuery);
 
     // 3. Respect token budget when selecting verbatim working messages
-    let usedTokens = this.estimateTokens(userQuery) + this.promptReserve.fixedTokens; // System prompt + overhead
+    let usedTokens = this.estimateTokens(userQuery) + this.promptReserve.fixedTokens + programTokens; // System prompt + overhead + the program shown in full
     if (this.summary) {
       usedTokens += this.estimateTokens(this.summary.summaryText);
     }
@@ -410,7 +414,7 @@ export class ConversationMemoryStore {
         msg.role === 'assistant' ? pastProgramResult(msg) : msg.canonicalContent;
       // Fix turns are left out of prompts, so they take no room in them
       const msgTokens = fixTurns.has(msg.turnId) ? 0 : this.estimateTokens(textToEstimate);
-      if (usedTokens + msgTokens > tokenBudget && selectedMessages.length >= 2) {
+      if (usedTokens + msgTokens > tokenBudget && selectedMessages.length >= (programTokens > 0 ? 0 : 2)) {
         break;
       }
       selectedMessages.unshift(msg);
@@ -479,7 +483,9 @@ export class ConversationMemoryStore {
 
   estimateTokens(text: string): number {
     if (!text) return 0;
-    return Math.ceil(text.length / 4);
+    // Code takes more tokens per character than prose (symbols, short names, indentation)
+    const symbols = (text.match(/[{}()[\];=<>]/g) ?? []).length;
+    return Math.ceil(text.length / (symbols / text.length > 0.04 ? 3 : 4));
   }
 
   getCurrentContextTokens(incomingQuery = ''): number {
