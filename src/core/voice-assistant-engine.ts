@@ -57,10 +57,7 @@ import type {
 import { clearSpeechModelCache } from './model-cache.ts';
 import { AFTER_HEAVY_MS, AFTER_LOAD_MS, settle, settleAfterLoad } from './settle.ts';
 
-const WELCOME_MESSAGE =
-  'Welcome to Chatty, I can do anything your browser can do. For example: ask me to make MIDI music, ' +
-  'use oscillators and other Web Audio tools, draw 3D scenes, animate motion, ' +
-  'look up things in Wikipedia or DuckDuckGo and more!';
+const WELCOME_MESSAGE = 'Welcome to Chatty, I can do anything your browser can do.';
 /** Returning users get the short greeting (set after the first full welcome) */
 const WELCOMED_KEY = 'chatty_welcomed';
 /** Events in which browsers let a page start sound */
