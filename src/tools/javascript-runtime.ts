@@ -11,7 +11,7 @@ import { playNotesHelper } from './music-tool.ts';
 import { fetchWikipediaSummary } from './web-tools.ts';
 import { closeCutOff, declareOnce, type StandIn } from '../core/error-hints.ts';
 import { sureMatch } from '../core/fuzzy-match.ts';
-import { elementKinds } from './element-kinds.ts';
+import { checkedIds, elementKinds } from './element-kinds.ts';
 
 /**
  * Wraps fn so that however often the result is called, fn runs at most once per animation frame,
@@ -31,15 +31,31 @@ export function oncePerFrame(fn: () => void, raf: (callback: () => void) => unkn
 
 /**
  * three.js for 3D programs: a program that uses THREE finds it ready, as a global in its page.
- * It's bundled with Chatty (works offline) and loads only the first time a program uses it.
+ * It's bundled with Chatty (works offline, same file as a downloaded program's) and loads into the
+ * program's own page, only for a program that uses THREE, so it goes with that page: the page
+ * itself never holds it. A module script, so the bundle's own names stay out of the program's
+ * global scope; its load event comes after it ran, so THREE exists before the program does.
  */
 async function withThree(code: string, win: Window | null, live: () => boolean = () => true): Promise<void> {
   if (!win || !/\bTHREE\b/.test(code)) return;
   try {
-    const THREE = await import('three');
+    const { default: bundleUrl } = await import('../standalone/three-global.ts?worker&url');
     // A reused frame's window is the next page's by now
     if (!live()) return;
-    (win as unknown as { THREE?: unknown }).THREE = THREE;
+    // The page already has it (a program run again in the same page)
+    if ((win as unknown as { THREE?: unknown }).THREE) return;
+    const doc = win.document;
+    await new Promise<void>((resolve) => {
+      const script = doc.createElement('script');
+      script.type = 'module';
+      script.src = new URL(bundleUrl, window.location.href).href;
+      script.addEventListener('load', () => resolve());
+      script.addEventListener('error', () => {
+        console.warn('three.js could not load');
+        resolve();
+      });
+      (doc.head ?? doc.documentElement).appendChild(script);
+    });
   } catch (err) {
     console.warn('three.js could not load:', err);
   }
@@ -365,7 +381,8 @@ function paragraphParts(text: string): ReplyPart[] {
     const body = lines.join('\n').trim();
     if (!body) return;
     const prev = parts[parts.length - 1];
-    if (prev && prev.kind === kind) prev.text += (kind === 'code' ? gap : ' ') + body;
+    // (talk keeps its lines: a heading or a list item is told apart by its line, see talkToSay)
+    if (prev && prev.kind === kind) prev.text += (kind === 'code' ? gap : '\n') + body;
     else parts.push({ kind, text: body });
   };
   const split = () => {
@@ -445,11 +462,15 @@ function extractProgram(text: string): ReplyPart[] | null {
 /**
  * A reply that writes its program out twice (once, then again "corrected" or just repeated) runs
  * both copies one after the other: every name is declared twice and nothing runs. Of two code
- * blocks that are mostly the same lines, one is kept: the fuller, or the later when they are as
- * full (a second block is often the corrected one). Blocks that differ are kept, in order.
+ * blocks that are mostly the same lines and declare a name in common (the sign of the same
+ * program again: two parts of one program share no declarations, however alike their drawing
+ * lines), one is kept: the fuller, or the later when they are as full (a second block is often
+ * the corrected one). Blocks that differ are kept, in order.
  */
 function withoutRepeatedBlocks(parts: ReplyPart[]): ReplyPart[] {
   const lines = (text: string) => text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('//'));
+  const declared = (text: string) =>
+    new Set(Array.from(text.matchAll(/^\s*(?:(?:async\s+)?function\s+|(?:const|let|var|class)\s+)([A-Za-z_$][\w$]*)/gm), (m) => m[1]));
   const dropped = new Set<ReplyPart>();
   const code = parts.filter((p) => p.kind === 'code');
   for (let i = 0; i < code.length; i++) {
@@ -463,6 +484,8 @@ function withoutRepeatedBlocks(parts: ReplyPart[]): ReplyPart[] {
       if (small.length < 3) continue;
       const inLarge = new Set(large);
       if (small.filter((l) => inLarge.has(l)).length / small.length < 0.6) continue;
+      const names = declared(a.text);
+      if (![...declared(b.text)].some((name) => names.has(name))) continue;
       dropped.add(la.length > lb.length ? b : a);
     }
   }
@@ -476,7 +499,18 @@ const CODE_TALK = /\b(?:code|javascript|js|snippet|script|html|css|function|vari
 
 /** Talk the model wrote outside its code, as one plain sentence or two to say, or '' */
 function talkToSay(text: string, code: string): string {
+  // Markdown is for reading: a heading (### What It Does:) is a title, not something to say; a
+  // list item is a sentence of its own; `<canvas>` is the word canvas
   const plain = text
+    .split('\n')
+    .filter((line) => !/^\s*#{1,6}\s/.test(line))
+    .map((line) => {
+      const item = line.match(/^\s*(?:[-*+•]|\d+[.)])\s+(.*)$/);
+      const said = (item ? item[1] : line).trim();
+      return item && said && !/[.!?:]$/.test(said) ? `${said}.` : said;
+    })
+    .join(' ')
+    .replace(/<\/?([A-Za-z][\w-]*)[^>]*>/g, '$1')
     .replace(/[#*_`>]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -505,7 +539,9 @@ function withTalk(parts: ReplyPart[]): string {
 
 /**
  * Code runs exactly as written, so a program that only defines its functions does nothing.
- * Calls the zero-argument top-level functions nothing else refers to (draw(), main(), ...).
+ * Calls the zero-argument top-level functions nothing else refers to (draw(), main(), ...). A
+ * program that starts itself (calls one of its own functions at its top level) has chosen where
+ * it begins: its other functions are left for it to call.
  */
 export function callUncalledFunctions(original: string): string {
   // Judged without comments: a word in a comment ("// then draw") is no call of draw()
@@ -517,6 +553,7 @@ export function callUncalledFunctions(original: string): string {
     ...Array.from(code.matchAll(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(\s*\)\s*=>/gm), (m) => m[1]),
   ];
   if (declared.length === 0) return original;
+  if (startsItself(code)) return original;
   // A function's own body doesn't count: one that only calls itself (a loop, a timer) still needs
   // its first call. Without a parse, every mention counts, so only the declaration may name it.
   const own = topLevelFunctionRanges(code);
@@ -559,9 +596,34 @@ export function speakClosingComment(code: string): { code: string; text: string 
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
-  // A sentence: four words or more, letters, and nothing that reads as code
-  if (text.split(' ').length < 4 || !/[A-Za-z]/.test(text) || /[=;{}()[\]<>]|=>|\b(?:const|let|var|function|return)\b/.test(text)) return null;
+  // A sentence to the user: four words or more, begun with a capital and ended as a sentence is,
+  // with nothing that reads as code; a note to a programmer (TODO, FIXME) is none
+  if (text.split(' ').length < 4 || !/^[A-Z]/.test(text) || !/[.!?]$/.test(text) || /^(?:TODO|FIXME|NOTE|HACK|XXX)\b/i.test(text)) return null;
+  if (/[=;{}()[\]<>]|=>|\b(?:const|let|var|function|return)\b/.test(text)) return null;
   return { code: `${code}\nspeak(${JSON.stringify(text)});`, text };
+}
+
+/**
+ * Whether the program calls one of its own top-level functions at its top level (`setup();`,
+ * `await main();`): by the parser, or by line start when it doesn't parse
+ */
+function startsItself(code: string): boolean {
+  const names = topLevelFunctionNames(code) ?? [
+    ...Array.from(code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm), (m) => m[1]),
+    ...Array.from(code.matchAll(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/gm), (m) => m[1]),
+  ];
+  if (names.length === 0) return false;
+  let program: ReturnType<typeof parse>;
+  try {
+    program = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true });
+  } catch {
+    return new RegExp(`^[ \\t]*(?:await\\s+)?(?:${names.map((n) => n.replace(/\$/g, '\\$')).join('|')})\\s*\\(`, 'm').test(code);
+  }
+  return program.body.some((node) => {
+    if (node.type !== 'ExpressionStatement') return false;
+    const expression = node.expression.type === 'AwaitExpression' ? node.expression.argument : node.expression;
+    return expression.type === 'CallExpression' && expression.callee.type === 'Identifier' && names.includes(expression.callee.name);
+  });
 }
 
 /** The names of all top-level functions (declared, or a function in a const/let/var), however indented; null when the code doesn't parse */
@@ -2250,9 +2312,11 @@ export class JavascriptRuntime {
      * A style value the browser doesn't take for a property it has (style.display = 'flexbox'):
      * the value to set, corrected when it is surely a slip of one it takes
      */
+    /** A style property's CSS name (backgroundColor → background-color, cssFloat → float) */
+    const cssName = (key) => (key === 'cssFloat' ? 'float' : key.replace(/^webkit/, '-webkit-').replace(/[A-Z]/g, (c) => '-' + c.toLowerCase()));
     function checkStyleValue(key, value) {
       if (typeof value !== 'string' || value === '' || key === 'cssText' || !window.CSS || !CSS.supports) return value;
-      const prop = key === 'cssFloat' ? 'float' : key.replace(/^webkit/, '-webkit-').replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
+      const prop = cssName(key);
       if (!CSS.supports(prop, 'initial') || CSS.supports(prop, value)) return value;
       const camel = key.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
       const { fix, valid } = keywordAnswer(camel, value, (w) => CSS.supports(prop, w));
@@ -2435,21 +2499,36 @@ export class JavascriptRuntime {
     }
 
     // A length given as a bare number (el.style.left = x * 10) is ignored by CSS: it gets px, as
-    // the number surely meant
+    // the number surely meant. Which properties take a length but not a bare number, the browser
+    // says (CSS.supports: left and borderTopWidth do; lineHeight, zIndex and opacity take the
+    // number as it is); where it can't say, the common lengths below
     const LENGTHS = ['left', 'top', 'right', 'bottom', 'width', 'height', 'minWidth', 'minHeight', 'maxWidth', 'maxHeight',
       'margin', 'marginTop', 'marginRight', 'marginBottom', 'marginLeft', 'padding', 'paddingTop', 'paddingRight',
       'paddingBottom', 'paddingLeft', 'fontSize', 'borderRadius', 'borderWidth', 'gap', 'rowGap', 'columnGap', 'inset',
       'letterSpacing', 'wordSpacing', 'textIndent', 'outlineWidth', 'outlineOffset'];
     const LENGTH_SET = new Set(LENGTHS);
     const pxNoted = new Set();
+    const needsUnit = (name, text) => {
+      if (window.CSS && CSS.supports) {
+        const prop = cssName(name);
+        try {
+          return CSS.supports(prop, 'initial') && !CSS.supports(prop, text) && CSS.supports(prop, text + 'px');
+        } catch {
+          return false;
+        }
+      }
+      return LENGTH_SET.has(name);
+    };
     const asLength = (name, value) => {
       const bare = (typeof value === 'number' && Number.isFinite(value) && value !== 0) || (typeof value === 'string' && /^-?\\d+(?:\\.\\d+)?$/.test(value.trim()) && Number(value) !== 0);
       if (!bare) return value;
+      const text = String(value).trim();
+      if (!needsUnit(name, text)) return value;
       if (!pxNoted.has(name)) {
         pxNoted.add(name);
         imagined('style.' + name + ' = ' + value + ' (a number) → ' + value + 'px');
       }
-      return String(value).trim() + 'px';
+      return text + 'px';
     };
     // Browsers keep each style property on the style object itself (Chrome) or on its prototype,
     // so an element's style is handed out through a proxy that adds the px
@@ -2472,7 +2551,7 @@ export class JavascriptRuntime {
                 return typeof value === 'function' ? value.bind(target) : value;
               },
               set(target, prop, value) {
-                let given = LENGTH_SET.has(prop) ? asLength(prop, value) : value;
+                let given = typeof prop === 'string' ? asLength(prop, value) : value;
                 // (the properties are the style object's own in Chrome: the prototype's watchers don't see them)
                 if (checking && typeof prop === 'string') given = checkStyleValue(prop, given);
                 return Reflect.set(target, prop, given, target);
@@ -2724,6 +2803,8 @@ export class JavascriptRuntime {
     const borrowed = new Map();
     // The kind of element the program uses each id as ('canvas', 'media', 'field', 'dialog')
     let idKinds = {};
+    // Ids whose absence the program handles itself (element-kinds.ts checkedIds): those get null
+    let idChecked = new Set();
     const KIND_TAGS = { canvas: ['CANVAS'], media: ['AUDIO', 'VIDEO'], field: ['INPUT', 'TEXTAREA', 'SELECT'], dialog: ['DIALOG'] };
     // What stands in for each kind; sound gets a <div> (a silent <audio> would fail without an error)
     const KIND_STAND_IN = { canvas: 'canvas', field: 'input', dialog: 'dialog' };
@@ -2794,6 +2875,9 @@ export class JavascriptRuntime {
         imagined("getElementById('" + id + "') → '" + slip + "'");
         return findElementById(slip);
       }
+      // A program that tests the lookup for nothing (if (!el) { make it }) is asking the real
+      // question: it gets the real answer, and makes the element the way it meant to
+      if (idChecked.has(id)) return found;
       // The kind it is used as (getContext: a canvas), else one its name says (an id with
       // "canvas" in it), or any
       const kind = idKinds[id] || (/canvas/i.test(id) ? 'canvas' : null);
@@ -3037,6 +3121,7 @@ export class JavascriptRuntime {
       if (!__chattyTrial) checkTimer = realSetTimeout(() => { checking = false; speakChecked = false; }, CHECK_MS);
       // What kind of element each looked-up id is used as (element-kinds.ts)
       idKinds = data.idKinds || {};
+      idChecked = new Set(data.idChecked || []);
       // The names the music rule tells programs to declare (bpm, beat, start, out): a program
       // that forgets one gets a default instead of an error. Its own declarations win.
       window.bpm = 100;
@@ -3254,7 +3339,7 @@ export class JavascriptRuntime {
     ]);
     const head = [await scriptOf(hostUrl), three ? await scriptOf(three.default) : ''].join('\n');
     const json = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c');
-    const start = `<script>window.postMessage({ type: 'execute', id: 'standalone', code: ${json(code)}, idKinds: ${json(elementKinds(code))} }, '*');</script>`;
+    const start = `<script>window.postMessage({ type: 'execute', id: 'standalone', code: ${json(code)}, idKinds: ${json(elementKinds(code))}, idChecked: ${json(checkedIds(code))} }, '*');</script>`;
     return this.buildRunnerHtml(false, 'window.__chattyStandaloneHost')
       // Functions as replacements: the inlined code has $ patterns a replacement string would expand
       .replace('<head>', () => `<head>\n  <title>Chatty program</title>\n  <meta name="viewport" content="width=device-width, initial-scale=1">\n${head}`)
@@ -3486,7 +3571,7 @@ export class JavascriptRuntime {
       this.pendingRuns.set(reqId, { options, spokenTexts, timer, finish: settle });
       this.trackDownload(code);
       void withThree(code, iframe.contentWindow).then(() =>
-        iframe.contentWindow?.postMessage({ type: 'execute', id: reqId, code, idKinds: elementKinds(code), valuesExpected: VALUES_ASKED_ABOUT.test(options?.request ?? '') }, '*')
+        iframe.contentWindow?.postMessage({ type: 'execute', id: reqId, code, idKinds: elementKinds(code), idChecked: checkedIds(code), valuesExpected: VALUES_ASKED_ABOUT.test(options?.request ?? '') }, '*')
       );
     });
   }
@@ -3556,7 +3641,7 @@ export class JavascriptRuntime {
         try {
           // Not if the trial ended while three.js loaded: the frame is the next trial's by then
           void withThree(code, iframe.contentWindow, () => !finished).then(() => {
-            if (!finished) iframe.contentWindow?.postMessage({ type: 'execute', id, code, idKinds: elementKinds(code) }, '*');
+            if (!finished) iframe.contentWindow?.postMessage({ type: 'execute', id, code, idKinds: elementKinds(code), idChecked: checkedIds(code) }, '*');
           });
         } catch (err) {
           finish(err instanceof Error ? err.message : String(err));

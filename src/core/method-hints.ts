@@ -21,9 +21,6 @@ const MADE_BY: ReadonlyArray<[RegExp, string]> = [
   [/getContext\(\s*['"]webgl2['"]/, 'WebGL2RenderingContext'],
   [/getContext\(\s*['"](?:experimental-webgl|webgl)['"]/, 'WebGLRenderingContext'],
   [/new\s+(?:window\.)?(?:webkit)?AudioContext\b|AudioContext\s*\|\|/, 'AudioContext'],
-  [/\.createOscillator\(/, 'OscillatorNode'],
-  [/\.createGain\(/, 'GainNode'],
-  [/\.createBiquadFilter\(/, 'BiquadFilterNode'],
   [/(?:getElementById|querySelector|closest)\(|\.(?:parentElement|firstElementChild|lastElementChild)\b/, 'HTMLElement'],
   [/^\s*\[/, 'Array'],
   [/^\s*['"`]/, 'String'],
@@ -62,8 +59,29 @@ function declaredOnce(code: string, name: string): boolean {
   return declarations === 1 && !asParameter;
 }
 
+/** The audio node types the context's create…() methods make, for where this browser lacks the type */
+const NODE_MADE_BY: Record<string, string> = { Oscillator: 'OscillatorNode', Gain: 'GainNode', BiquadFilter: 'BiquadFilterNode' };
+
+/**
+ * The audio node an AudioContext's `create…()` makes (`ctx.createAnalyser()` is an AnalyserNode):
+ * the browser's own type of that name, where it is one of its audio nodes; a few common ones
+ * by the table above where the browser lacks the type. Only on something known to be an
+ * AudioContext: a program's own factory may name its methods the same way.
+ */
+function audioNodeMadeBy(expression: string, code: string): string | null {
+  const made = expression.match(/^\s*(?:await\s+)?([A-Za-z_$][\w$]*)\s*\.\s*create([A-Z]\w*)\s*\(/);
+  if (!made || objectType(code, made[1]) !== 'AudioContext') return null;
+  const kind = made[2];
+  const name = kind === 'BufferSource' ? 'AudioBufferSourceNode' : `${kind}Node`;
+  const g = globalThis as unknown as Record<string, unknown>;
+  const ctor: unknown = g[name];
+  const base: unknown = g.AudioNode;
+  if (typeof ctor === 'function' && typeof base === 'function' && ctor.prototype instanceof base) return name;
+  return typeof base === 'function' ? null : (NODE_MADE_BY[kind] ?? null);
+}
+
 /** The type of what an expression makes: `canvas.getContext('2d')`, `createElement('canvas')` */
-function typeMadeBy(expression: string): string | null {
+function typeMadeBy(expression: string, code = ''): string | null {
   // Only when the whole value is the call (or `new`) that makes it: in
   // `parseFloat(document.getElementById('a').value) + 1` or `getElementById('a').value` the
   // lookup is part of the value, not what it is
@@ -78,6 +96,8 @@ function typeMadeBy(expression: string): string | null {
   if (!top || !/^(?:CallExpression|NewExpression)$/.test(top.type)) return null;
   const tag = expression.match(/createElement\(\s*['"]([\w-]+)['"]/)?.[1];
   if (tag) return `element:${tag.toLowerCase()}`;
+  const node = audioNodeMadeBy(expression, code);
+  if (node) return node;
   for (const [made, type] of MADE_BY) if (made.test(expression)) return type;
   return null;
 }
@@ -94,7 +114,7 @@ export function objectType(code: string, object: string): string | null {
     const name = segments[0];
     if (!declaredOnce(code, name)) return null;
     const init = code.match(new RegExp(`\\b(?:const|let|var)\\s+${name.replace(/\$/g, '\\$')}\\s*=(?!=)\\s*([^;\\n]+)`))?.[1];
-    return init ? typeMadeBy(init) : null;
+    return init ? typeMadeBy(init, code) : null;
   }
   const last = segments[segments.length - 1];
   const headType = objectType(code, segments.slice(0, -1).join('.'));

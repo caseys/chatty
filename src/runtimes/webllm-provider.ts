@@ -2,15 +2,20 @@
 // WebLLM (MLC) chat models on WebGPU, run in a worker. WebLLM loads weights in small shards
 // straight onto the GPU, so its peak memory while loading stays near the model's own size,
 // which is what lets it load in mobile Safari. Downloads are kept in Cache Storage.
+//
+// WebLLM's library (6 MB) is loaded by the worker alone and never by the page, which matters in
+// mobile Safari's memory: the page talks to the worker in the messages of
+// workers/webllm-protocol.ts, through WebLlmClient.
 // ============================================================================
 
 import { choiceGrammar, ENGLISH_GRAMMAR, fixGrammar } from './fix-grammar.ts';
 import { retryTemperature } from './retry-temperature.ts';
-import type { WebWorkerMLCEngine } from '@mlc-ai/web-llm';
 import { isAppleMobile } from '../core/settings.ts';
 import { AFTER_LOAD_MS, settleOnIos } from '../core/settle.ts';
 import { contextWindowFor, currentDevice, kvBytesPerToken, modelMaxContext, readModelConfig, workingMemoryBudget } from './context-size.ts';
 import type { LlmGenerationOptions, LlmGenerationResult, LlmRuntimeProvider } from '../types/index.ts';
+import type { WebLlmChatRequest } from '../workers/webllm-protocol.ts';
+import { WebLlmClient, type WebLlmWorker } from './webllm-client.ts';
 
 export interface WebLlmModelSpec {
   /** WebLLM prebuilt model id (e.g. Qwen2.5-0.5B-Instruct-q4f16_1-MLC) */
@@ -141,7 +146,10 @@ export async function dropBrokenPieces(cache: Cache, baseUrl: string): Promise<n
     const url = baseUrl + dataPath;
     const stored = await cache.match(url);
     if (!stored) continue; // not downloaded yet
-    const size = (await stored.blob()).size;
+    // The header tells the size without reading the piece (tens of MB) into memory; a piece
+    // stored without one, or empty, is read
+    const length = Number(stored.headers.get('content-length'));
+    const size = length > 0 ? length : (await stored.blob()).size;
     if (size !== nbytes) {
       await cache.delete(url);
       dropped++;
@@ -178,6 +186,9 @@ export function isBrokenCacheError(err: unknown): boolean {
   return /exceeds shard size|(?:tensor|ndarray)-cache record/i.test(message);
 }
 
+/** A worker running workers/webllm.worker.ts (Vite builds the file this URL names) */
+const startWorker = (): WebLlmWorker => new Worker(new URL('../workers/webllm.worker.ts', import.meta.url), { type: 'module' });
+
 export class WebLlmProvider implements LlmRuntimeProvider {
   readonly id: string;
   /** The context it gets: the spec's until it loads, then what this device's budget holds for it (see context-size.ts) */
@@ -190,13 +201,19 @@ export class WebLlmProvider implements LlmRuntimeProvider {
   /** What WebLLM is doing while it loads ("Loading GPU shader modules[12/80]: ..."), for the status line */
   loadStage = '';
 
-  private worker: Worker | null = null;
-  private engine: WebWorkerMLCEngine | null = null;
+  /** The worker in use: set when it starts, so it also serves a load that hasn't finished */
+  private worker: WebLlmClient | null = null;
+  /** The worker once the model is loaded in it */
+  private engine: WebLlmClient | null = null;
   private initPromise: Promise<void> | null = null;
   // WebLLM runs one generation at a time
   private generationChain: Promise<unknown> = Promise.resolve();
 
-  constructor(readonly modelId: string, readonly spec: WebLlmModelSpec) {
+  constructor(
+    readonly modelId: string,
+    readonly spec: WebLlmModelSpec,
+    private readonly openWorker: () => WebLlmWorker = startWorker
+  ) {
     this.id = `webllm:${modelId}`;
     this.contextLimit = spec.contextLimit;
     this.maxOutputTokens = spec.maxOutputTokens;
@@ -209,26 +226,34 @@ export class WebLlmProvider implements LlmRuntimeProvider {
   initialize(onProgress?: (loaded: number, total: number) => void): Promise<void> {
     if (this.engine) return Promise.resolve();
     this.initPromise ??= (async () => {
-      const webllm = await import('@mlc-ai/web-llm');
       const total = this.spec.sizeBytes;
       onProgress?.(0, total);
-      await this.sizeContext(webllm.prebuiltAppConfig.model_list.find((m) => m.model_id === this.spec.mlcId)?.model);
+      let client = this.open();
       try {
-        await this.load(webllm.CreateWebWorkerMLCEngine, total, onProgress);
+        // (where the model's files are comes from WebLLM's list of models, which only the worker has)
+        const modelUrl = await client.modelUrl(this.spec.mlcId);
+        await this.sizeContext(modelUrl);
+        try {
+          await this.load(client, total, onProgress);
+        } catch (err) {
+          // A broken stored copy (an empty or cut-off piece left by a download that stopped) fails
+          // the same way every time. The pieces whose size doesn't match the model's index are
+          // deleted, so only those download again; if none can be found, the whole model is.
+          if (!isBrokenCacheError(err)) throw err;
+          this.loadStage = 'Repairing the download';
+          onProgress?.(0, total);
+          // (the failed load ended its worker)
+          client = this.open();
+          const dropped =
+            modelUrl && typeof caches !== 'undefined'
+              ? await dropBrokenPieces(await caches.open(WEBLLM_CACHE), modelFilesUrl(modelUrl)).catch(() => 0)
+              : 0;
+          if (dropped === 0) await client.deleteCache(this.spec.mlcId).catch(() => {});
+          await this.load(client, total, onProgress);
+        }
       } catch (err) {
-        // A broken stored copy (an empty or cut-off piece left by a download that stopped) fails
-        // the same way every time. The pieces whose size doesn't match the model's index are
-        // deleted, so only those download again; if none can be found, the whole model is.
-        if (!isBrokenCacheError(err)) throw err;
-        this.loadStage = 'Repairing the download';
-        onProgress?.(0, total);
-        const record = webllm.prebuiltAppConfig.model_list.find((m) => m.model_id === this.spec.mlcId);
-        const dropped =
-          record && typeof caches !== 'undefined'
-            ? await dropBrokenPieces(await caches.open(WEBLLM_CACHE), modelFilesUrl(record.model)).catch(() => 0)
-            : 0;
-        if (dropped === 0) await webllm.deleteModelAllInfoInCache(this.spec.mlcId).catch(() => {});
-        await this.load(webllm.CreateWebWorkerMLCEngine, total, onProgress);
+        this.discard(client);
+        throw err;
       }
     })().finally(() => {
       this.initPromise = null;
@@ -253,54 +278,54 @@ export class WebLlmProvider implements LlmRuntimeProvider {
     }
   }
 
-  /** One attempt at loading the model in a new worker */
-  private async load(
-    create: typeof import('@mlc-ai/web-llm').CreateWebWorkerMLCEngine,
-    total: number,
-    onProgress?: (loaded: number, total: number) => void
-  ): Promise<void> {
-    const worker = new Worker(new URL('../workers/webllm.worker.ts', import.meta.url), { type: 'module' });
-    this.worker = worker;
+  /** Starts a new worker */
+  private open(): WebLlmClient {
+    const client = new WebLlmClient(this.openWorker());
+    this.worker = client;
     // iPhone Safari gets pauses between the load's heavy steps (the worker reads this first)
-    worker.postMessage({ kind: 'chatty-pace', ms: isAppleMobile() ? IOS_LOAD_PACE_MS : 0 });
+    client.pace(isAppleMobile() ? IOS_LOAD_PACE_MS : 0);
+    return client;
+  }
+
+  /** Ends a worker that failed (unless it is no longer the one in use) */
+  private discard(client: WebLlmClient): void {
+    if (this.worker !== client) return;
+    client.terminate();
+    this.worker = null;
+  }
+
+  /** One attempt at loading the model in a worker; the worker is ended if it fails */
+  private async load(client: WebLlmClient, total: number, onProgress?: (loaded: number, total: number) => void): Promise<void> {
     // The bar only moves forward, through every step (see loadFraction)
     let downloaded = false;
     let shown = 0;
     try {
-      const engine = await create(
-        worker,
+      await client.load(
         this.spec.mlcId,
+        // Our context size, never a sliding window (the worker sets it so)
+        this.contextLimit,
         // WebLLM reports what it's doing and a 0..1 fraction of that step
-        {
-          initProgressCallback: (report) => {
-            const text = report.text ?? '';
-            this.loadStage = text;
-            if (/^Fetching param cache/i.test(text)) downloaded = true;
-            const at = loadFraction(text, report.progress, downloaded);
-            if (at === null || at <= shown) return;
-            shown = at;
-            onProgress?.(Math.round(at * total), total);
-          },
-        },
-        // Our context size, never a sliding window: WebLLM accepts only one of the two, and some
-        // models (Gemma 3) ship both
-        { context_window_size: this.contextLimit, sliding_window_size: -1 }
+        (text, progress) => {
+          this.loadStage = text;
+          if (/^Fetching param cache/i.test(text)) downloaded = true;
+          const at = loadFraction(text, progress, downloaded);
+          if (at === null || at <= shown) return;
+          shown = at;
+          onProgress?.(Math.round(at * total), total);
+        }
       );
       // A breath on iPhone before the app moves on, and the bar full only then: the last thing
       // the load changes
       await settleOnIos(AFTER_LOAD_MS);
-      if (this.worker !== worker) {
+      if (this.worker !== client) {
         // Disposed while loading
-        await engine.unload().catch(() => {});
+        await client.unload().catch(() => {});
         throw new Error(`${this.modelId} unloaded`);
       }
-      this.engine = engine;
+      this.engine = client;
       onProgress?.(total, total);
     } catch (err) {
-      if (this.worker === worker) {
-        worker.terminate();
-        this.worker = null;
-      }
+      this.discard(client);
       throw err;
     }
   }
@@ -328,7 +353,7 @@ export class WebLlmProvider implements LlmRuntimeProvider {
     const engine = this.engine;
     if (!engine) return empty(true);
 
-    const onAbort = () => void engine.interruptGenerate();
+    const onAbort = () => engine.interrupt();
     options.signal?.addEventListener('abort', onAbort, { once: true });
     let text = '';
     let tokens = 0;
@@ -338,18 +363,16 @@ export class WebLlmProvider implements LlmRuntimeProvider {
     let emitted = 0;
     try {
       const messages = toChatMessages(options.systemPrompt, options.messages);
-      const request = {
+      const request: WebLlmChatRequest = {
         messages,
-        stream: true as const,
         ...webLlmSampling(options, this.spec),
         max_tokens: options.maxOutputTokens ?? this.maxOutputTokens,
         ...(this.spec.noThinking ? { extra_body: { enable_thinking: false } } : {}),
       };
       // A fix turn is constrained to "// Cause: ..." plus code. If the grammar fails to compile or
       // generation with it throws before any text, retry once without it.
-      const consume = async (stream: AsyncIterable<{ choices: Array<{ delta?: { content?: string | null } }> }>) => {
-        for await (const chunk of stream) {
-          const delta = chunk.choices[0]?.delta?.content ?? '';
+      const consume = async (stream: AsyncIterable<string>) => {
+        for await (const delta of stream) {
           if (!delta) continue;
           raw += delta;
           const visible = withoutThinking(raw);
@@ -369,7 +392,7 @@ export class WebLlmProvider implements LlmRuntimeProvider {
       };
       {
         try {
-          await consume(await engine.chat.completions.create({ ...request, response_format: grammarFormat }));
+          await consume(engine.stream({ ...request, response_format: grammarFormat }));
         } catch (err) {
           // Text already went out (onToken): a second reply would be appended to it
           if (options.signal?.aborted || tokens > 0) throw err;
@@ -386,12 +409,12 @@ export class WebLlmProvider implements LlmRuntimeProvider {
           // grammars afterwards), and only then without
           try {
             console.warn('Grammar-constrained reply failed; retrying cooler', err);
-            await consume(await engine.chat.completions.create({ ...request, temperature: Math.min(request.temperature, 0.5), response_format: grammarFormat }));
+            await consume(engine.stream({ ...request, temperature: Math.min(request.temperature, 0.5), response_format: grammarFormat }));
           } catch (again) {
             if (options.signal?.aborted || tokens > 0) throw again;
             console.warn('Grammar-constrained reply failed again; retrying without it', again);
             restart();
-            await consume(await engine.chat.completions.create(request));
+            await consume(engine.stream(request));
           }
         }
       }
@@ -433,12 +456,11 @@ export class WebLlmProvider implements LlmRuntimeProvider {
     await this.initialize();
     const engine = this.engine;
     if (!engine) return null;
-    const onAbort = () => void engine.interruptGenerate();
+    const onAbort = () => engine.interrupt();
     options.signal?.addEventListener('abort', onAbort, { once: true });
     try {
-      const reply = await engine.chat.completions.create({
+      const reply = await engine.complete({
         messages: toChatMessages(options.systemPrompt, options.messages),
-        stream: false,
         temperature: WEBLLM_MAX_TEMPERATURE,
         top_p: 1,
         max_tokens: 1,
@@ -450,9 +472,9 @@ export class WebLlmProvider implements LlmRuntimeProvider {
         ...(this.spec.noThinking ? { extra_body: { enable_thinking: false } } : {}),
       });
       if (options.signal?.aborted) return null;
-      const first = reply.choices[0]?.logprobs?.content?.[0];
+      const first = reply.firstToken;
       if (!first) return null;
-      return choiceProbabilities(labels, [...(first.top_logprobs ?? []), { token: first.token, logprob: first.logprob }]);
+      return choiceProbabilities(labels, [...first.top_logprobs, { token: first.token, logprob: first.logprob }]);
     } catch (err) {
       console.warn('Scoring the choices failed', err);
       return null;
@@ -462,7 +484,7 @@ export class WebLlmProvider implements LlmRuntimeProvider {
   }
 
   cancel(): void {
-    void this.engine?.interruptGenerate();
+    this.engine?.interrupt();
   }
 
   async reset(): Promise<void> {

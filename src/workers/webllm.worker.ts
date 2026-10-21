@@ -1,9 +1,12 @@
 // ============================================================================
-// WebLLM (MLC) engine worker. Model download, GPU loading and generation all run here;
-// the page talks to it through WebWorkerMLCEngine (see runtimes/webllm-provider.ts).
+// WebLLM (MLC) engine worker. Model download, GPU loading and generation all run here, and this is
+// the only place WebLLM's library (6 MB) is loaded: the page talks to it through the messages in
+// webllm-protocol.ts (see runtimes/webllm-client.ts and runtimes/webllm-provider.ts).
 // ============================================================================
 
-import { WebWorkerMLCEngineHandler } from '@mlc-ai/web-llm';
+import { deleteModelAllInfoInCache, MLCEngine, prebuiltAppConfig } from '@mlc-ai/web-llm';
+import { createWebLlmHost, type WebLlmEngine } from './webllm-host.ts';
+import type { WebLlmEvent, WebLlmRequest } from './webllm-protocol.ts';
 
 // Pacing for iPhone and iPad Safari, which kills the tab when the GPU work of a load piles up (a
 // model read back from the cache comes as fast as storage allows, one weight piece straight after
@@ -39,12 +42,19 @@ if (Device) {
   };
 }
 
-const handler = new WebWorkerMLCEngineHandler();
+const host = createWebLlmHost(
+  {
+    engine: new MLCEngine() as unknown as WebLlmEngine,
+    modelUrl: (model) => prebuiltAppConfig.model_list.find((record) => record.model_id === model)?.model,
+    deleteCache: (model) => deleteModelAllInfoInCache(model),
+  },
+  (event: WebLlmEvent) => (self as unknown as Worker).postMessage(event)
+);
 self.onmessage = (event: MessageEvent) => {
-  const data = event.data as { kind?: string; ms?: number } | null;
+  const data = event.data as WebLlmRequest | null;
   if (data && data.kind === 'chatty-pace') {
     paceMs = Number(data.ms) || 0;
     return;
   }
-  handler.onmessage(event);
+  if (data) host(data);
 };

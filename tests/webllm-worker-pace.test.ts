@@ -2,10 +2,17 @@
 // shaders are built one at a time; with no pace set (every other browser) nothing waits
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
+// The worker builds its engine from WebLLM's library; here it's a stand-in that loads nothing
 vi.mock('@mlc-ai/web-llm', () => ({
-  WebWorkerMLCEngineHandler: class {
-    onmessage = vi.fn();
+  MLCEngine: class {
+    setInitProgressCallback = vi.fn();
+    reload = vi.fn(async () => {});
+    unload = vi.fn(async () => {});
+    interruptGenerate = vi.fn(async () => {});
+    chat = { completions: { create: vi.fn() } };
   },
+  prebuiltAppConfig: { model_list: [{ model_id: 'Some-Model-MLC', model: 'https://huggingface.co/mlc-ai/Some-Model-MLC' }] },
+  deleteModelAllInfoInCache: vi.fn(async () => {}),
 }));
 
 const building: number[] = [];
@@ -67,9 +74,18 @@ describe('WebLLM worker pacing', () => {
     expect(Math.max(...building)).toBe(1);
   });
 
-  it('hands every other message to WebLLM', async () => {
-    const { WebWorkerMLCEngineHandler } = await import('@mlc-ai/web-llm');
-    expect(WebWorkerMLCEngineHandler).toBeDefined();
-    expect(() => onmessage({ data: { kind: 'reload' } } as MessageEvent)).not.toThrow();
+  it('hands every other message to the engine host, and answers through postMessage', async () => {
+    const posted: unknown[] = [];
+    const scope = globalThis as unknown as { self: { postMessage: (message: unknown) => void } };
+    scope.self.postMessage = (message) => void posted.push(message);
+    onmessage({ data: { kind: 'model-url', id: 7, model: 'Some-Model-MLC' } } as MessageEvent);
+    onmessage({ data: { kind: 'model-url', id: 8, model: 'Not-A-Model' } } as MessageEvent);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(posted).toEqual([
+      { kind: 'done', id: 7, value: 'https://huggingface.co/mlc-ai/Some-Model-MLC' },
+      { kind: 'done', id: 8, value: undefined },
+    ]);
+    // A message of no known kind is ignored
+    expect(() => onmessage({ data: { kind: 'nonsense' } } as MessageEvent)).not.toThrow();
   });
 });

@@ -185,3 +185,46 @@ describe('a sound the program never made', () => {
     win.close();
   });
 });
+
+describe('an id the program checks for itself', () => {
+  let win: Win;
+  afterEach(() => win?.close());
+
+  it('gets the real answer, null, where a stand-in would hide the missing element from the program that makes it', async () => {
+    ({ win } = loadRunner());
+    win.root.innerHTML = '<p id="startBtn">go</p>';
+    win.postMessage(
+      {
+        type: 'execute',
+        id: 'c',
+        code: "window.__overlay = document.getElementById('overlay');\nwindow.__other = document.getElementById('other');\nwindow.__slip = document.getElementById('startbtn');",
+        idChecked: ['overlay', 'startbtn'],
+      },
+      '*'
+    );
+    await wait(30);
+    const w = win as any;
+    expect(w.__overlay).toBeNull();
+    // Another id still gets its stand-in, and a sure slip of a real id still finds it
+    expect(w.__other?.tagName).toBe('DIV');
+    expect(w.__slip?.id).toBe('startBtn');
+  });
+});
+
+describe('a bare number given as a style value', () => {
+  let win: Win;
+  afterEach(() => win?.close());
+
+  it('gets px for any property the browser says takes a length but not the number (CSS.supports)', async () => {
+    ({ win } = loadRunner());
+    // What this browser would answer: border widths take lengths only; line-height takes a number
+    (win as any).CSS = {
+      supports: (prop: string, value: string) => (value === 'initial' ? true : prop === 'border-top-width' ? /px$/.test(value) : prop === 'line-height' ? true : false),
+    };
+    win.postMessage({ type: 'execute', id: 'u', code: 'const d = document.createElement("div");\nd.style.borderTopWidth = 3;\nd.style.lineHeight = 1.5;\ndocument.body.appendChild(d);\nwindow.__d = d;' }, '*');
+    await wait(30);
+    const d = (win as any).__d as HTMLElement;
+    expect(d.style.borderTopWidth).toBe('3px');
+    expect(d.style.lineHeight).toBe('1.5');
+  });
+});

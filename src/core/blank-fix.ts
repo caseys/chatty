@@ -1,6 +1,6 @@
 import { parse, type Node } from 'acorn';
 import { enclosingFunction } from './line-fix.ts';
-import { methodNames } from './method-hints.ts';
+import { methodNames, objectType } from './method-hints.ts';
 import { editDistance, flatName } from './fuzzy-match.ts';
 
 /**
@@ -617,9 +617,49 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
     }
   }
 
+  // What the program reads on the blank (`ball.y > 10`, `ball.move()`; not a member it only sets,
+  // `ball.y = 0`): a candidate has to have each of them. One that lacks them runs on with
+  // undefined and makes no error, and passes its test run for nothing (`const ball = ctx` ran
+  // and drew nothing). Its members come from the browser's own type, or from the program's own
+  // object (the keys of its literal and those it sets later); a candidate whose type can't be
+  // told is kept.
+  const reads = new Set<string>();
+  if (tree) {
+    for (const span of blank.uses ?? blank.spans) {
+      const at = nodeAt(tree, span);
+      const up = at ? tree.parent.get(at) : undefined;
+      if (!at || up?.type !== 'MemberExpression' || tree.key.get(at) !== 'object' || up.computed) continue;
+      const outer = tree.parent.get(up);
+      const setOnly = outer?.type === 'AssignmentExpression' && outer.operator === '=' && tree.key.get(up) === 'left';
+      if (!setOnly) reads.add(up.property.name as string);
+    }
+  }
+  const required = [...reads].filter((m) => !(m in Object.prototype));
+  const fitsReads = (expr: string): boolean => {
+    if (required.length === 0 || !tree) return true;
+    if (/^[A-Za-z_$][\w$]*$/.test(expr)) {
+      const declarator = tree.nodes.find((n) => n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.id.name === expr);
+      const init = declarator?.init as AnyNode | undefined;
+      if (init?.type === 'ObjectExpression') {
+        const keys = new Set<string>();
+        for (const p of init.properties as AnyNode[]) if (p.type === 'Property' && !p.computed) keys.add((p.key.name ?? String(p.key.value)) as string);
+        for (const n of tree.nodes) if (n.type === 'MemberExpression' && !n.computed && n.object.type === 'Identifier' && n.object.name === expr) keys.add(n.property.name as string);
+        return required.every((m) => keys.has(m));
+      }
+      const type = objectType(code, expr);
+      if (!type || type.startsWith('@')) return true;
+      if (type.startsWith('element:') || type === 'HTMLElement') return required.every((m) => elementHas(m));
+      const known = !!(globalThis as unknown as Record<string, { prototype?: object } | undefined>)[type]?.prototype || type === 'CanvasRenderingContext2D';
+      return known ? required.every((m) => typeHas(type, m)) : true;
+    }
+    // A page element (not its .value)
+    if (/^document\.getElementById\([^)]*\)$/.test(expr)) return required.every((m) => elementHas(m));
+    return true;
+  };
+
   scored.sort((a, b) => a.score - b.score || a.order - b.order);
   const result: string[] = [];
-  for (const { expr } of scored) if (expr !== blank.text && !result.includes(expr)) result.push(expr);
+  for (const { expr } of scored) if (expr !== blank.text && !result.includes(expr) && fitsReads(expr)) result.push(expr);
   return result.slice(0, 6);
 }
 

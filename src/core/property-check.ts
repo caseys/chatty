@@ -39,6 +39,8 @@ export interface UnknownMember {
   /** The real name it is surely a slip of, or null */
   slip: string | null;
   closest: string[];
+  /** Where the member's name is written, at every use of object.member (for renameMembers) */
+  spans: Array<{ start: number; end: number }>;
 }
 
 /** Every member name (property or method, own or inherited) of a browser type or known object */
@@ -66,6 +68,16 @@ export function memberNames(type: string, scope: Record<string, unknown> = globa
 }
 
 type AnyNode = Record<string, unknown> & { type: string; start: number; end: number };
+
+/**
+ * Whether a type is one of the browser's audio nodes (its prototype chain reaches AudioNode's):
+ * every one gets the property check, since a made-up member on a node does nothing, silently
+ */
+function isAudioNodeType(type: string, scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>): boolean {
+  const ctor: unknown = scope[type];
+  const base: unknown = scope.AudioNode;
+  return typeof ctor === 'function' && typeof base === 'function' && ctor.prototype instanceof base;
+}
 
 /** A plain path like `ctx` or `document.body.style`, or null */
 function pathOf(node: AnyNode, code: string): string | null {
@@ -123,7 +135,7 @@ export function unknownMembers(code: string, scope?: Record<string, unknown>): U
     if (!type) continue;
     const key = `${use.object}.${use.member}`;
     if (seen.has(key)) continue;
-    const checked = PROPERTY_CHECKED.has(type) || (use.isCall && /^HTML|^SVG|^element:/.test(type));
+    const checked = PROPERTY_CHECKED.has(type) || isAudioNodeType(type, scope) || (use.isCall && /^HTML|^SVG|^element:/.test(type));
     if (!checked) continue;
     if (!namesOf.has(type)) namesOf.set(type, memberNames(type, scope));
     const names = namesOf.get(type)!;
@@ -146,15 +158,22 @@ export function unknownMembers(code: string, scope?: Record<string, unknown>): U
       isCall: use.isCall,
       slip,
       closest: closestMembers(type, use.member, use.isCall, scope),
+      spans: same.map((u) => ({ start: (u.node.property as AnyNode).start, end: (u.node.property as AnyNode).end })),
     });
   }
   return found;
 }
 
-/** The program with each member renamed (object.from → object.to) */
-export function renameMembers(code: string, renames: Array<{ object: string; from: string; to: string }>): string {
+/**
+ * The program with each member renamed (object.from → object.to): at the uses the parser found
+ * when they are given, else wherever the text occurs
+ */
+export function renameMembers(code: string, renames: Array<{ object: string; from: string; to: string; spans?: Array<{ start: number; end: number }> }>): string {
+  const edits = renames.flatMap(({ to, spans }) => (spans ?? []).map((span) => ({ ...span, to })));
   let out = code;
-  for (const { object, from, to } of renames) {
+  for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + e.to + out.slice(e.end);
+  for (const { object, from, to, spans } of renames) {
+    if (spans) continue;
     const path = object.replace(/[.$]/g, (c) => `\\${c}`).replace(/\\\./g, '\\s*\\.\\s*');
     out = out.replace(new RegExp(`(\\b${path}\\s*\\.\\s*)${from}\\b`, 'g'), `$1${to}`);
   }
@@ -189,7 +208,7 @@ export interface AssignmentIssue {
 type Descriptor = { get?: unknown; set?: unknown; writable?: boolean } | undefined;
 
 /** How a type's member can be written: the first descriptor along each prototype chain */
-function writability(type: string, member: string, scope?: Record<string, unknown>): 'read-only' | 'writable' | 'unknown' {
+export function writability(type: string, member: string, scope?: Record<string, unknown>): 'read-only' | 'writable' | 'unknown' {
   const kinds: string[] = [];
   for (const source of namesSources(type, scope)) {
     let target: unknown = source;

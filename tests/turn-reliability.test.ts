@@ -510,7 +510,8 @@ describe('context shared between the conversation and a fix turn', () => {
       'const out = 1;',
       'const bpm = 180;',
       'function play() {',
-      '  const t = 1;',
+      // (t is declared nowhere: one declared in play() would be shared before running, see shareDeclarations)
+      '  const n = 1;',
       '}',
       'setTimeout(() => send(t), 100);',
       'play();',
@@ -1555,4 +1556,33 @@ describe('the best version so far (keep it, build on it, come back to it)', () =
     const said = orchestrator.memoryStore.getMessages().filter((m) => m.role === 'assistant').map((m) => m.canonicalContent).join('\n');
     expect(said).toContain("I couldn't get this working after 5 tries");
   }, 30000);
+});
+
+describe('a correction by rule, test-run first', () => {
+  const TYPO = "const total = 5;\nconst label = document.createElement('p');\nlabel.textContent = `Total: ${totl}`;\nroot.appendChild(label);";
+  const CORRECTED = TYPO.replace('${totl}', '${total}');
+  const err = { error: 'totl is not defined', errorLine: 3 };
+
+  it('runs when its test run passes, with no model asked', async () => {
+    const llm = new QueueLlm([TYPO]);
+    const { executed, trialled, runtime } = fakeRuntime([err, {}], { trials: () => ({ error: null }) });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Show the total');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    expect(executed[1]).toBe(CORRECTED);
+    expect(trialled).toEqual([CORRECTED]);
+    expect(llm.turns.length).toBe(1);
+  }, 15000);
+
+  it('is not run when its test run fails the same way: the model is asked instead', async () => {
+    const llm = new QueueLlm([TYPO, "// Cause: typo\nlabel.textContent = 'Total: ' + total;"]);
+    llm.modelId = 'gemma-4-e2b-it-web';
+    const { executed, runtime } = fakeRuntime([err, {}], { trials: (code) => (code === CORRECTED ? { ...err } : { error: null }) });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Show the total');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    expect(executed[1]).toContain("label.textContent = 'Total: ' + total;");
+    expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'line']);
+    expect(runLogText()).toContain('totl → total: a test run of the correction failed the same way');
+  }, 15000);
 });

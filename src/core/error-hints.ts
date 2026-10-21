@@ -16,7 +16,8 @@ import { parse as parseLoose } from 'acorn-loose';
 import { sureMatch } from './fuzzy-match.ts';
 import { analyse, isReference, resolve } from './blank-fix.ts';
 import { onlySendsLists, usedAs } from './value-use.ts';
-import { applyCorrection, argumentCountFact, methodHint, missingMethod, objectType } from './method-hints.ts';
+import { applyCorrection, argumentCountFact, memberKind, methodHint, missingMethod, objectType } from './method-hints.ts';
+import { memberNames, writability } from './property-check.ts';
 
 export interface ErrorHint {
   /** Facts for the fix request */
@@ -150,15 +151,70 @@ function slipOf(missing: string, names: string[]): string | null {
   return sureMatch(missing, names);
 }
 
-/** The program with every use of the identifier `from` renamed to `to` (by position, not text) */
-function renameIdentifier(code: string, ast: AnyNode, from: string, to: string): string {
-  const spots: number[] = [];
-  walk(ast, (node) => {
-    if (node.type === 'Identifier' && node.name === from) spots.push(node.start);
-  });
+/**
+ * The program with every reference to `from` that nothing declares renamed to `to` (by scope: a
+ * property or key of that name, `ball.color`, and a declared `from` of another scope stay), or
+ * null when the result doesn't parse
+ */
+function renameUndeclared(code: string, from: string, to: string): string | null {
+  const tree = analyse(code);
+  if (!tree) return null;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  for (const node of tree.nodes as AnyNode[]) {
+    if (node.type !== 'Identifier' || node.name !== from) continue;
+    const parent = tree.parent.get(node);
+    const shorthand = parent?.type === 'Property' && parent.shorthand && tree.key.get(node) === 'value' && !tree.bindings.has(node);
+    if (!shorthand && !isReference(tree, node)) continue;
+    if (resolve(tree, node, from)) continue;
+    edits.push({ start: node.start, end: node.end, text: shorthand ? `${from}: ${to}` : to });
+  }
+  if (edits.length === 0) return null;
   let out = code;
-  for (const at of spots.sort((a, b) => b - a)) out = out.slice(0, at) + to + out.slice(at + from.length);
-  return out;
+  for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + e.text + out.slice(e.end);
+  return tryParse(out) ? out : null;
+}
+
+/** The references to `name` that nothing declares, each with every name its scope can see */
+function undeclaredUses(tree: NonNullable<ReturnType<typeof analyse>>, name: string): Array<{ node: AnyNode; visible: string[] }> {
+  const uses: Array<{ node: AnyNode; visible: string[] }> = [];
+  for (const node of tree.nodes as AnyNode[]) {
+    if (node.type !== 'Identifier' || node.name !== name || !isReference(tree, node) || resolve(tree, node, name)) continue;
+    const visible: string[] = [];
+    for (let at: AnyNode | undefined = node; at; at = tree.parent.get(at)) visible.push(...(tree.scopes.get(at) ?? []));
+    uses.push({ node, visible });
+  }
+  return uses;
+}
+
+/**
+ * Whether the program uses the missing name as the browser global `candidate` can be used: called
+ * or constructed, it must be a function; a member read on it must be one the global has (for a
+ * function, not one every function has: `data.length` is no use of Date). A `data` that is one
+ * letter from `Date` is a name the program forgot to declare, not a slip of the global.
+ */
+function fitsGlobal(uses: Array<{ node: AnyNode }>, tree: NonNullable<ReturnType<typeof analyse>>, candidate: string): boolean {
+  let value: unknown;
+  try {
+    value = (globalThis as unknown as Record<string, unknown>)[candidate];
+  } catch {
+    return false;
+  }
+  for (const { node } of uses) {
+    const parent = tree.parent.get(node);
+    const key = tree.key.get(node);
+    if ((parent?.type === 'CallExpression' || parent?.type === 'NewExpression') && key === 'callee') {
+      if (typeof value !== 'function') return false;
+    } else if (parent?.type === 'MemberExpression' && key === 'object' && !parent.computed) {
+      const member = (parent.property as AnyNode).name as string;
+      if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return false;
+      try {
+        if (!(member in (value as object)) || (typeof value === 'function' && member in Function.prototype)) return false;
+      } catch {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 const list = (all: string[], max = 10, names = [...new Set(all)]) => names.slice(0, max).join(', ') + (names.length > max ? ', …' : '');
@@ -182,9 +238,16 @@ function notDefined(code: string, error: string, errorLine?: number, page?: Page
     return { text: "require() loads Node packages, which the browser doesn't have: do what the package did with browser features and the ready-made helpers." };
   }
   const topLevel = declared.filter((d) => !d.inside || d.kind === 'function');
-  // A slip of a declared name, or of a browser global (requestAnimationFrme)
-  const slip = slipOf(name, declared.map((d) => d.name)) ?? slipOf(name, Object.getOwnPropertyNames(globalThis));
-  if (slip) return { correction: { code: renameIdentifier(code, ast, name, slip), note: `${name} → ${slip}` } };
+  // A slip of a declared name that the failing uses can see (not one inside another function),
+  // or of a browser global (requestAnimationFrme) used as that global can be
+  const tree = analyse(code);
+  const uses = tree ? undeclaredUses(tree, name) : [];
+  if (tree && uses.length > 0) {
+    const visible = [...new Set(uses.flatMap((use) => use.visible))];
+    const slip = slipOf(name, visible) ?? [slipOf(name, Object.getOwnPropertyNames(globalThis))].find((global) => global && fitsGlobal(uses, tree, global));
+    const renamed = slip ? renameUndeclared(code, name, slip) : null;
+    if (slip && renamed) return { correction: { code: renamed, note: `${name} → ${slip}` } };
+  }
   const functions = topLevel.filter((d) => d.kind === 'function').map((d) => `${d.name}()`);
   const variables = topLevel.filter((d) => d.kind === 'variable').map((d) => d.name);
   // An element on the page named like it (bill → #billInput): where its value is
@@ -221,7 +284,9 @@ function nothingThere(code: string, error: string, errorLine: number | undefined
     if (ids.includes(id)) continue;
     const slip = slipOf(id, ids);
     if (slip) {
-      const corrected = code.replace(new RegExp(`(['"\`])#?${id.replace(/[-]/g, '\\-')}\\1`, 'g'), (m) => m.replace(id, slip));
+      // Only where the id is looked up (not the same word in a class name or a message)
+      const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const corrected = code.replace(new RegExp(`((?:getElementById\\(\\s*['"\`]|querySelector(?:All)?\\(\\s*['"\`]#))${escaped}(?=['"\`])`, 'g'), `$1${slip}`);
       if (corrected !== code) return { correction: { code: corrected, note: `id '${id}' → '${slip}'` } };
     }
     return {
@@ -348,12 +413,11 @@ function syntaxSlip(code: string, error: string, errorLine?: number): ErrorHint 
   if (stray) return { correction: { code: stray.code, note: `a stray quote at the end of line ${stray.line} → removed` } };
   const twice = error.match(/Identifier '([^']+)' has already been declared/) ?? error.match(/Cannot declare a (?:const|let) variable twice: '([^']+)'/);
   if (twice) {
-    const name = twice[1].replace(/\$/g, '\\$');
-    let seen = 0;
-    const repaired = code
-      .replace(new RegExp(`\\b(const|let|var)(\\s+)${name}\\b`, 'g'), (_match, _kind, space) => (seen++ === 0 ? `let${space}${twice[1]}` : twice[1]));
-    if (seen > 1 && parseErrorLine(repaired) === 0) {
-      return { correction: { code: repaired, note: `${twice[1]} declared twice → assigned the second time` } };
+    // Only the declarations in one block (declareOnce, by the parser): the same name declared
+    // in another function is that function's own, and stays as it is
+    const once = declareOnce(code);
+    if (once && once.names.includes(twice[1])) {
+      return { correction: { code: once.code, note: `${once.names.join(', ')} declared twice → assigned the second time` } };
     }
   }
   return null;
@@ -363,6 +427,12 @@ function syntaxSlip(code: string, error: string, errorLine?: number): ErrorHint 
 const HELPERS = ['out', 'speak', 'clear', 'root'];
 /** Names the sandbox provides besides the browser's own */
 const SANDBOX_NAMES = [...HELPERS, 'playNotes', 'searchWikipedia'];
+/**
+ * Every name the sandbox gives a program (javascript-runtime.ts): the helpers, three.js, and the
+ * music rule's defaults. None is in this window's globalThis, so a rename of one of them would be
+ * a rename of something that exists.
+ */
+const PROVIDED_NAMES = [...SANDBOX_NAMES, 'THREE', 'bpm', 'beat', 'start'];
 
 /**
  * Before a program runs: a name used but declared nowhere it can be seen from, that differs from
@@ -390,7 +460,7 @@ export function fixCaseSlips(code: string): { code: string; fixed: Array<{ from:
     if (parent?.type === 'UnaryExpression' && parent.operator === 'typeof') continue;
     if (parent?.type === 'MetaProperty') continue;
     const name = node.name as string;
-    if (resolve(tree, node, name) || name in globalThis || SANDBOX_NAMES.includes(name)) continue;
+    if (resolve(tree, node, name) || name in globalThis || PROVIDED_NAMES.includes(name)) continue;
     const to = caseSlip(name, visibleFrom(node));
     if (to && !edits.has(node.start)) edits.set(node.start, { end: node.end, text: shorthand ? `${name}: ${to}` : to, from: name, to });
   }
@@ -464,16 +534,18 @@ function renameTopLevel(code: string, name: string, to: string): string | null {
 export function dropHelperCopies(code: string): { code: string; dropped: string[]; renamed: string[]; kept: string[] } {
   const ast = tryParse(code);
   if (!ast) return { code, dropped: [], renamed: [], kept: [] };
-  // A copy that takes nothing and holds several statements is the program itself, written as
+  // A speak() that takes nothing and holds several statements is the program itself, written as
   // `const speak = () => { … }`: it is renamed (and its calls without arguments with it), not
-  // dropped; calls that pass something go to the real helper
+  // dropped; calls that pass something go to the real helper. Only speak: its copies are
+  // otherwise dropped, while a clear() or out of the program's own is kept under another name
+  // below, with every reference to it (a handler set to it, a timer given it) renamed by scope
   const holdsProgram = (fn: AnyNode | null | undefined) =>
     !!fn && /Function/.test(fn.type) && ((fn.params as AnyNode[]) ?? []).length === 0 && (fn.body as AnyNode)?.type === 'BlockStatement' && ((fn.body as AnyNode).body as AnyNode[]).length >= 3;
   for (const statement of ast.body as AnyNode[]) {
     const declared = statement.type === 'FunctionDeclaration' ? statement : statement.type === 'VariableDeclaration' ? ((statement.declarations as AnyNode[])[0] as AnyNode) : null;
     const id = declared ? ((declared.id as AnyNode | undefined) ?? null) : null;
     const fn = statement.type === 'FunctionDeclaration' ? statement : ((declared?.init as AnyNode | undefined) ?? null);
-    if (!id || id.type !== 'Identifier' || !HELPERS.includes(id.name as string) || !holdsProgram(fn)) continue;
+    if (!id || id.type !== 'Identifier' || id.name !== 'speak' || !holdsProgram(fn)) continue;
     const name = id.name as string;
     let main = 'main';
     for (let i = 2; new RegExp(`(?<![\\w$])${main}(?![\\w$])`).test(code); i++) main = `main${i}`;
@@ -646,6 +718,9 @@ export function dropUnusedPackages(code: string): { code: string; dropped: strin
 function redeclaredHelper(code: string, error: string): ErrorHint | null {
   if (!/is not defined|Can't find variable|before initialization|uninitialized variable|is not a constructor/i.test(error)) return null;
   for (const helper of HELPERS) {
+    // Only the helper the error is about: an error elsewhere (`bpm is not defined`) is not this
+    // declaration's, and taking it out would be an edit the error gives no reason for
+    if (!new RegExp(`(?<![\\w$])${helper}(?![\\w$])`, 'i').test(error)) continue;
     const declaration = new RegExp(`^[ \\t]*(?:const|let|var)\\s+${helper}\\s*=\\s*(?:new\\s+)?${helper}\\b[^\\n]*\\n?`, 'im');
     if (declaration.test(code)) {
       return { correction: { code: code.replace(declaration, ''), note: `its own ${helper} → the ready-made one` } };
@@ -886,7 +961,8 @@ function helperDeclared(code: string, error: string): ErrorHint | null {
 
 /**
  * Properties a program sets, that small models call like methods (ctx.fillStyle("red")): the
- * browser's CanvasRenderingContext2D properties, and the element properties programs set most
+ * browser's CanvasRenderingContext2D properties, and the element properties programs set most.
+ * For an object whose type can't be told; a known type answers from its own descriptors.
  */
 const SETTABLE = new Set([
   'fillStyle', 'strokeStyle', 'font', 'lineWidth', 'globalAlpha', 'textAlign', 'textBaseline', 'lineCap', 'lineJoin',
@@ -894,11 +970,20 @@ const SETTABLE = new Set([
   'textContent', 'innerText', 'innerHTML', 'value', 'src', 'className', 'title', 'placeholder', 'disabled', 'checked',
 ]);
 
-/** `x.fillStyle is not a function`: each `x.fillStyle(value)` statement becomes `x.fillStyle = value` */
+/**
+ * `x.fillStyle is not a function`: each `x.fillStyle(value)` statement becomes `x.fillStyle = value`.
+ * Which names are properties, the browser's own descriptors say when the object's type is known
+ * (any property that can be set, on any type: el.hidden(true), input.value(5); not one with only
+ * a getter, el.children(…)); the list above is for an object whose type can't be told.
+ */
 function propertyCalled(code: string, error: string): ErrorHint | null {
   const missing = missingMethod(error);
-  if (!missing || !SETTABLE.has(missing.method)) return null;
+  if (!missing) return null;
   const { object, method: prop } = missing;
+  const type = objectType(code, object);
+  const kind = type && !type.startsWith('@') ? memberKind(type, prop) : null;
+  const settable = kind === 'property' ? memberNames(type!).includes(prop) && writability(type!, prop) !== 'read-only' : kind === null && SETTABLE.has(prop);
+  if (!settable) return null;
   const ast = tryParse(code);
   if (!ast) return null;
   const edits: Array<{ start: number; end: number; text: string }> = [];
@@ -949,23 +1034,34 @@ function unknownCallDropped(code: string, error: string, errorLine?: number): Er
     : null;
 }
 
-/** `setValueAtTime(value)` without its time (the browser needs two): 0, a time already past, sets it now */
+/** AudioParam's methods that take a value and the time it is reached: at 0, a time already past, the value is set now */
+const TIMED_PARAM_METHODS = ['setValueAtTime', 'linearRampToValueAtTime', 'exponentialRampToValueAtTime'];
+
+/**
+ * A timed AudioParam call without its time (the browser needs two values; Chrome and Firefox
+ * name the method): every one-value call of that method gets 0, a time already past, which sets
+ * the value now
+ */
 function audioParamTime(code: string, error: string): ErrorHint | null {
-  if (!/'setValueAtTime' on 'AudioParam': 2 arguments required/.test(error)) return null;
+  const methods = TIMED_PARAM_METHODS.join('|');
+  const named =
+    error.match(new RegExp(`'(${methods})' on 'AudioParam': 2 arguments required`))?.[1] ??
+    error.match(new RegExp(`AudioParam\\.(${methods}): At least 2 arguments?`))?.[1];
+  if (!named) return null;
   const ast = tryParse(code);
   if (!ast) return null;
   const ends: number[] = [];
   walk(ast, (node) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const n = node as any;
-    if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression' && !n.callee.computed && n.callee.property.name === 'setValueAtTime' && n.arguments.length === 1) {
+    if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression' && !n.callee.computed && n.callee.property.name === named && n.arguments.length === 1) {
       ends.push(n.arguments[0].end);
     }
   });
   if (ends.length === 0) return null;
   let fixed = code;
   for (const at of ends.sort((a, b) => b - a)) fixed = `${fixed.slice(0, at)}, 0${fixed.slice(at)}`;
-  return tryParse(fixed) ? { correction: { code: fixed, note: 'setValueAtTime(value) → setValueAtTime(value, 0): a time already past sets it now' } } : null;
+  return tryParse(fixed) ? { correction: { code: fixed, note: `${named}(value) → ${named}(value, 0): a time already past sets it now` } } : null;
 }
 
 /**
@@ -1055,7 +1151,12 @@ function callOnUndefined(code: string, error: string, errorLine?: number): Error
         maker;
     }
   }
-  const fn = maker ? nodes.find((n) => n.type === 'FunctionDeclaration' && n.id?.name === maker) : null;
+  // The program's function of that name: declared, or a function or arrow with a block body held
+  // in a const/let/var (the parser's other shapes of the same thing)
+  const functionNamed = (name: string) =>
+    nodes.find((n) => n.type === 'FunctionDeclaration' && n.id?.name === name) ??
+    nodes.find((n) => n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.id.name === name && /Function/.test(n.init?.type ?? '') && n.init.body?.type === 'BlockStatement')?.init;
+  const fn = maker ? functionNamed(maker) : null;
   if (fn) {
     let returns = false;
     walk(fn.body, (n) => {
@@ -1213,10 +1314,26 @@ export function loopOneFrameAnimations(code: string): { code: string; looped: st
     });
     return found;
   };
+  // A function something else keeps going (setInterval(update, 50), or a loop that calls it and
+  // asks for its own next frame) has its pace: the one frame asked for it is its first step only
+  const driven = new Set<string>();
+  for (const n of tree.nodes as AnyNode[]) {
+    if (n.type !== 'CallExpression') continue;
+    const name = calledName(n.callee as AnyNode);
+    const first = (n.arguments as AnyNode[])[0];
+    if (name && /^(?:setTimeout|setInterval)$/.test(name) && first?.type === 'Identifier') driven.add(first.name as string);
+  }
+  for (const [name, fn] of functions) {
+    if (!scheduling(fn)) continue;
+    walk(fn.body as AnyNode, (node) => {
+      const callee = node.callee as AnyNode | undefined;
+      if (node.type === 'CallExpression' && callee?.type === 'Identifier' && callee.name !== name) driven.add(callee.name as string);
+    });
+  }
   const edits: Array<{ at: number; text: string; name: string }> = [];
   for (const name of requested) {
     const fn = functions.get(name);
-    if (!fn) continue;
+    if (!fn || driven.has(name)) continue;
     const own = new Set<string>();
     let schedules = false;
     let moves = false;
@@ -1343,52 +1460,57 @@ const AUDIO_NODE_MAKERS = ['createOscillator', 'createGain', 'createAnalyser', '
  * becomes `ctx.createOscillator()` (`ctx.oscillator()` too)
  */
 export function fixAudioNodeProperties(code: string): { code: string; fixed: string[] } {
-  const ast = tryParse(code);
-  if (!ast) return { code, fixed: [] };
+  const tree = analyse(code);
+  if (!tree) return { code, fixed: [] };
   const proto = (globalThis as unknown as { AudioContext?: { prototype: object } }).AudioContext?.prototype;
   const makers = proto ? Object.getOwnPropertyNames(Object.getPrototypeOf(proto) ?? {}).concat(Object.getOwnPropertyNames(proto)).filter((k) => /^create[A-Z]/.test(k)) : AUDIO_NODE_MAKERS;
   const isNewAudioContext = (n: AnyNode | null | undefined) =>
     !!n && n.type === 'NewExpression' && /AudioContext/.test(code.slice((n.callee as AnyNode).start, (n.callee as AnyNode).end));
-  // Names that hold an AudioContext the program made
-  const contexts = new Set<string>();
-  walk(ast, (node) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const n = node as any;
-    if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && isNewAudioContext(n.init)) contexts.add(n.id.name);
-  });
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const onContext = (n: any) => n.type === 'MemberExpression' && !n.computed && (isNewAudioContext(n.object) || (n.object.type === 'Identifier' && contexts.has(n.object.name)));
+  // The variables that hold an AudioContext the program made, by the scope that declares each
+  // (a parameter or variable of the same name in another function, a gain node called ctx, is
+  // something else), and that nothing assigns again
+  const held = new Map<AnyNode, Set<string>>();
+  for (const n of tree.nodes as AnyNode[]) {
+    if (n.type !== 'VariableDeclarator' || (n.id as AnyNode).type !== 'Identifier' || !isNewAudioContext(n.init as AnyNode)) continue;
+    const name = (n.id as AnyNode).name as string;
+    const scope = resolve(tree, n.id as AnyNode, name);
+    if (!scope) continue;
+    if (!held.has(scope)) held.set(scope, new Set());
+    held.get(scope)!.add(name);
+  }
+  for (const n of tree.nodes as AnyNode[]) {
+    if (n.type !== 'AssignmentExpression' || (n.left as AnyNode).type !== 'Identifier') continue;
+    const name = (n.left as AnyNode).name as string;
+    const scope = resolve(tree, n.left as AnyNode, name);
+    if (scope) held.get(scope)?.delete(name);
+  }
+  const holdsContext = (n: AnyNode) => {
+    if (n.type !== 'Identifier' || !isReference(tree, n)) return false;
+    const scope = resolve(tree, n, n.name as string);
+    return !!scope && !!held.get(scope)?.has(n.name as string);
+  };
+  const onContext = (n: AnyNode) => n.type === 'MemberExpression' && !n.computed && (isNewAudioContext(n.object as AnyNode) || holdsContext(n.object as AnyNode));
   // A property the program sets on the context itself (ctx.analyser = ctx.createAnalyser()) is
   // its own: every read of it is that node, not a new one
   const assigned = new Set<string>();
-  walk(ast, (node) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const n = node as any;
-    if (n.type === 'AssignmentExpression' && onContext(n.left)) assigned.add(n.left.property.name);
-  });
+  for (const n of tree.nodes as AnyNode[]) {
+    if (n.type === 'AssignmentExpression' && onContext(n.left as AnyNode)) assigned.add(((n.left as AnyNode).property as AnyNode).name as string);
+  }
   const edits: Array<{ start: number; end: number; text: string }> = [];
   const fixed: string[] = [];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const visit = (n: any, parent: any, key: string) => {
-    if (!n || typeof n.type !== 'string') return;
-    if (onContext(n)) {
-      const prop: string = n.property.name;
-      const maker = `create${prop[0].toUpperCase()}${prop.slice(1)}`;
-      const written = parent?.type === 'AssignmentExpression' && key === 'left';
-      if (!written && !assigned.has(prop) && !(proto && prop in proto) && makers.includes(maker)) {
-        const called = parent?.type === 'CallExpression' && key === 'callee';
-        edits.push({ start: n.property.start, end: n.property.end, text: called ? maker : `${maker}()` });
-        fixed.push(`${prop} → ${maker}()`);
-      }
-    }
-    for (const k of Object.keys(n)) {
-      if (k === 'loc') continue;
-      const v = n[k];
-      if (Array.isArray(v)) v.forEach((c) => visit(c, n, k));
-      else if (v && typeof v.type === 'string') visit(v, n, k);
-    }
-  };
-  visit(ast, null, '');
+  for (const n of tree.nodes as AnyNode[]) {
+    if (!onContext(n)) continue;
+    const parent = tree.parent.get(n);
+    const key = tree.key.get(n);
+    const property = n.property as AnyNode;
+    const prop = property.name as string;
+    const maker = `create${prop[0].toUpperCase()}${prop.slice(1)}`;
+    const written = parent?.type === 'AssignmentExpression' && key === 'left';
+    if (written || assigned.has(prop) || (proto && prop in proto) || !makers.includes(maker)) continue;
+    const called = parent?.type === 'CallExpression' && key === 'callee';
+    edits.push({ start: property.start, end: property.end, text: called ? maker : `${maker}()` });
+    fixed.push(`${prop} → ${maker}()`);
+  }
   if (edits.length === 0) return { code, fixed: [] };
   let out = code;
   for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + e.text + out.slice(e.end);
@@ -1508,4 +1630,76 @@ export function declareOnce(code: string): { code: string; names: string[] } | n
   let out = code;
   for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + e.text + out.slice(e.end);
   return tryParse(out) ? { code: out, names: [...names] } : null;
+}
+
+/**
+ * Before a program runs: a name used where it isn't visible, that the program declares exactly
+ * once, inside one of its top-level functions (`const ball = {…}` in checkCollision(), used in
+ * checkWallCollision()), is declared for the whole program: `let ball;` goes before that
+ * function, and its declaration becomes an assignment. The function still sets the value each
+ * time it runs, and every other part of the program now reaches it. A name read with typeof (a
+ * program asking whether it exists) is left alone, and the result must parse.
+ */
+export function shareDeclarations(code: string): { code: string; shared: Array<{ name: string; from: string; line: number }> } {
+  const tree = analyse(code);
+  if (!tree) return { code, shared: [] };
+  const unresolved = new Set<string>();
+  const asked = new Set<string>();
+  for (const n of tree.nodes as AnyNode[]) {
+    if (n.type !== 'Identifier' || !isReference(tree, n)) continue;
+    const name = n.name as string;
+    if (resolve(tree, n, name) || name in globalThis || SANDBOX_NAMES.includes(name)) continue;
+    const parent = tree.parent.get(n);
+    if (parent?.type === 'UnaryExpression' && parent.operator === 'typeof') asked.add(name);
+    unresolved.add(name);
+  }
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const shared: Array<{ name: string; from: string; line: number }> = [];
+  for (const name of unresolved) {
+    if (asked.has(name)) continue;
+    // Declared exactly once in the whole program (no parameter, function or other variable of that name)
+    const bindings = [...tree.bindings].filter((b) => b.name === name);
+    if (bindings.length !== 1) continue;
+    const declarator = tree.parent.get(bindings[0]);
+    if (declarator?.type !== 'VariableDeclarator' || declarator.id !== bindings[0] || !declarator.init) continue;
+    const statement = tree.parent.get(declarator);
+    if (statement?.type !== 'VariableDeclaration' || statement.declarations.length !== 1) continue;
+    const body = tree.parent.get(statement);
+    const fn = body ? tree.parent.get(body) : undefined;
+    if (body?.type !== 'BlockStatement' || !fn || !/Function/.test(fn.type)) continue;
+    // A top-level function: declared, or a function or arrow held in a top-level const/let/var
+    // (the parser's other shapes of the same thing); the shared declaration goes before that statement
+    let top: AnyNode | undefined;
+    let fnName: string | undefined;
+    if (fn.type === 'FunctionDeclaration') {
+      if (fn.id && tree.parent.get(fn)?.type === 'Program') [top, fnName] = [fn, fn.id.name as string];
+    } else {
+      const declarator = tree.parent.get(fn);
+      const declaration = declarator ? tree.parent.get(declarator) : undefined;
+      if (declarator?.type === 'VariableDeclarator' && tree.key.get(fn) === 'init' && declarator.id.type === 'Identifier' && declaration?.type === 'VariableDeclaration' && tree.parent.get(declaration)?.type === 'Program') {
+        [top, fnName] = [declaration, declarator.id.name as string];
+      }
+    }
+    if (!top || !fnName) continue;
+    // Where a shared variable would act differently from the function's own: two runs of it at
+    // once (async, a generator, a function that calls itself), or a function inside it that
+    // keeps its own copy (a closure over the name)
+    if (fn.async || fn.generator) continue;
+    let differs = false;
+    walk(fn.body as AnyNode, (node) => {
+      if (differs) return;
+      if (node.type === 'CallExpression' && (node.callee as AnyNode).type === 'Identifier' && (node.callee as AnyNode).name === fnName) differs = true;
+      if (/Function/.test(node.type)) walk(node.body as AnyNode, (inner) => {
+        if (inner.type === 'Identifier' && inner.name === name) differs = true;
+      });
+    });
+    if (differs) continue;
+    edits.push({ start: top.start, end: top.start, text: `let ${name};\n` });
+    edits.push({ start: statement.start, end: declarator.start, text: '' });
+    shared.push({ name, from: fnName, line: lineOf(top) });
+  }
+  if (edits.length === 0) return { code, shared: [] };
+  let out = code;
+  for (const e of edits.sort((a, b) => b.start - a.start || b.end - a.end)) out = out.slice(0, e.start) + e.text + out.slice(e.end);
+  return tryParse(out) ? { code: out, shared } : { code, shared: [] };
 }

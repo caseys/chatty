@@ -147,3 +147,12 @@ describe('style values the browser would ignore', () => {
     expect(unusableAssignments(el("el.style.display = 'flexbox';"), {})).toEqual([]);
   });
 });
+
+describe('a slipped member is renamed where the parser found it', () => {
+  it('not in a string of the same text', () => {
+    const [issue] = unknownMembers(canvasCode("ctx.fillstyle = 'red';\nspeak('ctx.fillstyle');\nctx.fillstyle = 'blue';"), scope);
+    expect(issue.spans).toHaveLength(2);
+    const renamed = renameMembers(canvasCode("ctx.fillstyle = 'red';\nspeak('ctx.fillstyle');\nctx.fillstyle = 'blue';"), [{ object: 'ctx', from: 'fillstyle', to: 'fillStyle', spans: issue.spans }]);
+    expect(renamed).toBe(canvasCode("ctx.fillStyle = 'red';\nspeak('ctx.fillstyle');\nctx.fillStyle = 'blue';"));
+  });
+});

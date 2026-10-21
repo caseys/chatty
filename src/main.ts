@@ -3,7 +3,7 @@
 // Powered by the unified VoiceAssistantEngine
 // ============================================================================
 
-import { formatRepairTally, repairTally } from './core/run-log.ts';
+import { formatRepairTally, repairTally, runLogVersion } from './core/run-log.ts';
 import Prism from 'prismjs';
 import { VoiceAssistantEngine } from './core/voice-assistant-engine.ts';
 import { MODEL_REGISTRY } from './core/model-manager.ts';
@@ -87,6 +87,9 @@ export class MinimalVoiceApp {
   private rawOutputTurnId: string | null = null;
   /** The raw panel shows the run log (tap the run status) instead of the newest code */
   private showingRunLog = false;
+  /** The tally line over the run log: read from every chat's stored log only when an entry was added since (not on every repaint) */
+  private tallyLine = '';
+  private tallyVersion = -1;
   private lastRawOutput = '';
   /** The newest program, speak() lines included (what Share links to) */
   private panelCode = '';
@@ -883,6 +886,8 @@ export class MinimalVoiceApp {
     this.bubbles.clear();
     this.turnBubbles.clear();
     this.interimUserBubble = null;
+    // A new or other chat starts on its code, not on the run log a give-up (or a tap) left showing
+    this.showingRunLog = false;
     this.setRawOutput('');
     this.setRunStatus(null);
     this.showChatExamples(true);
@@ -1022,7 +1027,11 @@ export class MinimalVoiceApp {
     const el = this.rawOutputEl;
     if (!el) return;
     if (this.showingRunLog) {
-      el.textContent = `${formatRepairTally(repairTally())}\n\n${this.engine.getRunLog() || 'Nothing has run yet.'}`;
+      if (this.tallyVersion !== runLogVersion()) {
+        this.tallyVersion = runLogVersion();
+        this.tallyLine = formatRepairTally(repairTally());
+      }
+      el.textContent = `${this.tallyLine}\n\n${this.engine.getRunLog() || 'Nothing has run yet.'}`;
     } else {
       el.innerHTML = Prism.highlight(code, Prism.languages.javascript, 'javascript');
     }

@@ -3,7 +3,9 @@
  * model for it, the model's whole reply, every program as it ran, its speak() and clear() calls,
  * its errors, and every retry or correction with its reason and the reply it threw away. A later
  * program or a fix replaces what the card and the chat show; this keeps all of it. One log per
- * chat (the last 300 entries each, for the 20 most recent chats), in localStorage (chatty_run_logs).
+ * chat (the last 300 entries each, for the 20 most recent chats), in localStorage: one key per
+ * chat (chatty_run_log:<chat>) and a small index of the chat ids, oldest first. Only the active
+ * chat's entries are held in memory; the other chats are read from storage when asked for.
  */
 export type RunLogEntryKind =
   | 'request'
@@ -18,25 +20,115 @@ export type RunLogEntryKind =
   | 'retry'
   | 'discarded';
 
-const KEY = 'chatty_run_logs';
+const KEY_PREFIX = 'chatty_run_log:';
+const INDEX_KEY = 'chatty_run_log_index';
+/** The old single key holding every chat's log */
+const OLD_KEY = 'chatty_run_logs';
 const MAX_ENTRIES = 300;
 const MAX_CHATS = 20;
 /** Multi-line entries: the text starts on the next line */
 const BLOCK_KINDS = new Set<RunLogEntryKind>(['sent', 'program', 'discarded', 'reply', 'console']);
 
-let logs: Record<string, string[]> | null = null;
+/** The chat being written to: the only log held in memory */
+let active: { chat: string; entries: string[] } | null = null;
+let migrated = false;
+/** Entries appended so far this page-load: lets a view tell whether the log has changed */
+let appended = 0;
 let currentChat = () => 'default';
 
-function load(): Record<string, string[]> {
-  if (logs) return logs;
+const chatKey = (chat: string) => KEY_PREFIX + chat;
+
+function readIndex(): string[] {
   try {
-    localStorage.removeItem('chatty_run_log'); // the old single log, shared by every chat
-    const parsed = JSON.parse(localStorage.getItem(KEY) ?? '{}');
-    logs = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    const ids = JSON.parse(localStorage.getItem(INDEX_KEY) ?? '[]');
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [];
   } catch {
-    logs = {};
+    return [];
   }
-  return logs!;
+}
+
+function readChat(chat: string): string[] {
+  try {
+    const entries = JSON.parse(localStorage.getItem(chatKey(chat)) ?? '[]');
+    return Array.isArray(entries) ? entries.filter((e): e is string => typeof e === 'string').slice(-MAX_ENTRIES) : [];
+  } catch {
+    return [];
+  }
+}
+
+function removeChat(chat: string): void {
+  try {
+    localStorage.removeItem(chatKey(chat));
+  } catch {
+    // Storage blocked: nothing to remove
+  }
+}
+
+/** The old single key (every chat in one string) becomes one key per chat, once */
+function migrate(): void {
+  if (migrated) return;
+  migrated = true;
+  try {
+    localStorage.removeItem('chatty_run_log'); // the older log shared by every chat
+    const old = localStorage.getItem(OLD_KEY);
+    if (old === null) return;
+    // Removed first: while it stays, its copy would fill the storage the new keys need
+    localStorage.removeItem(OLD_KEY);
+    const parsed: unknown = JSON.parse(old);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    const ids: string[] = [];
+    for (const [chat, entries] of Object.entries(parsed).slice(-MAX_CHATS)) {
+      if (!Array.isArray(entries)) continue;
+      try {
+        localStorage.setItem(chatKey(chat), JSON.stringify(entries.filter((e) => typeof e === 'string').slice(-MAX_ENTRIES)));
+        ids.push(chat);
+      } catch {
+        break; // no room for more
+      }
+    }
+    localStorage.setItem(INDEX_KEY, JSON.stringify(ids));
+  } catch {
+    // Unreadable or storage blocked: the old log is not carried over
+  }
+}
+
+/** The active chat's entries: read from storage when the chat has changed since the last call */
+function activeLog(): string[] {
+  migrate();
+  const chat = currentChat();
+  if (active?.chat !== chat) active = { chat, entries: readChat(chat) };
+  return active.entries;
+}
+
+/**
+ * Writes the chat's log (and the index when this chat is not already the newest in it). Only this
+ * chat's string is built. When the storage is full, the oldest other chats are dropped one at a
+ * time and the same string is written again, until it fits or this chat is the only one left.
+ */
+function save(chat: string, entries: string[]): void {
+  let json: string;
+  try {
+    json = JSON.stringify(entries);
+  } catch {
+    return;
+  }
+  const stored = readIndex();
+  const ids = stored.filter((id) => id !== chat);
+  ids.push(chat);
+  while (ids.length > MAX_CHATS) removeChat(ids.shift()!);
+  let indexChanged = stored.length !== ids.length || stored[stored.length - 1] !== chat;
+  for (;;) {
+    try {
+      if (indexChanged) localStorage.setItem(INDEX_KEY, JSON.stringify(ids));
+      localStorage.setItem(chatKey(chat), json);
+      return;
+    } catch {
+      // Storage full or blocked: the log still lives for this page
+      if (ids.length <= 1) return;
+      removeChat(ids.shift()!);
+      indexChanged = true;
+    }
+  }
 }
 
 /** Which chat new entries belong to (the engine's active conversation) */
@@ -47,25 +139,21 @@ export function setRunLogChat(chatId: () => string | null | undefined): void {
 export function appendRunLog(kind: RunLogEntryKind, text: string): void {
   const time = new Date().toTimeString().slice(0, 8);
   const body = BLOCK_KINDS.has(kind) ? `\n${text}` : text ? ` ${text}` : '';
-  const all = load();
-  const chat = currentChat();
-  // The chat just written to moves to the end, so the oldest chats are the ones dropped
-  const log = all[chat] ?? [];
-  delete all[chat];
-  all[chat] = log;
+  const log = activeLog();
+  appended++;
   log.push(`[${time}] ${kind}${kind === 'clear' ? '()' : ':'}${body}`);
   if (log.length > MAX_ENTRIES) log.splice(0, log.length - MAX_ENTRIES);
-  for (const old of Object.keys(all).slice(0, Math.max(0, Object.keys(all).length - MAX_CHATS))) delete all[old];
-  try {
-    localStorage.setItem(KEY, JSON.stringify(all));
-  } catch {
-    // Storage full or blocked: the log still lives for this page
-  }
+  save(active!.chat, log);
+}
+
+/** Changes whenever an entry is appended (to any chat) */
+export function runLogVersion(): number {
+  return appended;
 }
 
 /** This chat's log as one string, oldest first */
 export function runLogText(): string {
-  return (load()[currentChat()] ?? []).join('\n');
+  return activeLog().join('\n');
 }
 
 export interface RepairTally {
@@ -109,24 +197,33 @@ function discardedKind(text: string): string {
   return first.slice(3).split(/: |\.\s/)[0].replace(/[.:]$/, '').slice(0, 80);
 }
 
+/** Adds how often each repair fired in one chat's log to the tally */
+function addToTally(tally: RepairTally, log: string[]): void {
+  for (const entry of log) {
+    const m = /^\[[^\]]*\] (imagined|retry|discarded):\s?([\s\S]*)$/.exec(entry);
+    if (!m) continue;
+    const kind = m[1] as keyof RepairTally;
+    const key = (kind === 'imagined' ? imaginedKind : kind === 'retry' ? retryKind : discardedKind)(m[2].trim());
+    tally[kind][key] = (tally[kind][key] ?? 0) + 1;
+  }
+}
+
 /** Count how often each repair fired across the given logs (oldest to newest entries, any chats) */
 export function tallyRepairs(all: Record<string, string[]>): RepairTally {
   const tally: RepairTally = { imagined: {}, retry: {}, discarded: {} };
-  for (const log of Object.values(all)) {
-    for (const entry of log) {
-      const m = /^\[[^\]]*\] (imagined|retry|discarded):\s?([\s\S]*)$/.exec(entry);
-      if (!m) continue;
-      const kind = m[1] as keyof RepairTally;
-      const key = (kind === 'imagined' ? imaginedKind : kind === 'retry' ? retryKind : discardedKind)(m[2].trim());
-      tally[kind][key] = (tally[kind][key] ?? 0) + 1;
-    }
-  }
+  for (const log of Object.values(all)) addToTally(tally, log);
   return tally;
 }
 
-/** Tally across every chat's log in storage */
+/** Tally across every chat's log in storage, one chat read at a time (none is kept) */
 export function repairTally(): RepairTally {
-  return tallyRepairs(load());
+  const tally: RepairTally = { imagined: {}, retry: {}, discarded: {} };
+  const here = activeLog(); // (this also moves an old single-key log into per-chat keys)
+  const chat = active!.chat;
+  const ids = readIndex();
+  for (const id of ids) addToTally(tally, id === chat ? here : readChat(id));
+  if (!ids.includes(chat)) addToTally(tally, here); // not saved (storage full or blocked)
+  return tally;
 }
 
 /** One compact line: "Repairs across chats: fixed … → … ×3; retry the program failed ×2; discarded … ×1" */

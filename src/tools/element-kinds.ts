@@ -79,3 +79,46 @@ export function elementKinds(code: string): Record<string, ElementKind> {
   for (const [id, set] of seen) if (set.size === 1) kinds[id] = [...set][0];
   return kinds;
 }
+
+/**
+ * The looked-up ids whose absence the program handles itself: a lookup (or the variable holding
+ * one) tested for nothing (`if (!el)`, `el ?? …`, `el || …`, `el === null`, `el?.…`, `if (el)`).
+ * The sandbox gives those the real answer, null, instead of a stand-in: a program that makes the
+ * element when it is missing must find it missing.
+ */
+export function checkedIds(code: string): string[] {
+  let ast: AnyNode;
+  try {
+    ast = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true }) as unknown as AnyNode;
+  } catch {
+    return [];
+  }
+  const holders = new Map<string, string>();
+  const checked = new Set<string>();
+  const walk = (node: AnyNode, visit: (n: AnyNode, parent: AnyNode | null, key: string) => void, parent: AnyNode | null = null, key = '') => {
+    visit(node, parent, key);
+    for (const [k, value] of Object.entries(node)) {
+      if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && walk(child, visit, node, k);
+      else if (value && typeof value === 'object' && typeof (value as AnyNode).type === 'string') walk(value as AnyNode, visit, node, k);
+    }
+  };
+  walk(ast, (node) => {
+    if (node.type === 'VariableDeclarator' && (node.id as AnyNode).type === 'Identifier' && node.init) {
+      const id = lookedUpId(node.init as AnyNode);
+      if (id) holders.set((node.id as AnyNode).name as string, id);
+    }
+  });
+  const isNothing = (n: AnyNode) => (n.type === 'Literal' && n.value === null) || (n.type === 'Identifier' && n.name === 'undefined');
+  walk(ast, (node, parent, key) => {
+    const id = lookedUpId(node) ?? (node.type === 'Identifier' && key !== 'property' && key !== 'id' ? holders.get(node.name as string) : undefined);
+    if (!id || !parent) return;
+    const tested =
+      (parent.type === 'UnaryExpression' && parent.operator === '!') ||
+      ((parent.type === 'IfStatement' || parent.type === 'ConditionalExpression' || parent.type === 'WhileStatement') && key === 'test') ||
+      (parent.type === 'LogicalExpression' && key === 'left') ||
+      (parent.type === 'BinaryExpression' && /^[!=]==?$/.test(parent.operator as string) && isNothing((key === 'left' ? parent.right : parent.left) as AnyNode)) ||
+      ((parent.type === 'MemberExpression' || parent.type === 'CallExpression') && !!parent.optional && key === (parent.type === 'MemberExpression' ? 'object' : 'callee'));
+    if (tested) checked.add(id);
+  });
+  return [...checked];
+}

@@ -109,7 +109,7 @@ describe('history of a fixed program', () => {
       stateCoordinator: new StateMachineCoordinator(),
       llmProvider: { id: 'q', modelId: 'q', contextLimit: 8192, maxOutputTokens: 512 } as any,
     });
-    (orchestrator as any).correctedPrograms.set('t1', 'bang();\nspeak("Done.");');
+    (orchestrator as any).correctedPrograms.set('t1', { code: 'bang();\nspeak("Done.");', request: 't1' });
     const { promptMessages } = (orchestrator as any).buildModelPrompt(
       'hello',
       { workingMessages: [{ id: 'u', turnId: 't1', role: 'user', canonicalContent: 'Do it' }, broken], conversationSummary: null, relevantMemories: [], resolvedReferencesNote: null, estimatedTokens: 0 },

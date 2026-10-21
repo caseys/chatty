@@ -38,10 +38,11 @@ import {
   stripComments,
   syntaxErrorLine,
 } from '../tools/javascript-runtime.ts';
+import { setForRecentRequests } from './recent-requests.ts';
 import { appendRunLog } from './run-log.ts';
 import { blankChoices, blankRequest, choiceRequest, declareMissing, fillBlank, findBlank, type Blank } from './blank-fix.ts';
 import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest, restoreDeclarations } from './line-fix.ts';
-import { dropBrowserCopies, dropHelperCopies, dropStrayQuote, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
+import { shareDeclarations, dropBrowserCopies, dropHelperCopies, dropStrayQuote, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
 import { applyAssignmentFixes, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { LOCAL_CHAT_MODELS } from './settings.ts';
@@ -461,7 +462,8 @@ const CAPABILITIES: ReadonlyArray<{ name: string; asks: (request: string) => boo
   {
     name: 'page',
     asks: (r) => INTERFACE_THING.test(r),
-    calls: /\bcreateElement\s*\(|\binnerHTML\b|\binsertAdjacentHTML\b|\.(?:append|appendChild|prepend|replaceChildren)\s*\(/,
+    // (text set on an element builds the page too: a fix that turns innerHTML into textContent keeps it)
+    calls: /\bcreateElement\s*\(|\binnerHTML\b|\binsertAdjacentHTML\b|\.(?:append|appendChild|prepend|replaceChildren)\s*\(|\.(?:textContent|innerText)\s*=/,
   },
   {
     name: 'controls',
@@ -634,7 +636,7 @@ export class ConversationOrchestrator {
   /** Aborts the blank stage's model calls when the user starts a new turn (see blankStage) */
   private blankAbort: AbortController | null = null;
   /** Requests (by original turn) whose blank stage has run: a large model gets it once, after its line fix fails */
-  /** The questions each request's fixes have asked (by requestKey) */
+  /** The questions each request's fixes have asked (by requestKey and error). This and the next three keep only the last MAX_REQUESTS_KEPT requests (see recent-requests.ts) */
   private fixKindsUsed = new Map<string, Set<FixKind>>();
   /** Fix replies that were not used, by request: the last question lists them */
   private failedReplies = new Map<string, string[]>();
@@ -651,7 +653,7 @@ export class ConversationOrchestrator {
   /** The system prompt last written to the run log, so it is logged only when it changes */
   private loggedSystemPrompt: { chat: string; text: string } | null = null;
   /** Programs whose slips were corrected and re-run, by turn: they stand for the turn's program in later prompts */
-  private correctedPrograms = new Map<string, string>();
+  private correctedPrograms = new Map<string, { code: string; request: string }>();
   // User messages that went out with notes added (see buildModelPrompt), by message id
   private sentRequests = new Map<string, string>();
   // Phone pipeline (small models): router picks a tool / code / chat each turn
@@ -1499,7 +1501,7 @@ export class ConversationOrchestrator {
           const unknown = inspected.isProse ? [] : unknownMembers(executableCode);
           const slips = unknown.filter((issue) => issue.slip);
           if (slips.length > 0) {
-            executableCode = renameMembers(executableCode, slips.map((issue) => ({ object: issue.object, from: issue.member, to: issue.slip! })));
+            executableCode = renameMembers(executableCode, slips.map((issue) => ({ object: issue.object, from: issue.member, to: issue.slip!, spans: issue.spans })));
             for (const issue of slips) appendRunLog('imagined', `${issue.object}.${issue.member} → ${issue.object}.${issue.slip}: corrected before running`);
           }
           // (soft: a member this browser lacks may be one a newer browser has, ctx.filter on
@@ -1550,6 +1552,16 @@ export class ConversationOrchestrator {
               for (const issue of notThere) issue.line += frames.atLines.filter((at) => at < issue.line).length;
               for (const name of frames.looped) appendRunLog('imagined', `${name}() moved things for one frame only → it asks for the next frame: corrected before running`);
             }
+            // A variable declared inside one function and used in another: declared for the whole program
+            const sharing = shareDeclarations(executableCode);
+            if (sharing.shared.length > 0) {
+              executableCode = sharing.code;
+              for (const { name, from, line } of sharing.shared) {
+                // (each adds one line before its function)
+                for (const issue of notThere) if (issue.line >= line) issue.line += 1;
+                appendRunLog('imagined', `${name} was declared inside ${from}() but used outside it → declared for the whole program, set in ${from}(): corrected before running`);
+              }
+            }
             // A drawing context, canvas or audio context it uses but never made: made at its top
             const missing = declareMissing(executableCode);
             if (missing.declared.length > 0) {
@@ -1598,7 +1610,7 @@ export class ConversationOrchestrator {
                 rawContent.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('//') && !l.startsWith('```'));
               if (shown) {
                 const key = this.requestKey(failed);
-                this.failedReplies.set(key, [...(this.failedReplies.get(key) ?? []), shown]);
+                setForRecentRequests(this.failedReplies, key, [...(this.failedReplies.get(key) ?? []), shown]);
               }
             }
             // A try that couldn't even run made no progress
@@ -2018,7 +2030,7 @@ export class ConversationOrchestrator {
       audioContextAccessor: this.audioContextAccessor,
     });
     if (result.error && result.errorLine === undefined) result.errorLine = await syntaxErrorLine(code);
-    this.correctedPrograms.set(run.turnId, code);
+    setForRecentRequests(this.correctedPrograms, run.turnId, { code, request: this.requestKey(run) }, (_turnId, v) => v.request);
     if (this.lastAction?.kind === 'code' && this.lastAction.code === run.code) this.lastAction = { ...this.lastAction, code };
     this.lastRun = {
       ...run,
@@ -2083,7 +2095,7 @@ export class ConversationOrchestrator {
     const hint = errorHint(run.code, run.error, run.errorLine, { ids: this.javascriptRuntime.pageIds?.() ?? [], standIns: this.javascriptRuntime.standInIds?.() ?? [] });
     if (hint?.correction && hint.correction.code !== run.code && (run.corrections ?? 0) < 3) {
       run.fixRequested = true;
-      void this.runCorrected(run, hint.correction);
+      void this.correctByRule(run, hint.correction);
       return;
     }
     // A fix's own program can fail too: the model gets up to MAX_FIX_TRIES tries per request
@@ -2091,6 +2103,27 @@ export class ConversationOrchestrator {
     if (attempt > MAX_FIX_TRIES) return;
     run.fixRequested = true;
     this.nextTry(run, attempt, undefined, hint?.text);
+  }
+
+  /**
+   * A correction by rule, test-run first where the runtime can (hidden, like a fix reply's): one
+   * that fails exactly as the program did hasn't addressed the error, so it isn't run for real,
+   * and the model is asked instead. A runtime that can't test-run runs it as before.
+   */
+  private async correctByRule(run: NonNullable<typeof this.lastRun>, correction: { code: string; note: string }): Promise<void> {
+    if (typeof this.javascriptRuntime.trialRun === 'function' && run.error) {
+      await settleOnIos(AFTER_HEAVY_MS);
+      if (this.lastRun !== run || this.scheduler.getActiveTurnId() || this.gaveUp.has(this.requestKey(run))) return;
+      const trial = await this.trial(correction.code);
+      if (this.lastRun !== run || this.scheduler.getActiveTurnId() || this.gaveUp.has(this.requestKey(run))) return;
+      if (trial.error === run.error) {
+        appendRunLog('imagined', `${correction.note}: a test run of the correction failed the same way (${errorText(trial.error, trial.errorLine)}), so it was not made`);
+        const attempt = (run.fixAttempt ?? 0) + 1;
+        if (attempt <= MAX_FIX_TRIES) this.nextTry(run, attempt);
+        return;
+      }
+    }
+    await this.runCorrected(run, correction);
   }
 
   /**
@@ -2110,7 +2143,7 @@ export class ConversationOrchestrator {
     // The kinds asked are kept per error: a different error starts again from the first kind
     const kindsKey = `${key}\n${normalizedError(run.error)}`;
     const used = this.fixKindsUsed.get(kindsKey) ?? new Set<FixKind>();
-    this.fixKindsUsed.set(kindsKey, used);
+    setForRecentRequests(this.fixKindsUsed, kindsKey, used, (k) => k.slice(0, k.indexOf('\n')));
     const broken = brokenLines(run.code);
     const blank = this.blankFor(run);
     const fits = (kind: FixKind) =>
@@ -2300,7 +2333,7 @@ export class ConversationOrchestrator {
     const progress = this.fixProgress.get(key);
     const error = run.error ? normalizedError(run.error) : '';
     if (!run.isAutoFix || !progress) {
-      this.fixProgress.set(key, { best: run, score, latest: score, latestCode: run.code, stale: 0, rolledBack: false, errors: new Set(error ? [error] : []) });
+      setForRecentRequests(this.fixProgress, key, { best: run, score, latest: score, latestCode: run.code, stale: 0, rolledBack: false, errors: new Set(error ? [error] : []) });
       return;
     }
     const fresh = !!error && !progress.errors.has(error);
@@ -2989,11 +3022,11 @@ export class ConversationOrchestrator {
     const fixedCode = new Map<string, string>();
     for (const m of context.workingMessages) {
       if (m.role === 'assistant' && m.fixesTurnId && m.rawCode) {
-        fixedCode.set(m.fixesTurnId, this.correctedPrograms.get(m.turnId) ?? m.rawCode);
+        fixedCode.set(m.fixesTurnId, this.correctedPrograms.get(m.turnId)?.code ?? m.rawCode);
       }
     }
     // …and so does a program whose slips were corrected
-    for (const [turnId, code] of this.correctedPrograms) if (!fixedCode.has(turnId)) fixedCode.set(turnId, code);
+    for (const [turnId, { code }] of this.correctedPrograms) if (!fixedCode.has(turnId)) fixedCode.set(turnId, code);
 
     for (const stored of context.workingMessages) {
       if (fixTurnIds.has(stored.turnId)) continue;
