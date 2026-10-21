@@ -981,6 +981,72 @@ export function fixKeySlips(code: string): { code: string; fixed: Array<{ object
   return tryParse(out) ? { code: out, fixed } : { code, fixed: [] };
 }
 
+/**
+ * Before a program runs: a function handed to requestAnimationFrame that moves things (changes
+ * state kept outside it: `ball.x += 5`) but never asks for another frame runs once, since a
+ * frame request is good for one frame. It gets `requestAnimationFrame(itself)` at its end, so the
+ * motion goes on.
+ */
+export function loopOneFrameAnimations(code: string): { code: string; looped: string[]; atLines: number[] } {
+  const ast = tryParse(code);
+  if (!ast) return { code, looped: [], atLines: [] };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const functions = new Map<string, any>();
+  walk(ast, (node) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    if (n.type === 'FunctionDeclaration' && n.id) functions.set(n.id.name, n);
+    if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && /^(?:Arrow)?FunctionExpression$/.test(n.init?.type ?? '') && n.init.body.type === 'BlockStatement') functions.set(n.id.name, n.init);
+  });
+  const requested = new Set<string>();
+  walk(ast, (node) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    if (n.type === 'CallExpression' && n.callee.type === 'Identifier' && n.callee.name === 'requestAnimationFrame' && n.arguments[0]?.type === 'Identifier') requested.add(n.arguments[0].name);
+  });
+  const edits: Array<{ at: number; text: string; name: string }> = [];
+  for (const name of requested) {
+    const fn = functions.get(name);
+    if (!fn) continue;
+    const own = new Set<string>();
+    let schedules = false;
+    let moves = false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const root = (target: any): string | null => {
+      while (target?.type === 'MemberExpression') target = target.object;
+      return target?.type === 'Identifier' ? target.name : null;
+    };
+    for (const p of fn.params) if (p.type === 'Identifier') own.add(p.name);
+    walk(fn.body, (node) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier') own.add(n.id.name);
+      if (n.type === 'CallExpression' && n.callee.type === 'Identifier' && /^(?:requestAnimationFrame|setTimeout|setInterval)$/.test(n.callee.name)) schedules = true;
+    });
+    walk(fn.body, (node) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const n = node as any;
+      const target = n.type === 'AssignmentExpression' && n.operator !== '=' ? n.left : n.type === 'UpdateExpression' ? n.argument : null;
+      const name = target ? root(target) : null;
+      if (name && !own.has(name)) moves = true;
+    });
+    if (schedules || !moves) continue;
+    const statements = fn.body.body;
+    const first = statements[0];
+    const indent = first ? code.slice(code.lastIndexOf('\n', first.start - 1) + 1, first.start).match(/^\s*/)?.[0] ?? '  ' : '  ';
+    edits.push({ at: fn.body.end - 1, text: `${indent}requestAnimationFrame(${name});\n`, name });
+  }
+  if (edits.length === 0) return { code, looped: [], atLines: [] };
+  // (the lines, in the program as it was, that the new lines go after: later lines move down one)
+  const atLines = edits.map((e) => code.slice(0, e.at).split('\n').length - 1);
+  let out = code;
+  for (const e of edits.sort((a, b) => b.at - a.at)) {
+    const before = out.slice(0, e.at).replace(/[ \t]*$/, '');
+    out = `${before}${before.endsWith('\n') ? '' : '\n'}${e.text}${out.slice(e.at)}`;
+  }
+  return tryParse(out) ? { code: out, looped: edits.map((e) => e.name), atLines } : { code, looped: [], atLines: [] };
+}
+
 /** The browser's timing and loading functions: a program's own function of that name hides the real one */
 const BROWSER_FUNCTIONS = ['requestAnimationFrame', 'cancelAnimationFrame', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'fetch'];
 

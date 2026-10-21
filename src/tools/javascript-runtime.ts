@@ -1259,7 +1259,18 @@ export class JavascriptRuntime {
 
   /** True while the previous program still has something going: output on screen, sound, or timers/async work. */
   hasRunningProgram(): boolean {
-    return this.hasVisualContent() || this.programSounding || this.programActive;
+    return this.hasVisualContent() || this.programSounding || this.programActive || this.hasCardContent();
+  }
+
+  /** Anything at all left in the card (a stand-in, an empty element): the next program starts without it */
+  hasCardContent(): boolean {
+    try {
+      const doc = this.activeIframe?.contentDocument;
+      const root = doc?.getElementById('root');
+      return !!root && root.childNodes.length > 0;
+    } catch {
+      return false;
+    }
   }
 
   private abortPendingRuns(reason: string): void {

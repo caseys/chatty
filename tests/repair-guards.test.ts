@@ -354,3 +354,17 @@ describe('a program that ends on a sentence in a comment', async () => {
     expect(speakClosingComment('draw();\nspeak("Done.");\n// This draws a red ball.')).toBeNull();
   });
 });
+
+describe('an animation that runs one frame', async () => {
+  const { loopOneFrameAnimations } = await import('../src/core/error-hints.ts');
+  it('asks for the next frame when it moves things and never asks itself', () => {
+    const code = 'const ball = { x: 0 };\nfunction updateBall() {\n  ball.x += 5;\n  ctx.fillRect(ball.x, 0, 5, 5);\n}\nrequestAnimationFrame(updateBall);';
+    const { code: out, looped } = loopOneFrameAnimations(code);
+    expect(looped).toEqual(['updateBall']);
+    expect(out).toContain('  ctx.fillRect(ball.x, 0, 5, 5);\n  requestAnimationFrame(updateBall);\n}');
+  });
+  it('leaves a loop that already asks, and a one-off drawing that moves nothing', () => {
+    expect(loopOneFrameAnimations('let x = 0;\nfunction tick() {\n  x += 1;\n  requestAnimationFrame(tick);\n}\nrequestAnimationFrame(tick);').looped).toEqual([]);
+    expect(loopOneFrameAnimations('function paint() {\n  const y = 2;\n  ctx.fillRect(0, y, 5, 5);\n}\nrequestAnimationFrame(paint);').looped).toEqual([]);
+  });
+});
