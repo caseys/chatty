@@ -8,7 +8,19 @@
 export const MIDI_OUTPUT = 'const output = [...(await navigator.requestMIDIAccess()).outputs.values()][0]';
 
 /** The example track */
-export const MIDI_EXAMPLE = 'output.send("piano", ["C4", "E4", "G4", "C5"], 400)';
+export const MIDI_EXAMPLE = 'output.send("piano", ["<example>C4</example>", "<example>E4</example>", "<example>G4</example>", "<example>C5</example>"], 400)';
+
+/** The example laid out over several lines, as the music rule shows it (the notes are placeholders, wrapped in tags) */
+export const MIDI_EXAMPLE_LINES = `output.send(
+    "piano",
+    [
+        "<example>C4</example>",
+        "<example>E4</example>",
+        "<example>G4</example>",
+        "<example>C5</example>"
+    ],
+    400
+);`;
 
 /** What the example line does, as a sentence that follows "then" */
 export const MIDI_PLAIN_FORM = `${MIDI_EXAMPLE} plays those notes one after another (the instrument can be any General MIDI name, such as "violin", "bass", or "drums" with "kick", "snare" and "hihat"; 400 is each note's length in ms)`;
@@ -17,6 +29,6 @@ export const MIDI_PLAIN_FORM = `${MIDI_EXAMPLE} plays those notes one after anot
 export const MIDI_RULE = `- For music, this browser has a General MIDI software instrument library, available through Web MIDI. One track plays like this:
 \`\`\`js
 ${MIDI_OUTPUT};
-${MIDI_EXAMPLE};
+${MIDI_EXAMPLE_LINES}
 \`\`\`
 The instrument can be any General MIDI name ("violin", "bass", or "drums" with "kick", "snare" and "hihat"), the notes play one after another, and 400 is each note's length in ms.`;

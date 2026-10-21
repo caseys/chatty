@@ -752,6 +752,17 @@ export function unusedDrawingValues(code: string, isColor: (value: string) => bo
   return unused.slice(0, 3);
 }
 
+/**
+ * The prompt's example marks its notes as placeholders (`"<example>C4</example>"`); a program that copied the tags
+ * along has them inside its strings: they are taken out (the notes stay). Only when the result parses.
+ */
+export function dropExampleTags(code: string): { code: string; dropped: number } {
+  const tags = code.match(/<\/?example>/gi);
+  if (!tags) return { code, dropped: 0 };
+  const fixed = code.replace(/<\/?example>/gi, '');
+  return tryParse(fixed) ? { code: fixed, dropped: tags.length / 2 >= 1 ? Math.ceil(tags.length / 2) : 1 } : { code, dropped: 0 };
+}
+
 /** Canvas 2D (and renderer) calls that put something on screen: a function making them is a frame's drawing */
 const DRAWING_CALLS = new Set(['clearRect', 'fillRect', 'strokeRect', 'arc', 'ellipse', 'fillText', 'strokeText', 'drawImage', 'fill', 'stroke', 'render']);
 

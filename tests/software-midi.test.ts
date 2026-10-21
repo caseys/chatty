@@ -137,6 +137,15 @@ describe('friendly MIDI messages', () => {
     vi.useRealTimers();
   });
 
+  it('plays the prompt\'s example notes with their placeholder tags as the notes', () => {
+    vi.useFakeTimers();
+    const { sent, output, advance } = setup();
+    output.send('piano', ['<example>C4</example>', '<example>E4</example>'], 300);
+    advance(300);
+    expect(sent.filter((m) => m[0] === 0x90).map((m) => m[1])).toEqual([60, 64]);
+    vi.useRealTimers();
+  });
+
   it('plays a named drum groove as one 4/4 bar over the duration', () => {
     vi.useFakeTimers();
     const { sent, output, advance } = setup();

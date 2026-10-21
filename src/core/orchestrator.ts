@@ -45,7 +45,7 @@ import { memberBlank, fillMember, blankChoices, blankRequest, choiceRequest, dec
 import { madeAsWrongClass, memberList, withLibraryClassNames, type RealMember } from './method-hints.ts';
 import { applyFixReply, brokenLines, enclosingFunction, failingStatement, FIX_SYSTEM_PROMPT, fixRequest, isBareText, restoreWhole } from './line-fix.ts';
 import { missingStepsError, sameShortfallNote } from './sound-setup.ts';
-import { addNewToClasses, escapeScriptBackticks, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, looksThrown, provideThree, quoteToneTimes, unusedDrawingValues } from './error-hints.ts';
+import { addNewToClasses, escapeScriptBackticks, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, looksThrown, provideThree, quoteToneTimes, unusedDrawingValues, dropExampleTags } from './error-hints.ts';
 import { applyAssignmentFixes, moveToContext, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { isAppleMobile, LOCAL_CHAT_MODELS } from './settings.ts';
@@ -933,6 +933,12 @@ export function repairBeforeRunning(code: string, isProse: boolean, note: (text:
       if (times) {
         executableCode = times.code;
         note(`${times.quoted.join(', ')} written without quotes → ${times.quoted.map((q) => JSON.stringify(q)).join(', ')} (Tone's note values are text): corrected before running`);
+      }
+      // The prompt's example notes, tags and all (<example>C4</example>): the notes without the tags
+      const tagged = dropExampleTags(executableCode);
+      if (tagged.dropped > 0) {
+        executableCode = tagged.code;
+        note('the example\'s tags copied into the program → removed: corrected before running');
       }
       const copies = dropHelperCopies(executableCode);
       if (copies.dropped.length > 0 || copies.renamed.length > 0 || copies.kept.length > 0) {

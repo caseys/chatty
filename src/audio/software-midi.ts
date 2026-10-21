@@ -612,6 +612,8 @@ function chordIntervals(quality: string): number[] | null {
  */
 function noteValues(value: unknown, drums: boolean, program: number): { notes: number[]; scale: boolean } {
   const none = { notes: [], scale: false };
+  // The prompt's example marks its notes as placeholders (<example>C4</example>): a copy of them plays as the note
+  if (typeof value === 'string') value = value.replace(/<\/?example>/gi, '');
   if (typeof value === 'number') return Number.isFinite(value) ? { notes: [clampNote(value)], scale: false } : none;
   if (typeof value !== 'string') return none;
   const text = value.trim();

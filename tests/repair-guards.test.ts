@@ -727,3 +727,22 @@ describe('the example’s question in other words', async () => {
     expect(dropCopiedExample('speak("Let me know what you\'d like me to make!");').dropped).toBe(false);
   });
 });
+
+describe('the prompt example’s placeholder tags copied into a program', () => {
+  it('takes the tags out of the strings and keeps the notes', async () => {
+    const { dropExampleTags } = await import('../src/core/error-hints.ts');
+    const code = 'const output = [...(await navigator.requestMIDIAccess()).outputs.values()][0];\noutput.send("violin", ["<example>C4</example>", "<example>E4</example>"], 400);';
+    const fixed = dropExampleTags(code);
+    expect(fixed.code).toBe(code.replace(/<\/?example>/g, ''));
+    expect(fixed.dropped).toBe(2);
+    expect(dropExampleTags('speak("<b>hi</b>");')).toEqual({ code: 'speak("<b>hi</b>");', dropped: 0 });
+  });
+
+  it('is logged as imagined before the program runs', async () => {
+    const { repairBeforeRunning } = await import('../src/core/orchestrator.ts');
+    const notes: string[] = [];
+    const out = repairBeforeRunning('const output = [...(await navigator.requestMIDIAccess()).outputs.values()][0];\noutput.send("piano", ["<example>C4</example>"], 400);', false, (text) => notes.push(text));
+    expect(out.code).toContain('output.send("piano", ["C4"], 400)');
+    expect(notes).toContain("the example's tags copied into the program → removed: corrected before running");
+  });
+});
