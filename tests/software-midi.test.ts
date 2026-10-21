@@ -65,6 +65,78 @@ describe('friendly MIDI messages', () => {
     vi.useRealTimers();
   });
 
+  it('plays a flat list one note after another at any length, as the music rule says (send(instrument, notes, noteMs))', () => {
+    vi.useFakeTimers();
+    const { sent, output, advance } = setup();
+    // Four notes: a phrase, not a chord
+    output.send('piano', ['C4', 'D4', 'E4', 'G4'], 300);
+    expect(sent).toEqual([[0xc0, 0], [0x90, 60, 100]]);
+    advance(300);
+    expect(sent.slice(2)).toEqual([[0x80, 60, 0], [0x90, 62, 100]]);
+    advance(300);
+    expect(sent.slice(4)).toEqual([[0x80, 62, 0], [0x90, 64, 100]]);
+    advance(300);
+    expect(sent.slice(6)).toEqual([[0x80, 64, 0], [0x90, 67, 100]]);
+    advance(300);
+    expect(sent.at(-1)).toEqual([0x80, 67, 0]);
+    // Two notes, and one
+    const two = setup();
+    two.output.send('violin', ['E5', 'G5'], 250);
+    two.advance(250);
+    expect(two.sent.filter((m) => (m[0] & 0xf0) === 0x90).map((m) => m[1])).toEqual([76, 79]);
+    vi.useRealTimers();
+  });
+
+  it('plays a list inside the list, and a chord name, as a chord at its step', () => {
+    vi.useFakeTimers();
+    const { sent, output, advance } = setup();
+    output.send('piano', ['C4', ['C4', 'E4', 'G4'], 'G major', 'C4'], 200);
+    advance(800);
+    const steps = sent.filter((m) => (m[0] & 0xf0) === 0x90).map((m) => m[1]);
+    expect(steps).toEqual([60, 60, 64, 67, 55, 59, 62, 60]);
+    // The three notes of the second step start together, the next step 200 ms later
+    const fresh = setup();
+    fresh.output.send('piano', ['C4', ['C4', 'E4', 'G4'], 'C4'], 200);
+    expect(fresh.sent).toEqual([[0xc0, 0], [0x90, 60, 100]]);
+    fresh.advance(200);
+    expect(fresh.sent.slice(3).filter((m) => m[0] === 0x90).map((m) => m[1])).toEqual([60, 64, 67]);
+    vi.useRealTimers();
+  });
+
+  it('plays drum names one after another, and a text that lists the names as that list', () => {
+    vi.useFakeTimers();
+    const { sent, output, advance } = setup();
+    output.send('drums', ['kick', 'snare', 'kick', 'snare'], 250);
+    expect(sent).toEqual([[0x99, 36, 100]]);
+    advance(250);
+    expect(sent.at(-1)).toEqual([0x99, 38, 100]);
+    advance(500);
+    expect(sent.map((m) => m[1])).toEqual([36, 38, 36, 38]);
+    // (a scale name is a step for each of its notes; a list written as text is read as a list)
+    const text = setup();
+    text.output.send('piano', 'C4 D4, E4', 100);
+    text.advance(300);
+    expect(text.sent.filter((m) => m[0] === 0x90).map((m) => m[1])).toEqual([60, 62, 64]);
+    vi.useRealTimers();
+  });
+
+  it('takes the start time as the fourth value of the plain form, and keeps the array and raw forms as they were', () => {
+    vi.useFakeTimers();
+    const { sent, output, advance } = setup();
+    output.send('piano', ['C4', 'D4'], 300, 1500);
+    expect(sent).toEqual([[0xc0, 0]]);
+    advance(500);
+    expect(sent.at(-1)).toEqual([0x90, 60, 100]);
+    // [instrument, notes, …] with up to four notes is still a chord, and bytes are still bytes
+    const arrays = setup();
+    arrays.output.send(['piano', ['C4', 'E4', 'G4', 'C5'], 90, 500]);
+    expect(arrays.sent.filter((m) => m[0] === 0x90).map((m) => m[1])).toEqual([60, 64, 67, 72]);
+    const raw = setup();
+    raw.output.send([0x90, 60, 100]);
+    expect(raw.sent).toEqual([[0x90, 60, 100]]);
+    vi.useRealTimers();
+  });
+
   it('plays a named drum groove as one 4/4 bar over the duration', () => {
     vi.useFakeTimers();
     const { sent, output, advance } = setup();

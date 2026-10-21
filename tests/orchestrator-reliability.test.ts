@@ -92,10 +92,14 @@ describe('prompt rules', () => {
     expect(drums).not.toMatch(/Tone|out\.send|out\.loop/);
   });
 
-  it('names Web MIDI, short and positive, with no example code and no message bytes', () => {
+  it('names Web MIDI and teaches the plain form of send() with one example track, no message bytes', () => {
     const rule = promptRules('Play a melody', true).split('\n').find((line) => line.includes(TONE_RULE))!;
-    expect(rule).toBe('- For music, this browser has a General MIDI software instrument library, available through Web MIDI (navigator.requestMIDIAccess).');
-    expect(rule).not.toMatch(/\bnew \w|\bconst |=>|;\s|0x|\bsend\b|Tone/);
+    expect(rule).toBe(
+      '- For music, this browser has a General MIDI software instrument library, available through Web MIDI. One track plays like this:'
+    );
+    const whole = promptRules('Play a melody', true);
+    expect(whole).toContain('```js\nconst output = [...(await navigator.requestMIDIAccess()).outputs.values()][0];\noutput.send("piano", ["C4", "E4", "G4", "C5"], 400);\n```');
+    expect(whole).toContain('The instrument can be any General MIDI name ("violin", "bass", or "drums" with "kick", "snare" and "hihat"), the notes play one after another, and 400 is each note\'s length in ms.');
     expect(rule).not.toMatch(/\b(?:don't|never|do not)\b/i);
   });
 
@@ -156,7 +160,7 @@ describe('a Tone program is sound', () => {
 
   it('asks for Web MIDI in the outcome check, and for connecting a Tone synth when the program uses Tone', async () => {
     const silent = { soundUseCount: () => 0, hasVisualContent: () => false };
-    expect(await outcome('Play a C major chord', silent)).toContain('Web MIDI (navigator.requestMIDIAccess()');
+    expect(await outcome('Play a C major chord', silent)).toContain('notes play through Web MIDI. Get an output with const output = [...(await navigator.requestMIDIAccess()).outputs.values()][0], then output.send("piano", ["C4", "E4", "G4", "C5"], 400) plays those notes one after another');
     expect(await outcome('Play a C major chord', silent)).not.toContain('Tone');
     expect(await outcome('Make a beep', silent)).not.toContain('Web MIDI');
     const quiet = { soundUseCount: () => 1, hasVisualContent: () => false, soundHeardCount: () => 0, soundSilentCount: () => 1 };

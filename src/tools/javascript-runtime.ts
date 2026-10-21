@@ -94,7 +94,11 @@ async function withLibraries(code: string, win: Window | null, live?: () => bool
 }
 import { withActivity } from '../core/activity-breadcrumbs.ts';
 import type { SoundSetup } from '../core/sound-setup.ts';
-import { midiSummary as softwareMidiSummary, resetMidiSummary, silenceSoftwareMidi, softwareMidiAccess, type MidiSummary } from '../audio/software-midi.ts';
+import { midiSummary as softwareMidiSummary, resetMidiSummary, silenceSoftwareMidi, SoftwareMIDIAccess, SoftwareMIDIOutput, softwareMidiAccess, type MidiSummary } from '../audio/software-midi.ts';
+import { registerBrowserTypes } from '../core/method-hints.ts';
+
+// Every program's Web MIDI is Chatty's software one, whatever the browser has: its classes stand for MIDIAccess and MIDIOutput in member lists
+registerBrowserTypes({ MIDIAccess: SoftwareMIDIAccess, MIDIOutput: SoftwareMIDIOutput });
 
 export type JavascriptExecutionMode = 'iframe' | 'worker' | 'eval';
 

@@ -7,6 +7,7 @@
  * a list instead of guessing again.
  */
 import { parse, parseExpressionAt } from 'acorn';
+import { MIDI_OUTPUT, MIDI_PLAIN_FORM } from './midi-form.ts';
 import { closestNames, editDistance, flatName, NAME_VERBS, nameWords, sureMatch } from './fuzzy-match.ts';
 
 /** The object and the method a "not a function" error names, or null */
@@ -29,8 +30,22 @@ export function missingConstructor(error: string): { object: string; method: str
   return match ? { object: match[1], method: match[2] } : null;
 }
 
+/**
+ * Types the page's programs get that this window may not have under their browser names (Chatty's software MIDI is the
+ * MIDIAccess and MIDIOutput of every program, on a browser that has no Web MIDI too): registered by the runtime
+ */
+const REGISTERED: Record<string, unknown> = {};
+export function registerBrowserTypes(types: Record<string, unknown>): void {
+  Object.assign(REGISTERED, types);
+}
+/** The class of a browser type: the scope's own, else a registered one */
+export function typeClass(type: string, scope: Record<string, unknown>): unknown {
+  return scope[type] ?? REGISTERED[type];
+}
+
 /** What a value made by this code is: a browser type name, or a known object */
 const MADE_BY: ReadonlyArray<[RegExp, string]> = [
+  [/\brequestMIDIAccess\s*\(/, 'MIDIAccess'],
   [/getContext\(\s*['"]2d['"]/, 'CanvasRenderingContext2D'],
   [/getContext\(\s*['"]webgl2['"]/, 'WebGL2RenderingContext'],
   [/getContext\(\s*['"](?:experimental-webgl|webgl)['"]/, 'WebGLRenderingContext'],
@@ -107,6 +122,8 @@ function typeMadeBy(expression: string, code = ''): string | null {
   } catch {
     return null;
   }
+  // The first output of a MIDI access: [...midi.outputs.values()][0], midi.outputs.values().next().value
+  if (/^\[\s*\.\.\.[\s\S]*\.outputs\b[\s\S]*\]\s*\[\s*\d+\s*\]\s*$|\.outputs\.values\(\)\.next\(\)\.value\s*$|^Array\.from\([\s\S]*\.outputs\.values\(\)\)\s*\[\s*\d+\s*\]\s*$/.test(expression.trim())) return 'MIDIOutput';
   if (top.type === 'AwaitExpression') top = top.argument;
   // A value written out: a list, a string, a number, a pattern: what the language itself makes of it
   const literal = top as unknown as { type: string; value?: unknown; regex?: unknown };
@@ -152,6 +169,9 @@ export function objectType(code: string, object: string): string | null {
   const segments = object.split('.');
   if (segments.length === 1) {
     const name = segments[0];
+    // The access handed to the callback of requestMIDIAccess().then(…)
+    const handed = code.match(/requestMIDIAccess\s*\([^)]*\)\s*\.then\(\s*(?:async\s*)?(?:function\s*\(\s*([A-Za-z_$][\w$]*)|\(\s*([A-Za-z_$][\w$]*)|([A-Za-z_$][\w$]*)\s*=>)/);
+    if (handed && (handed[1] ?? handed[2] ?? handed[3]) === name) return 'MIDIAccess';
     if (!declaredOnce(code, name)) return null;
     const init = code.match(new RegExp(`\\b(?:const|let|var)\\s+${name.replace(/\$/g, '\\$')}\\s*=(?!=)\\s*([^;\\n]+)`))?.[1];
     return init ? typeMadeBy(init, code) : null;
@@ -199,7 +219,7 @@ export function namesSources(type: string, scope: Record<string, unknown> = glob
     for (const segment of type.split('.')) at = (at as Record<string, unknown> | undefined)?.[segment];
     return [(at as { prototype?: unknown } | undefined)?.prototype];
   }
-  return [(scope[type] as { prototype?: unknown } | undefined)?.prototype];
+  return [(typeClass(type, scope) as { prototype?: unknown } | undefined)?.prototype];
 }
 
 /** Every member name (methods and properties) of a browser type, own and inherited (not Object's own: valueOf, toString) */
@@ -694,7 +714,7 @@ function classOfType(type: string, scope: Record<string, unknown>): { ctor: ((..
       ctor = exported?.[name];
       universe = Object.keys(exported ?? {}).map((key) => exported![key]).filter((value) => typeof value === 'function' && !!(value as { prototype?: unknown }).prototype);
     } else {
-      ctor = scope[type];
+      ctor = typeClass(type, scope);
       universe = /^(?:HTML|SVG)\w*Element$/.test(type) ? htmlClasses(scope) : [];
     }
     const proto = (ctor as { prototype?: object } | undefined)?.prototype;
@@ -777,6 +797,8 @@ export function memberList(type: string, missing: string, scope: Record<string, 
   const popular = POPULAR[type] ?? [];
   const popularity = (name: string) => (popular.includes(name) ? popular.indexOf(name) : popular.length);
   const wanted = methods
+    // (the names Chatty's software output answers to for what models invent are not ones to teach)
+    .filter((m) => !(type === 'MIDIOutput' && /^(?:play|playNote)$/.test(m.name)))
     .filter((m) => !dom || m.level === 0 || m.name === closestInherited)
     .filter((m) => !m.plumbing || related(m.name) >= 1)
     .map((m, order) => ({ ...m, order, score: related(m.name) }))
@@ -836,7 +858,14 @@ export function memberListText(object: string, type: string, missing: string, us
   if (list.methods.includes(missing) || list.settings.some((s) => s.name === missing)) return null;
   const methods = list.methods.length ? ` Its methods: ${list.methods.map((m) => `${m}()`).join(', ')}${list.more ? ', …' : ''}.` : '';
   const settings = list.settings.length ? ` Its settings: ${list.settings.map((s) => (s.readOnly ? `${s.name} (read-only)` : s.name)).join(', ')}.` : '';
-  return `${object} is ${typeLabel(type, object)}; it has no ${missing}${use === 'read' ? '' : '()'}.${methods}${settings}`;
+  return `${object} is ${typeLabel(type, object)}; it has no ${missing}${use === 'read' ? '' : '()'}.${methods}${settings}${midiNote(type)}`;
+}
+
+/** What to say after the list of a MIDI type: how the output is got and played */
+function midiNote(type: string): string {
+  if (type === 'MIDIOutput') return ` Notes play like this: ${MIDI_OUTPUT}, then ${MIDI_PLAIN_FORM}.`;
+  if (type === 'MIDIAccess') return ` The output to play on is the first of its outputs (a Map): ${MIDI_OUTPUT}, then ${MIDI_PLAIN_FORM}.`;
+  return '';
 }
 
 /**

@@ -51,6 +51,7 @@ import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { isAppleMobile, LOCAL_CHAT_MODELS } from './settings.ts';
 import { redeclaredCut } from './repeat-guard.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
+import { MIDI_OUTPUT, MIDI_PLAIN_FORM, MIDI_RULE } from './midi-form.ts';
 
 /** "Error at line 7: x is not defined" (the line when the browser reported it) */
 function errorText(message: string, line?: number): string {
@@ -285,7 +286,7 @@ const PROMPT_RULES: ReadonlyArray<{ text: string; when?: { test(request: string)
   { text: '- For 3D, THREE (three.js) is ready to use: render with a THREE.WebGLRenderer, whose canvas you add to document.body.', when: THREE_D_REQUEST },
   { text: '- <svg> works for diagrams and icons.', when: DIAGRAM_REQUEST },
   {
-    text: '- For music, this browser has a General MIDI software instrument library, available through Web MIDI (navigator.requestMIDIAccess).',
+    text: MIDI_RULE,
     when: { test: (request: string) => soundKinds(request).music },
   },
   {
@@ -3088,13 +3089,13 @@ export class ConversationOrchestrator {
     const missing = [
       wantsSound && !asked()
         ? soundKinds(request).music
-          ? 'The program played nothing: notes play through Web MIDI (navigator.requestMIDIAccess() gives an output, and output.send() starts and ends notes on it) or Web Audio oscillators.'
+          ? `The program played nothing: notes play through Web MIDI. Get an output with ${MIDI_OUTPUT}, then ${MIDI_PLAIN_FORM}.`
           : 'The program played nothing: sounds play through Web Audio oscillators, each connected to the audio context\'s destination.'
         : wantsSound && (silent() || !!stepMissing)
           ? noNoteStarted
-            ? `No note was started: every MIDI message was something else${midi.others.length ? ` (${midi.others.join('; ')})` : ''}. A note starts with output.send([0x90 + channel, note, velocity]) where channel is 0 to 15 and velocity 1 to 127, and ends with 0x80 + channel.`
+            ? `No note was started: every MIDI message was something else${midi.others.length ? ` (${midi.others.join('; ')})` : ''}. Notes play like this: ${MIDI_OUTPUT}, then ${MIDI_PLAIN_FORM}.`
             : nothingSent
-              ? 'The program asked for Web MIDI but sent no message to an output: the access has outputs (a Map: [...access.outputs.values()][0]), and a note starts with output.send([0x90 + channel, note, velocity]) and ends with output.send([0x80 + channel, note, 0]).'
+              ? `The program asked for Web MIDI but sent no message to an output: the output is the first of the access's outputs (${MIDI_OUTPUT}), and ${MIDI_PLAIN_FORM}.`
               : stepMissing ??
               (/\bTone\s*\./.test(code)
                 ? "The program's sound never reached the speakers: connect each Tone synth to the output with .toDestination(), and play notes with triggerAttackRelease(note, duration, time)."

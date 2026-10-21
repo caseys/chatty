@@ -1,3 +1,4 @@
+import { MIDI_OUTPUT, MIDI_PLAIN_FORM } from '../src/core/midi-form.ts';
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { midiSummary, resetMidiSummary, SoftwareMIDIOutput } from '../src/audio/software-midi.ts';
@@ -151,7 +152,7 @@ describe('the fix for silence', () => {
     });
     expect(message).toBe(
       'No note was started: every MIDI message was something else ([0xA3, 60, 0] is polyphonic aftertouch; [0xC9, 36, 0] is a program change with an extra byte). ' +
-        'A note starts with output.send([0x90 + channel, note, velocity]) where channel is 0 to 15 and velocity 1 to 127, and ends with 0x80 + channel.'
+        `Notes play like this: ${MIDI_OUTPUT}, then ${MIDI_PLAIN_FORM}.`
     );
     expect(message).not.toContain('destination');
   });
@@ -166,7 +167,8 @@ describe('the fix for silence', () => {
       code
     );
     expect(said).toContain('asked for Web MIDI but sent no message to an output');
-    expect(said).toContain('access.outputs.values()');
+    expect(said).toContain(MIDI_OUTPUT);
+    expect(said).toContain(MIDI_PLAIN_FORM);
     expect(said).not.toContain('destination');
     // (a Web Audio program that sent no MIDI keeps its advice)
     const audio = await (ConversationOrchestrator.prototype as any).missingOutcome.call(

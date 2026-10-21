@@ -122,7 +122,9 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
    * - notes: 'G3', 60, a chord name ('G major', 'Am7'), a scale name ('G pentatonic down'), drum
    *   names ('kick', 'snare', 'hihat'), or an array of these
    * - an array of up to 4 notes plays together (a chord); 5 or more, or a scale, play one after
-   *   another every stepMs (default: the duration)
+   *   another every stepMs (default: the duration). In the plain form, send(instrument, notes,
+   *   noteMs), a flat list is always one after another, and a list inside it or a chord name is a
+   *   chord at its step
    * - durationMs stops each note by itself (under 20 it's taken as seconds)
    */
   /** Names small models invent for send() ("piano.play([...])"): the same thing */
@@ -142,7 +144,9 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
   send(data: unknown, time: unknown = 0, ...rest: unknown[]): void {
     let timestamp = Number(time);
     // send('piano', 'G major', 500, start): the values as arguments, not in an array
+    let plain = false;
     if (typeof data === 'string' && !/^\s*\d+\s*$/.test(data)) {
+      plain = true;
       const args = [data, time, ...rest];
       const [instrument, notes] = args;
       const [velocity, duration, at] = args.length >= 5 ? [args[2], args[3], args[4]] : [undefined, args[2], args[3]];
@@ -162,7 +166,7 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
       timestamp = fifth;
       items[4] = undefined;
     }
-    const events = this.readEvents(items);
+    const events = this.readEvents(items, plain);
     if (events.length === 0) return;
     // A runaway loop (setInterval every few ms) would bury the music: at most 400 notes a second
     const second = Math.floor(now / 1000);
@@ -220,7 +224,7 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
   }
 
   /** One send()'s messages, each at an offset (ms) from its time. */
-  private readEvents(items: unknown[]): { offset: number; message: number[] }[] {
+  private readEvents(items: unknown[], plain = false): { offset: number; message: number[] }[] {
     if (items.length === 0) return [];
 
     // Raw bytes, where notes may be names and a chord an array: [0x90, ['C4', 'E4'], 100]
@@ -267,6 +271,23 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
           return drums ? [on] : [on, { offset: offset + beats * beatMs * 0.95, message: [0x80 | channel, note, 0] }];
         })
       );
+    }
+    // The plain form, send(instrument, notes, noteMs): a flat list is one note after another, at any length; a list inside
+    // it (["C4", "E4", "G4"]) or a chord name ("C major") is a chord at that step
+    const steps = plain ? plainSteps(notes, drums, program) : [];
+    if (steps.length > 0) {
+      const levelPlain = velocity === undefined || !Number.isFinite(Number(velocity)) ? 100 : Math.max(0, Math.min(127, Math.round(Number(velocity))));
+      let noteMs = Number(duration) > 0 ? Number(duration) : DEFAULT_NOTE_MS;
+      if (noteMs < 20) noteMs *= 1000; // seconds
+      const gap = Number(step) > 0 ? Number(step) : noteMs;
+      const played: { offset: number; message: number[] }[] = [];
+      steps.forEach((chord, i) => {
+        for (const note of chord) {
+          played.push({ offset: i * gap, message: [0x90 | channel, note, levelPlain] });
+          if (levelPlain > 0 && !drums) played.push({ offset: i * gap + noteMs, message: [0x80 | channel, note, 0] });
+        }
+      });
+      return counted(played);
     }
     let { notes: numbers, sequence } = readNotes(notes, drums, program);
     // Arguments out of place (['bass', 'walking', 'G', beat]): the notes are the first readable
@@ -697,6 +718,33 @@ function readNotes(value: unknown, drums: boolean, program: number): { notes: nu
   }
   if (Array.isArray(value) && !drums && values.length >= 5) sequence = true;
   return { notes, sequence };
+}
+
+/**
+ * The steps of the plain form's notes, each the notes sounding together: every item of a flat list is a step of its own, a
+ * list inside it or a chord name is a chord at its step, a scale name is a step for each of its notes, and a text that is
+ * itself a list of names ("C4 D4 E4", "C4, D4") is read as one.
+ */
+function plainSteps(value: unknown, drums: boolean, program: number): number[][] {
+  const items = Array.isArray(value) ? value : value === undefined ? [] : [value];
+  const steps: number[][] = [];
+  for (const item of items) {
+    if (Array.isArray(item)) {
+      const chord = item.flatMap((inner) => noteValues(inner, drums, program).notes);
+      if (chord.length > 0) steps.push(chord);
+      continue;
+    }
+    const read = noteValues(item, drums, program);
+    if (read.notes.length === 0 && typeof item === 'string') {
+      for (const word of item.split(/[\s,;]+/).filter(Boolean)) {
+        const each = noteValues(word, drums, program);
+        if (each.notes.length > 0) steps.push(...(each.scale ? each.notes.map((note) => [note]) : [each.notes]));
+      }
+      continue;
+    }
+    if (read.notes.length > 0) steps.push(...(read.scale ? read.notes.map((note) => [note]) : [read.notes]));
+  }
+  return steps;
 }
 
 /** A note as a MIDI number: 60, 'C4' (middle C), 'F#3', 'Bb2', or a drum name on drums. */

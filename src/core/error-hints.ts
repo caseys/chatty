@@ -18,6 +18,7 @@ import { analyse, bindingTypeOf, isReference, resolve } from './blank-fix.ts';
 import { browserTypeWith, onlySendsLists, usedAs, valueUse } from './value-use.ts';
 import { applyCorrection, argumentCountFact, memberKind, memberList, methodHint, missingConstructor, missingMethod, objectType, realMembers, relatedness, valueOfPath } from './method-hints.ts';
 import { memberNames, writability } from './property-check.ts';
+import { MIDI_OUTPUT, MIDI_PLAIN_FORM } from './midi-form.ts';
 import { toneStepsOnly, withTransportStart } from './sound-setup.ts';
 
 export interface ErrorHint {
@@ -1818,7 +1819,7 @@ function standInElement(code: string, error: string, errorLine: number | undefin
       return { text: `${missing} ${uses[0].text}` };
     }
     let text = `${missing} Create the element it needs with document.createElement and give it id "${id}".`;
-    if (member && SOUND_MEMBER.test(member)) text += ' Notes play through Web MIDI: navigator.requestMIDIAccess() gives an output, and output.send() starts and ends notes on it.';
+    if (member && SOUND_MEMBER.test(member)) text += ` Notes play through Web MIDI: ${MIDI_OUTPUT}, then ${MIDI_PLAIN_FORM}.`;
     return { text };
   }
   return null;
