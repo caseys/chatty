@@ -1402,3 +1402,17 @@ describe('a program that showed nothing and puts nothing on the page', () => {
     expect(llm.turns[1].systemPrompt).not.toBe(FIX_SYSTEM_PROMPT);
   }, 30000);
 });
+
+describe('a fix reply of only comments', () => {
+  it('is not run: it lost the program', async () => {
+    const program = 'const c = document.createElement("canvas");\ndocument.body.appendChild(c);\nboom();';
+    const llm = new QueueLlm([program, "// Cause: no div\n// Solution: append a <div> instead of document.getElementById('canvas')", '// Cause: x\nconst c = 1;']);
+    llm.modelId = 'qwen2.5-0.5b';
+    const { executed, runtime } = fakeRuntime([{ error: "Can't find variable: boom", errorLine: 3 }, {}]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Draw a ball');
+    await vi.waitFor(() => expect(llm.turns.length).toBeGreaterThanOrEqual(2), { timeout: 10000 });
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(executed.some((code) => /^\s*\/\/ Solution/.test(code))).toBe(false);
+  }, 20000);
+});

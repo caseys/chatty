@@ -106,3 +106,36 @@ describe('real browser interfaces in the sandbox', () => {
     win.close();
   });
 });
+
+describe('adapting what programs do in the page', () => {
+  it('adds px to a bare number given as a CSS length', async () => {
+    const { win } = loadRunner();
+    win.postMessage({ type: 'execute', id: 'p', code: 'const d = document.createElement("div");\nd.style.left = 42;\nd.style.width = "10";\nd.style.opacity = 0.5;\ndocument.body.appendChild(d);\nwindow.__d = d;' }, '*');
+    await wait(30);
+    const d = (win as any).__d as HTMLElement;
+    expect(d.style.left).toBe('42px');
+    expect(d.style.width).toBe('10px');
+    expect(d.style.opacity).toBe('0.5');
+    win.close();
+  });
+
+  it('adds to the card what was made to be seen but never added: a styled div, a canvas', async () => {
+    const { win } = loadRunner();
+    win.postMessage({ type: 'execute', id: 'o', code: 'const ball = document.createElement("div");\nball.style.background = "red";\nconst c = document.createElement("canvas");\nconst scratch = document.createElement("span");\nwindow.__made = [ball, c, scratch];' }, '*');
+    await wait(30);
+    const [ball, c, scratch] = (win as any).__made as HTMLElement[];
+    expect(ball.isConnected).toBe(true);
+    expect(c.isConnected).toBe(true);
+    expect(scratch.isConnected).toBe(false);
+    win.close();
+  });
+
+  it('runs a callback once a frame, however often it is asked for before its frame', async () => {
+    const { win } = loadRunner();
+    win.postMessage({ type: 'execute', id: 'f', code: 'window.__runs = 0;\nfunction tick() { window.__runs++; }\nconst a = requestAnimationFrame(tick);\nconst b = requestAnimationFrame(tick);\nwindow.__same = a === b;' }, '*');
+    await wait(120);
+    expect((win as any).__same).toBe(true);
+    expect((win as any).__runs).toBe(1);
+    win.close();
+  });
+});

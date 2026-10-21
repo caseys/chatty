@@ -39,9 +39,9 @@ import {
   syntaxErrorLine,
 } from '../tools/javascript-runtime.ts';
 import { appendRunLog } from './run-log.ts';
-import { blankChoices, blankRequest, choiceRequest, fillBlank, findBlank, type Blank } from './blank-fix.ts';
+import { blankChoices, blankRequest, choiceRequest, declareMissing, fillBlank, findBlank, type Blank } from './blank-fix.ts';
 import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest, restoreDeclarations } from './line-fix.ts';
-import { dropHelperCopies, dropStrayQuote, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
+import { dropBrowserCopies, dropHelperCopies, dropStrayQuote, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
 import { applyAssignmentFixes, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { LOCAL_CHAT_MODELS } from './settings.ts';
@@ -400,7 +400,9 @@ async function unusableFix(
   functionName?: string
 ): Promise<'lost' | 'unchanged' | 'incomplete' | null> {
   const dropped = !!functionName && !new RegExp(`\\bfunction\\s+${functionName.replace(/\$/g, '\\$')}(?![\\w$])`).test(code);
-  if (isTalkOnly(code) || (programDraws(original) && !programDraws(code)) || dropped) return 'lost';
+  // Judged without its comments: a reply of only comments (`// Solution: append a <div>…`) is no program
+  const program = stripComments(code).trim();
+  if (!program || isTalkOnly(program) || (programDraws(original) && !programDraws(program)) || dropped) return 'lost';
   if (stripComments(fixedProgram).replace(/\s+/g, '') === stripComments(original).replace(/\s+/g, '')) return 'unchanged';
   if ((await syntaxErrorLine(code)) !== undefined) return 'incomplete';
   return null;
@@ -1330,6 +1332,18 @@ export class ConversationOrchestrator {
             if (copies.dropped.length > 0) {
               executableCode = copies.code;
               for (const name of copies.dropped) appendRunLog('imagined', `its own ${name} → the ready-made one: corrected before running`);
+            }
+            // Its own requestAnimationFrame(), setTimeout() …: taken out, so the browser's runs
+            const browserCopies = dropBrowserCopies(executableCode);
+            if (browserCopies.dropped.length > 0) {
+              executableCode = browserCopies.code;
+              for (const name of browserCopies.dropped) appendRunLog('imagined', `its own ${name}() → the browser's: corrected before running`);
+            }
+            // A drawing context, canvas or audio context it uses but never made: made at its top
+            const missing = declareMissing(executableCode);
+            if (missing.declared.length > 0) {
+              executableCode = missing.code;
+              for (const { name, make } of missing.declared) appendRunLog('imagined', `${name} was never made → const ${name} = ${make}: corrected before running`);
             }
             // A stray quote or backtick ending a line (markdown's, kept): removed when that alone
             // makes the program parse

@@ -12,7 +12,7 @@
  * what was left open. Method names are in method-hints.ts.
  */
 import { parse, tokenizer, type Node } from 'acorn';
-import { applyCorrection, argumentCountFact, methodHint } from './method-hints.ts';
+import { applyCorrection, argumentCountFact, methodHint, missingMethod } from './method-hints.ts';
 
 export interface ErrorHint {
   /** Facts for the fix request */
@@ -738,9 +738,63 @@ function helperDeclared(code: string, error: string): ErrorHint | null {
   };
 }
 
+/**
+ * Properties a program sets, that small models call like methods (ctx.fillStyle("red")): the
+ * browser's CanvasRenderingContext2D properties, and the element properties programs set most
+ */
+const SETTABLE = new Set([
+  'fillStyle', 'strokeStyle', 'font', 'lineWidth', 'globalAlpha', 'textAlign', 'textBaseline', 'lineCap', 'lineJoin',
+  'shadowBlur', 'shadowColor', 'shadowOffsetX', 'shadowOffsetY', 'globalCompositeOperation', 'filter', 'imageSmoothingEnabled',
+  'textContent', 'innerText', 'innerHTML', 'value', 'src', 'className', 'title', 'placeholder', 'disabled', 'checked',
+]);
+
+/** `x.fillStyle is not a function`: each `x.fillStyle(value)` statement becomes `x.fillStyle = value` */
+function propertyCalled(code: string, error: string): ErrorHint | null {
+  const missing = missingMethod(error);
+  if (!missing || !SETTABLE.has(missing.method)) return null;
+  const { object, method: prop } = missing;
+  const ast = tryParse(code);
+  if (!ast) return null;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  walk(ast, (node) => {
+    if (node.type !== 'ExpressionStatement') return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const call = node.expression as any;
+    if (call.type !== 'CallExpression' || call.arguments.length !== 1 || call.callee.type !== 'MemberExpression' || call.callee.computed) return;
+    if (call.callee.property.name !== prop || code.slice(call.callee.object.start, call.callee.object.end) !== object) return;
+    const arg = call.arguments[0] as AnyNode;
+    edits.push({ start: call.start, end: call.end, text: `${object}.${prop} = ${code.slice(arg.start, arg.end)}` });
+  });
+  if (edits.length === 0) return null;
+  let fixed = code;
+  for (const e of edits.sort((a, b) => b.start - a.start)) fixed = fixed.slice(0, e.start) + e.text + fixed.slice(e.end);
+  return tryParse(fixed) ? { correction: { code: fixed, note: `${object}.${prop}(value) → ${object}.${prop} = value` } } : null;
+}
+
+/** The browser's timing and loading functions: a program's own function of that name hides the real one */
+const BROWSER_FUNCTIONS = ['requestAnimationFrame', 'cancelAnimationFrame', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'fetch'];
+
+/**
+ * Before a program runs: its own function named like one of the browser's (BROWSER_FUNCTIONS),
+ * anywhere in it, is taken out, so its calls reach the real one
+ */
+export function dropBrowserCopies(code: string): { code: string; dropped: string[] } {
+  const ast = tryParse(code);
+  if (!ast) return { code, dropped: [] };
+  const spans: Array<{ start: number; end: number; name: string }> = [];
+  walk(ast, (node) => {
+    const name = node.type === 'FunctionDeclaration' ? ((node.id as AnyNode | null)?.name as string | undefined) : undefined;
+    if (name && BROWSER_FUNCTIONS.includes(name)) spans.push({ start: node.start, end: node.end, name });
+  });
+  if (spans.length === 0) return { code, dropped: [] };
+  let out = code;
+  for (const span of spans.sort((a, b) => b.start - a.start)) out = out.slice(0, span.start) + out.slice(span.end);
+  return tryParse(out) ? { code: out, dropped: [...new Set(spans.map((span) => span.name))] } : { code, dropped: [] };
+}
+
 export function errorHint(code: string, error: string, errorLine?: number, page?: PageFacts): ErrorHint | null {
   // Corrections by rule first: they need no model
-  const rule = redeclaredHelper(code, error) ?? missingAwait(code, error, errorLine) ?? syntaxSlip(code, error, errorLine);
+  const rule = redeclaredHelper(code, error) ?? missingAwait(code, error, errorLine) ?? syntaxSlip(code, error, errorLine) ?? propertyCalled(code, error);
   if (rule) return rule;
   const helper = helperDeclared(code, error);
   if (helper) return helper;

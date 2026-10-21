@@ -139,3 +139,63 @@ describe('a drawing method called on the canvas', async () => {
     expect(applyCorrection(code, hint.correction!).split('\n')[2]).toBe('ballCanvas.getContext("2d").clearRect(0, 0, 10, 10);');
   });
 });
+
+describe('a page in a javascript fence, cut off inside its script', async () => {
+  const { inspectExecutableCode } = await import('../src/tools/javascript-runtime.ts');
+  const { parse } = await import('acorn');
+  it('runs as a page: its script to the end, its open blocks closed', () => {
+    const reply = [
+      '```javascript',
+      '<!DOCTYPE html>',
+      '<html><body>',
+      '<canvas id="ballCanvas"></canvas>',
+      '<script>',
+      '  function drawBall() {',
+      '    const ctx = document.getElementById("ballCanvas").getContext("2d");',
+      '    function animate() {',
+      '      ctx.clearRect(0, 0, 100, 100);',
+      '      requestAnimationFrame(animate); // Update',
+    ].join('\n');
+    const prepared = inspectExecutableCode(reply);
+    expect(prepared.cutOff).toBeDefined();
+    expect(prepared.code).toContain('document.body.insertAdjacentHTML("beforeend", "<canvas id=\\"ballCanvas\\"></canvas>")');
+    expect(() => parse(prepared.code, { ecmaVersion: 'latest', allowAwaitOutsideFunction: true })).not.toThrow();
+    expect(prepared.code.trim().endsWith('drawBall();')).toBe(true);
+  });
+});
+
+describe('adapting what small models write', async () => {
+  const { errorHint, dropBrowserCopies } = await import('../src/core/error-hints.ts');
+  const { declareMissing } = await import('../src/core/blank-fix.ts');
+
+  it('turns a property called like a method into an assignment', () => {
+    const code = 'const ctx = document.createElement("canvas").getContext("2d");\nctx.fillStyle("red");\nctx.fillRect(0, 0, 5, 5);';
+    const hint = errorHint(code, 'ctx.fillStyle is not a function', 2)!;
+    expect(hint.correction!.code.split('\n')[1]).toBe('ctx.fillStyle = "red";');
+  });
+
+  it('takes out its own copy of a browser function, wherever it is', () => {
+    const code = 'function animate() {\n  function requestAnimationFrame() {\n    return requestAnimationFrame;\n  }\n  requestAnimationFrame(animate);\n}\nanimate();';
+    const { code: out, dropped } = dropBrowserCopies(code);
+    expect(dropped).toEqual(['requestAnimationFrame']);
+    expect(out).not.toContain('function requestAnimationFrame');
+    expect(out).toContain('requestAnimationFrame(animate);');
+  });
+
+  it('declares a drawing context the program never made, only when it has no canvas of its own', () => {
+    const lone = 'function draw() {\n  fill.clearRect(0, 0, 10, 10);\n  fill.fillRect(1, 1, 2, 2);\n}\ndraw();';
+    const made = declareMissing(lone);
+    expect(made.declared).toEqual([{ name: 'fill', make: 'document.body.appendChild(document.createElement("canvas")).getContext("2d")' }]);
+    expect(made.code.split('\n')[0]).toBe('const fill = document.body.appendChild(document.createElement("canvas")).getContext("2d");');
+    // With a canvas of its own, its context is what it meant: left to the blank stage
+    expect(declareMissing('const canvas = document.createElement("canvas");\nctx.fillRect(0, 0, 5, 5);').declared).toEqual([]);
+    // Used some other way too (passed along), or set by the program: left alone
+    expect(declareMissing('ctx.fillRect(0, 0, 5, 5);\ndraw(ctx);').declared).toEqual([]);
+    expect(declareMissing('ctx = makeIt();\nctx.fillRect(0, 0, 5, 5);').declared).toEqual([]);
+  });
+
+  it('declares an audio context the program never made', () => {
+    const made = declareMissing('const o = audio.createOscillator();\no.connect(audio.destination);\no.start();');
+    expect(made.declared).toEqual([{ name: 'audio', make: 'new AudioContext()' }]);
+  });
+});

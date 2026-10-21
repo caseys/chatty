@@ -570,6 +570,62 @@ function typeHas(type: string, member: string): boolean {
   return type === 'CanvasRenderingContext2D' && CONTEXT_2D.has(member);
 }
 
+/** Members of the browser's AudioContext (for where the browser's own type isn't there) */
+const AUDIO_CONTEXT = new Set([
+  'createOscillator', 'createGain', 'createBufferSource', 'createBiquadFilter', 'createDynamicsCompressor', 'createDelay',
+  'createAnalyser', 'createStereoPanner', 'createConvolver', 'createBuffer', 'createWaveShaper', 'createPanner',
+  'decodeAudioData', 'destination', 'currentTime', 'sampleRate', 'resume', 'suspend', 'close', 'state',
+]);
+
+/** Names the sandbox provides, never missing */
+const PROVIDED = new Set(['speak', 'clear', 'out', 'root', 'playNotes', 'searchWikipedia', 'THREE', 'bpm', 'beat', 'start']);
+
+/**
+ * Before a program runs: a name it uses as a 2D drawing context, a canvas or an audio context, that
+ * nothing declares or assigns, is declared at its top as a new one of that type (a canvas added to
+ * the page). Only where the program has no canvas of its own: then the blank stage tries what it
+ * has (its canvas's context) instead.
+ */
+export function declareMissing(code: string): { code: string; declared: Array<{ name: string; make: string }> } {
+  const tree = analyse(code);
+  if (!tree) return { code, declared: [] };
+  const hasCanvas = /createElement\(\s*['"`]canvas|<canvas|getContext|\bcanvas\b/i.test(code);
+  const uses = new Map<string, AnyNode[]>();
+  for (const n of tree.nodes) {
+    if (n.type !== 'Identifier' || !isReference(tree, n) || resolve(tree, n, n.name) !== null) continue;
+    if (PROVIDED.has(n.name) || n.name in globalThis) continue;
+    uses.set(n.name, [...(uses.get(n.name) ?? []), n]);
+  }
+  const declared: Array<{ name: string; make: string }> = [];
+  for (const [name, refs] of uses) {
+    if (refs.some((n) => isTarget(tree, n))) continue; // the program sets it itself
+    const members = new Set<string>();
+    for (const n of refs) {
+      const up = tree.parent.get(n);
+      if (up?.type !== 'MemberExpression' || tree.key.get(n) !== 'object' || up.computed) {
+        members.clear();
+        break; // used some other way too: not sure what it is
+      }
+      members.add(up.property.name as string);
+    }
+    if (members.size === 0) continue;
+    const all = (has: (m: string) => boolean) => [...members].every(has);
+    const make =
+      !hasCanvas && all((m) => typeHas('CanvasRenderingContext2D', m))
+        ? MAKEABLE.find((t) => t.type === 'CanvasRenderingContext2D')!.make
+        : !hasCanvas && members.has('getContext') && all((m) => typeHas('HTMLCanvasElement', m))
+          ? MAKEABLE.find((t) => t.type === 'HTMLCanvasElement')!.make
+          : all((m) => typeHas('AudioContext', m) || AUDIO_CONTEXT.has(m))
+            ? 'new AudioContext()'
+            : null;
+    if (make) declared.push({ name, make });
+  }
+  if (declared.length === 0) return { code, declared };
+  const head = declared.map(({ name, make }) => `const ${name} = ${make};`).join('\n');
+  const out = `${head}\n${code}`;
+  return analyse(out) ? { code: out, declared } : { code, declared: [] };
+}
+
 /** Members of the browser's CanvasRenderingContext2D (for where the browser's own type isn't there) */
 const CONTEXT_2D = new Set([
   'arc', 'arcTo', 'beginPath', 'bezierCurveTo', 'clearRect', 'clip', 'closePath', 'createLinearGradient',

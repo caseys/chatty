@@ -386,7 +386,9 @@ function withTalk(parts: ReplyPart[]): string {
  * Calls the zero-argument top-level functions nothing else refers to (draw(), main(), ...).
  */
 export function callUncalledFunctions(code: string): string {
-  const declared = [
+  // The program's top-level functions that take nothing, however they are indented (a page's
+  // <script> usually is); by their line start when the program doesn't parse
+  const declared = topLevelNoArgFunctions(code) ?? [
     ...Array.from(code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(\s*\)/gm), (m) => m[1]),
     ...Array.from(code.matchAll(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(\s*\)\s*=>/gm), (m) => m[1]),
   ];
@@ -403,6 +405,26 @@ export function callUncalledFunctions(code: string): string {
   let toCall = roots.filter((name) => /^(?:main|init|start|run|setup|draw|play|render|animate|create|build|show|make)/i.test(name));
   if (toCall.length === 0 && roots.length === declared.length) toCall = [declared[declared.length - 1]];
   return toCall.length ? `${code}\n${toCall.map((name) => `await ${name}();`).join('\n')}` : code;
+}
+
+/** The names of the top-level functions (and arrow functions in a const/let/var) taking no parameters, or null when the code doesn't parse */
+function topLevelNoArgFunctions(code: string): string[] | null {
+  let program: ReturnType<typeof parse>;
+  try {
+    program = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true });
+  } catch {
+    return null;
+  }
+  const names: string[] = [];
+  for (const node of program.body) {
+    if (node.type === 'FunctionDeclaration' && node.id && node.params.length === 0) names.push(node.id.name);
+    if (node.type === 'VariableDeclaration') {
+      for (const d of node.declarations) {
+        if (d.id.type === 'Identifier' && d.init && /^(?:Arrow)?Function/.test(d.init.type) && (d.init as { params: unknown[] }).params.length === 0) names.push(d.id.name);
+      }
+    }
+  }
+  return names;
 }
 
 /** Each top-level function's own source (its declaration), by name; empty when the code doesn't parse */
@@ -657,9 +679,16 @@ export function inspectExecutableCode(rawText: string, options: { closeCutOff?: 
 
   // HTML instead of JavaScript (a whole page for "an app", or bare <canvas> + <script>): its
   // markup goes on screen and its scripts run, as with an ```html block. Never spoken as prose.
-  if (HTML_START.test(cleaned)) {
-    return { code: callUncalledFunctions(htmlToCode(cleaned)), isProse: false };
-  }
+  // A page cut off inside its <script> runs that script to its end, its open blocks closed.
+  const asPage = (html: string): PreparedExecutableCode => {
+    const opened = (html.match(/<script\b/gi) ?? []).length;
+    const closed = (html.match(/<\/script>/gi) ?? []).length;
+    let code = htmlToCode(opened > closed ? `${html}\n</script>` : html);
+    const cut = options.closeCutOff === false ? null : closeCutOff(code);
+    if (cut) code = cut.code;
+    return { code: callUncalledFunctions(code), isProse: false, ...(cut ? { cutOff: { dropped: cut.dropped, closed: cut.closed } } : {}) };
+  };
+  if (HTML_START.test(cleaned)) return asPage(cleaned);
 
   // 1. Take the program out of markdown fences if present
   let hadFences = false;
@@ -669,6 +698,8 @@ export function inspectExecutableCode(rawText: string, options: { closeCutOff?: 
       cleaned = withTalk(program);
       hadFences = true;
     }
+    // A page in a ```javascript fence is a page all the same
+    if (HTML_START.test(cleaned)) return asPage(cleaned);
   }
 
   // 2. Remove any rogue <|...|> or <tool_call> tags
@@ -1866,10 +1897,15 @@ export class JavascriptRuntime {
       const label = el.id ? '#' + el.id : el.textContent ? " '" + el.textContent.trim().slice(0, 20) + "'" : '';
       return tag + label;
     }
+    // Made to be seen: a control, a canvas or media, or an element given content or a style
+    function meantToShow(el) {
+      if (/^(?:INPUT|BUTTON|SELECT|TEXTAREA|CANVAS|VIDEO|IMG|SVG|svg)$/.test(el.tagName)) return true;
+      return el.children.length > 0 || (el.textContent || '').trim() !== '' || !!el.getAttribute('style');
+    }
     function attachOrphanedControls() {
       const roots = new Map();
       for (const el of createdThisRun) {
-        if (el.isConnected || !/^(?:INPUT|BUTTON|SELECT|TEXTAREA)$/.test(el.tagName)) continue;
+        if (el.isConnected || !meantToShow(el)) continue;
         let top = el;
         while (top.parentNode) top = top.parentNode;
         if (top.nodeType !== 1) continue;
@@ -1882,6 +1918,54 @@ export class JavascriptRuntime {
         const holder = top === controls[0] && controls.length === 1 ? '' : '<' + top.tagName.toLowerCase() + '> holding ';
         imagined('never added to the page: ' + holder + controls.map(describeControl).join(', ') + ' → added to the card');
       }
+    }
+
+    // A length given as a bare number (el.style.left = x * 10) is ignored by CSS: it gets px, as
+    // the number surely meant
+    const LENGTHS = ['left', 'top', 'right', 'bottom', 'width', 'height', 'minWidth', 'minHeight', 'maxWidth', 'maxHeight',
+      'margin', 'marginTop', 'marginRight', 'marginBottom', 'marginLeft', 'padding', 'paddingTop', 'paddingRight',
+      'paddingBottom', 'paddingLeft', 'fontSize', 'borderRadius', 'borderWidth', 'gap', 'rowGap', 'columnGap', 'inset',
+      'letterSpacing', 'wordSpacing', 'textIndent', 'outlineWidth', 'outlineOffset'];
+    const LENGTH_SET = new Set(LENGTHS);
+    const pxNoted = new Set();
+    const asLength = (name, value) => {
+      const bare = (typeof value === 'number' && Number.isFinite(value) && value !== 0) || (typeof value === 'string' && /^-?\\d+(?:\\.\\d+)?$/.test(value.trim()) && Number(value) !== 0);
+      if (!bare) return value;
+      if (!pxNoted.has(name)) {
+        pxNoted.add(name);
+        imagined('style.' + name + ' = ' + value + ' (a number) → ' + value + 'px');
+      }
+      return String(value).trim() + 'px';
+    };
+    // Browsers keep each style property on the style object itself (Chrome) or on its prototype,
+    // so an element's style is handed out through a proxy that adds the px
+    const styled = new WeakMap();
+    for (const Type of [window.HTMLElement, window.SVGElement]) {
+      const desc = Type && Object.getOwnPropertyDescriptor(Type.prototype, 'style');
+      if (!desc || !desc.get) continue;
+      Object.defineProperty(Type.prototype, 'style', {
+        configurable: true,
+        enumerable: desc.enumerable,
+        set: desc.set,
+        get() {
+          const real = desc.get.call(this);
+          if (!real) return real;
+          let proxy = styled.get(real);
+          if (!proxy) {
+            proxy = new Proxy(real, {
+              get(target, prop) {
+                const value = Reflect.get(target, prop, target);
+                return typeof value === 'function' ? value.bind(target) : value;
+              },
+              set(target, prop, value) {
+                return Reflect.set(target, prop, LENGTH_SET.has(prop) ? asLength(prop, value) : value, target);
+              },
+            });
+            styled.set(real, proxy);
+          }
+          return proxy;
+        },
+      });
     }
 
     // Every browser interface a program draws, builds or plays with: elements and nodes, canvas
@@ -1956,11 +2040,24 @@ export class JavascriptRuntime {
       realClearInterval(id);
       if (programWork.delete('t' + id)) workChanged();
     };
+    // The same callback asked for again before its frame comes (a loop that calls
+    // requestAnimationFrame twice) runs once in that frame, as the browser would let it multiply
+    const pendingFrames = new Map();
+    let doubledFrameNoted = false;
     window.requestAnimationFrame = (fn) => {
+      if (typeof fn === 'function' && pendingFrames.has(fn)) {
+        if (!doubledFrameNoted) {
+          doubledFrameNoted = true;
+          imagined('requestAnimationFrame(' + (fn.name || 'callback') + ') asked for again in the same frame → once a frame');
+        }
+        return pendingFrames.get(fn);
+      }
       const id = realRequestFrame((time) => {
         programWork.delete('f' + id);
+        pendingFrames.delete(fn);
         try { fn(time); } finally { workChanged(); }
       });
+      if (typeof fn === 'function') pendingFrames.set(fn, id);
       programWork.add('f' + id);
       workChanged();
       return id;
