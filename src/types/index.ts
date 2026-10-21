@@ -301,6 +301,13 @@ export interface LlmRuntimeProvider {
 
   initialize(onProgress?: (loaded: number, total: number) => void): Promise<void>;
   generate(options: LlmGenerationOptions): Promise<LlmGenerationResult>;
+  /**
+   * One pass of a multiple-choice question (the request in `options`, answered by one of the
+   * labels): how likely the model finds each label as its answer, in the order of `labels`. A
+   * label the runtime saw as unlikely scores 0. Null when this runtime can't score (the others
+   * leave the method out) or none of the labels showed up in what it reported.
+   */
+  scoreChoices?(options: LlmGenerationOptions, labels: string[]): Promise<number[] | null>;
   cancel(turnId?: string): void;
   reset(): Promise<void>;
   dispose(): Promise<void>;

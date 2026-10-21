@@ -47,7 +47,10 @@ head ::= ("function " | "async function " | ("const " | "let ") [A-Za-z_$] [A-Za
 `;
 
 /** The letters of `count` options: A, B, C, … (at most 26) */
-const letters = (count: number) => Array.from({ length: Math.max(1, Math.min(26, count)) }, (_, i) => String.fromCharCode(65 + i));
+export const letters = (count: number) => Array.from({ length: Math.max(1, Math.min(26, count)) }, (_, i) => String.fromCharCode(65 + i));
+
+/** A reply of exactly one of the labels, nothing else */
+export const choiceGrammar = (labels: string[]) => `root ::= ${labels.map((l) => JSON.stringify(l)).join(' | ')}`;
 
 export function fixGrammar(shape: FixShape, choiceCount = 0): string {
   switch (shape) {
@@ -56,7 +59,7 @@ export function fixGrammar(shape: FixShape, choiceCount = 0): string {
       return `root ::= start rest${COMMON}`;
     // One option's letter, nothing else
     case 'choice':
-      return `root ::= ${letters(choiceCount).map((l) => `"${l}"`).join(' | ')}`;
+      return choiceGrammar(letters(choiceCount));
     case 'line':
       return `root ::= cause codeline ("\\n" codeline ("\\n" codeline)?)? "\\n"?${COMMON}`;
     case 'function':

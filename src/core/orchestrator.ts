@@ -1530,7 +1530,10 @@ export class ConversationOrchestrator {
             const iterated = fixIteratorResults(executableCode);
             if (iterated.fixed.length > 0) {
               executableCode = iterated.code;
-              for (const name of iterated.fixed) appendRunLog('imagined', `${name} = ….next() is { value, done } → ….next().value: corrected before running`);
+              // (an iterator read with [n] comes back as its own `from → to`; a .next() result as the name that kept it)
+              for (const name of iterated.fixed) {
+                appendRunLog('imagined', name.includes(' → ') ? `${name}: corrected before running` : `${name} = ….next() is { value, done } → ….next().value: corrected before running`);
+              }
             }
             // An audio node read as a property of an AudioContext: the create…() that makes it
             const nodes = fixAudioNodeProperties(executableCode);
@@ -2376,7 +2379,9 @@ export class ConversationOrchestrator {
    * The blank stage (blank-fix.ts), one fix attempt: the expression the error names is replaced by
    * candidates, each tried in a hidden run (trialRun), until one runs without that error. The
    * candidates, in order: the model's pick among the page's own names (multiple choice), its
-   * expressions for the blank (three samples), then the remaining choices. At most MAX_CANDIDATES
+   * expressions for the blank (three samples), then the remaining choices. A runtime that can score
+   * the choices (scoreChoices) answers the multiple choice in one pass: every choice gets the
+   * model's probability and they are tried best-first, with no letter asked for. At most MAX_CANDIDATES
    * are tried; the first that passes is run for real. When none does, the line fix follows as the
    * next attempt. Stops at once when the user starts a new turn.
    */
@@ -2406,11 +2411,16 @@ export class ConversationOrchestrator {
     const done = () => (!wantsSound || soundSettled()) && (!wantsVisual || shown());
     // Long enough for the speaker measurement when sound was asked for
     for (let waited = 0; !done() && waited < (wantsSound && asked() ? 2500 : 1500); waited += 100) await settle(100);
+    // MIDI that never started a note is silent for that reason: the audio context has nothing to do with it
+    const midi = this.javascriptRuntime.midiSummary?.();
+    const noNoteStarted = !!midi && midi.sent > 0 && midi.noteOns === 0;
     const missing = [
       wantsSound && !asked()
         ? 'The program played nothing: notes play through a Web MIDI output (output.send([0x90 + channel, note, velocity], time)) or Web Audio oscillators.'
         : wantsSound && silent()
-          ? "The program's sound never reached the speakers: connect each sound to the audio context's destination (node.connect(audioContext.destination))."
+          ? noNoteStarted
+            ? `No note was started: every MIDI message was something else${midi.others.length ? ` (${midi.others.join('; ')})` : ''}. A note starts with output.send([0x90 + channel, note, velocity]) where channel is 0 to 15 and velocity 1 to 127, and ends with 0x80 + channel.`
+            : "The program's sound never reached the speakers: connect each sound to the audio context's destination (node.connect(audioContext.destination))."
           : '',
       wantsVisual && !shown() ? 'The program showed nothing: what it adds to document.body appears in the card on screen.' : '',
     ].filter(Boolean);
@@ -2455,19 +2465,32 @@ export class ConversationOrchestrator {
     const page = { ids: this.javascriptRuntime.pageIds?.() ?? [], fields: this.javascriptRuntime.pageFields?.() ?? [] };
     const choices = blankChoices(run.code, blank, page);
 
+    const asking = (request: string, shape: Partial<LlmGenerationOptions> = {}): LlmGenerationOptions => ({
+      turnId: `blank_${run.turnId}_${attempt}`,
+      systemPrompt: BLANK_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: request }],
+      temperature: 0.1,
+      signal: abort.signal,
+      ...shape,
+    });
     const ask = (request: string, shape: Partial<LlmGenerationOptions>): Promise<string | null> =>
       withActivity('asking for a fix', async () => {
         if (moved() || abort.signal.aborted) return null;
         try {
-          const result = await provider.generate({
-            turnId: `blank_${run.turnId}_${attempt}`,
-            systemPrompt: BLANK_SYSTEM_PROMPT,
-            messages: [{ role: 'user', content: request }],
-            temperature: 0.1,
-            signal: abort.signal,
-            ...shape,
-          });
+          const result = await provider.generate(asking(request, shape));
           return moved() || abort.signal.aborted || result.aborted ? null : result.text;
+        } catch {
+          return null;
+        }
+      });
+    // The probability of each label as the answer to a choice request, or null (a runtime that
+    // can't score, or a pass that gave nothing)
+    const score = (request: string, labels: string[]): Promise<number[] | null> =>
+      withActivity('asking for a fix', async () => {
+        if (!provider.scoreChoices || moved() || abort.signal.aborted) return null;
+        try {
+          const scores = await provider.scoreChoices(asking(request, { exact: true, fixShape: 'choice', choiceCount: labels.length, maxOutputTokens: 1 }), labels);
+          return moved() || abort.signal.aborted || scores?.length !== labels.length ? null : scores;
         } catch {
           return null;
         }
@@ -2485,9 +2508,11 @@ export class ConversationOrchestrator {
     let count = 0;
     type Candidate = { code: string; expr: string; level: number; rank: number; votes: number };
     let best = null as Candidate | null;
+    // The choices best-first: by name at first, by the model's probabilities once it has scored them
+    let ranked = choices;
     const rankOf = (expr: string) => {
-      const i = choices.indexOf(expr);
-      return i < 0 ? choices.length : i;
+      const i = ranked.indexOf(expr);
+      return i < 0 ? ranked.length : i;
     };
     const mentions = new RegExp(`(?<![\\w$])${blank.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w$])`);
     const tested = new Set<string>();
@@ -2527,12 +2552,27 @@ export class ConversationOrchestrator {
     const settled = () => { const b = best as Candidate | null; return b !== null && b.level === 3 && b.rank === 0; };
     try {
       if (choices.length >= 2) {
-        const reply = await ask(choiceRequest(run.task, run.code, blank, error, choices, facts), { exact: true, fixShape: 'choice', choiceCount: choices.length, maxOutputTokens: 8 });
-        const picked = reply === null ? -1 : chosenIndex(reply, choices.length);
-        if (picked >= 0) vote(choices[picked]);
+        const request = choiceRequest(run.task, run.code, blank, error, choices, facts);
+        // One pass of the question gives the model's probability for every choice (a runtime that
+        // can scores them): the choices are then tried best-first, and no letter is asked for
+        const labels = choices.slice(0, 26).map((_, i) => String.fromCharCode(65 + i));
+        const scores = await score(request, labels);
+        if (scores) {
+          // (equal scores keep their order by name)
+          const order = labels.map((_, i) => i).sort((a, b) => scores[b] - scores[a] || a - b);
+          ranked = [...order.map((i) => choices[i]), ...choices.slice(labels.length)];
+          // (a runtime reports only its likeliest few: the rest follow them in their order)
+          const shown = order.filter((i) => scores[i] > 0);
+          appendRunLog('retry', `scored the choices by probability: ${shown.map((i) => `\`${choices[i]}\` ${scores[i].toFixed(2)}`).join(', ')}${choices.length > shown.length ? ` (${choices.length - shown.length} more, less likely)` : ''}`);
+        } else {
+          const reply = await ask(request, { exact: true, fixShape: 'choice', choiceCount: choices.length, maxOutputTokens: 8 });
+          const picked = reply === null ? -1 : chosenIndex(reply, choices.length);
+          if (picked >= 0) vote(choices[picked]);
+        }
       }
-      // The best-fitting choice first: when it runs cleanly, the model needn't write anything
-      if (choices.length > 0) await test(choices[0]);
+      // The best choice first (by probability, else by name): when it runs cleanly, the model
+      // needn't write anything
+      if (ranked.length > 0) await test(ranked[0]);
       if (!settled()) {
         // Greedy, then wide, then narrow: three really different answers
         for (const sampling of [{ exact: true }, { sampling: fixSampling(2) }, { sampling: fixSampling(3) }]) {
@@ -2540,7 +2580,7 @@ export class ConversationOrchestrator {
           const reply = await ask(blankRequest(run.task, run.code, blank, error, facts), { ...sampling, fixShape: 'expression', maxOutputTokens: 96 });
           vote(reply === null ? null : firstExpression(reply));
         }
-        const candidates = [...new Set([...choices, ...votes.keys()])].sort(
+        const candidates = [...new Set([...ranked, ...votes.keys()])].sort(
           (a, b) => (votes.get(b) ?? 0) - (votes.get(a) ?? 0) || rankOf(a) - rankOf(b)
         );
         for (const expr of candidates) {

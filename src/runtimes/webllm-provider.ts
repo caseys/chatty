@@ -4,7 +4,7 @@
 // which is what lets it load in mobile Safari. Downloads are kept in Cache Storage.
 // ============================================================================
 
-import { ENGLISH_GRAMMAR, fixGrammar } from './fix-grammar.ts';
+import { choiceGrammar, ENGLISH_GRAMMAR, fixGrammar } from './fix-grammar.ts';
 import { retryTemperature } from './retry-temperature.ts';
 import type { WebWorkerMLCEngine } from '@mlc-ai/web-llm';
 import { isAppleMobile } from '../core/settings.ts';
@@ -61,6 +61,29 @@ export function webLlmSampling(
   return qwen3
     ? { temperature, top_p, presence_penalty: 0 }
     : { temperature, top_p, repetition_penalty: 1.05 };
+}
+
+/** The most tokens WebLLM reports probabilities for at one position (its top_logprobs is 0 to 5) */
+const WEBLLM_MAX_TOP_LOGPROBS = 5;
+
+/**
+ * How likely each label is, from the tokens WebLLM reported at the answer's position (a token and
+ * its log probability). Tokenizers write the same letter more than one way ("A", " A"), so every
+ * token that is a label once its spaces are trimmed counts for that label, and their probabilities
+ * add up. A label not among the reported tokens is less likely than all of them: 0. Null when no
+ * label showed up (the model's top tokens were something else, or nothing was reported).
+ */
+export function choiceProbabilities(labels: string[], reported: Array<{ token: string; logprob: number }>): number[] | null {
+  const probabilities = labels.map(() => 0);
+  const seen = new Set<string>();
+  for (const { token, logprob } of reported) {
+    // (the sampled token is reported once on its own and again among the top ones)
+    if (seen.has(token)) continue;
+    seen.add(token);
+    const at = labels.indexOf(token.trim());
+    if (at >= 0 && Number.isFinite(logprob)) probabilities[at] += Math.exp(logprob);
+  }
+  return probabilities.some((p) => p > 0) ? probabilities : null;
 }
 
 /** One system message first, then alternating turns (consecutive same-role messages are merged). */
@@ -385,6 +408,57 @@ export class WebLlmProvider implements LlmRuntimeProvider {
       tokensGenerated: tokens,
       tokensPerSecond: tokens / (totalTimeMs / 1000),
     };
+  }
+
+  /**
+   * The model's probability for each label as the answer to a multiple-choice request: one pass
+   * of the question, one token. WebLLM reports the likeliest tokens at that position (up to 5), so
+   * the likeliest five labels are scored and the rest read 0. The reply is held to the labels by
+   * a grammar, as in generate: WebLLM applies the grammar to the logits before it computes the
+   * probabilities, so they are shared among the labels alone (a bare "A" against "The answer is"
+   * and a space-led " A" no longer split the mass, and none of the five slots goes to a token that
+   * is no answer). A grammar that fails here gives null instead of a retry without it: a request
+   * without a grammar left WebLLM ignoring them afterwards (see runGeneration). Temperature is 1
+   * so the numbers are the model's own, not sharpened; the sampled token doesn't matter.
+   */
+  scoreChoices(options: LlmGenerationOptions, labels: string[]): Promise<number[] | null> {
+    const run = () => this.runScoring(options, labels);
+    const next = this.generationChain.then(run, run);
+    this.generationChain = next.catch(() => {});
+    return next;
+  }
+
+  private async runScoring(options: LlmGenerationOptions, labels: string[]): Promise<number[] | null> {
+    if (labels.length < 2 || options.signal?.aborted) return null;
+    await this.initialize();
+    const engine = this.engine;
+    if (!engine) return null;
+    const onAbort = () => void engine.interruptGenerate();
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      const reply = await engine.chat.completions.create({
+        messages: toChatMessages(options.systemPrompt, options.messages),
+        stream: false,
+        temperature: WEBLLM_MAX_TEMPERATURE,
+        top_p: 1,
+        max_tokens: 1,
+        logprobs: true,
+        top_logprobs: WEBLLM_MAX_TOP_LOGPROBS,
+        response_format: { type: 'grammar', grammar: choiceGrammar(labels) },
+        // The grammar rules out a <think> tag, but the model is asked as generate asks it: with the
+        // template that skips thinking, so its answer is the next token
+        ...(this.spec.noThinking ? { extra_body: { enable_thinking: false } } : {}),
+      });
+      if (options.signal?.aborted) return null;
+      const first = reply.choices[0]?.logprobs?.content?.[0];
+      if (!first) return null;
+      return choiceProbabilities(labels, [...(first.top_logprobs ?? []), { token: first.token, logprob: first.logprob }]);
+    } catch (err) {
+      console.warn('Scoring the choices failed', err);
+      return null;
+    } finally {
+      options.signal?.removeEventListener('abort', onAbort);
+    }
   }
 
   cancel(): void {

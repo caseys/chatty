@@ -230,11 +230,20 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
       const notes = Array.isArray(items[1]) ? items[1] : [items[1]];
       const expanded = items.length > 1 ? notes.map((note) => [items[0], note, ...items.slice(2)]) : [items];
       return expanded
-        .flatMap((message) =>
-          parseMidiMessages(message.map((value) => (typeof value === 'string' ? (readNotes(value, drums, -1).notes[0] ?? -1) : Number(value))))
-        )
+        .flatMap((message) => {
+          const read = readMidiMessages(message.map((value) => (typeof value === 'string' ? (readNotes(value, drums, -1).notes[0] ?? -1) : Number(value))));
+          for (const { message: played, sent } of read) tallyMidi(sent, played);
+          return read.flatMap(({ message: played }) => (played ? [played] : []));
+        })
         .map((message) => ({ offset: 0, message }));
     }
+
+    // The friendly form's messages are tallied like raw ones, except the note-offs it adds itself:
+    // the program wrote none of those
+    const counted = (events: { offset: number; message: number[] }[]) => {
+      for (const { message } of events) if ((message[0] & 0xf0) !== 0x80) tallyMidi(message, message);
+      return events;
+    };
 
     let [, , velocity, duration] = items;
     const [instrument, notes, , , step] = items;
@@ -251,11 +260,13 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
       let barMs = Number(duration) > 0 ? Number(duration) : 2000;
       if (barMs < 20) barMs *= 1000; // seconds
       const beatMs = barMs / 4;
-      return pattern.flatMap(({ beat, note, beats }) => {
-        const offset = beat * beatMs;
-        const on = { offset, message: [0x90 | channel, note, level0] };
-        return drums ? [on] : [on, { offset: offset + beats * beatMs * 0.95, message: [0x80 | channel, note, 0] }];
-      });
+      return counted(
+        pattern.flatMap(({ beat, note, beats }) => {
+          const offset = beat * beatMs;
+          const on = { offset, message: [0x90 | channel, note, level0] };
+          return drums ? [on] : [on, { offset: offset + beats * beatMs * 0.95, message: [0x80 | channel, note, 0] }];
+        })
+      );
     }
     let { notes: numbers, sequence } = readNotes(notes, drums, program);
     // Arguments out of place (['bass', 'walking', 'G', beat]): the notes are the first readable
@@ -283,7 +294,7 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
       events.push({ offset, message: [0x90 | channel, note, level] });
       if (ms > 0 && level > 0 && !drums) events.push({ offset: offset + ms, message: [0x80 | channel, note, 0] });
     });
-    return events;
+    return counted(events);
   }
 
   /** The channel for an instrument name: drums 9, others their own, picked (and set up) on first use. */
@@ -764,18 +775,34 @@ function messageLength(status: number): number {
  * SysEx and anything unreadable is skipped.
  */
 export function parseMidiMessages(data: Iterable<number> | ArrayLike<number>): number[][] {
+  return readMidiMessages(data).flatMap(({ message }) => (message ? [message] : []));
+}
+
+/** One message read from a send()'s bytes, next to the bytes the program wrote for it. */
+interface ReadMessage {
+  /** What plays; missing for bytes that make no sound (a stray data byte, SysEx, a cut-off message) */
+  message?: number[];
+  sent: number[];
+}
+
+function readMidiMessages(data: Iterable<number> | ArrayLike<number>): ReadMessage[] {
   const bytes = toByteArray(data)
     .map((byte) => Math.round(Number(byte)))
     .filter((byte) => Number.isFinite(byte) && byte >= 0 && byte <= 255);
 
-  const messages: number[][] = [];
+  const messages: ReadMessage[] = [];
+  // The run of stray bytes being read, reported as one thing
+  let stray: number[] | null = null;
   let index = 0;
   while (index < bytes.length) {
     let status = bytes[index];
     if (status === 0xf0) {
       // SysEx: skipped
       const end = bytes.indexOf(0xf7, index + 1);
-      index = end < 0 ? bytes.length : end + 1;
+      const stop = end < 0 ? bytes.length : end + 1;
+      messages.push({ sent: bytes.slice(index, stop) });
+      stray = null;
+      index = stop;
       continue;
     }
     if (status < 16) status = 0x90 | status; // a bare channel number: note-on
@@ -783,9 +810,17 @@ export function parseMidiMessages(data: Iterable<number> | ArrayLike<number>): n
     if ((status & 0xf0) === 0xc0 && bytes[index + 1] < 0x80 && bytes[index + 2] < 0x80) status = 0x90 | (status & 0x0f);
     const length = messageLength(status);
     if (length === 0) {
-      index++; // a stray data byte, or a status that makes no sound
+      // a stray data byte, or a status that makes no sound
+      if (stray) {
+        stray.push(bytes[index]);
+      } else {
+        stray = [bytes[index]];
+        messages.push({ sent: stray });
+      }
+      index++;
       continue;
     }
+    stray = null;
 
     const message = [status];
     let next = index + 1;
@@ -794,12 +829,94 @@ export function parseMidiMessages(data: Iterable<number> | ArrayLike<number>): n
     if (message.length === length - 1 && (command === 0x90 || command === 0x80)) {
       message.push(command === 0x90 ? 100 : 0);
     }
-    if (message.length === length) messages.push(message);
     // Data bytes left over after the message are dropped
     while (next < bytes.length && bytes[next] < 0x80) next++;
+    messages.push({ message: message.length === length ? message : undefined, sent: bytes.slice(index, next) });
     index = next;
   }
   return messages;
+}
+
+// ---- What a program sent, by the MIDI 1.0 spec ----
+// Small models write MIDI that is valid bytes but never starts a note ([0x90 + 19, 60, 0] is
+// aftertouch on channel 4, and velocity 0 means note-off), and the speakers stay silent. The tally
+// keeps what each message was, so the run log and the fix can say so.
+
+export interface MidiSummary {
+  /** Messages that started a note: a note-on with a velocity above 0 */
+  noteOns: number;
+  /** Messages in all */
+  sent: number;
+  /** The first few that started no note, each with its meaning: "[0xA3, 60, 0] is polyphonic aftertouch" */
+  others: string[];
+}
+
+const OTHERS_KEPT = 4;
+let tally: MidiSummary = { noteOns: 0, sent: 0, others: [] };
+
+/** A new program run starts counting from nothing. */
+export function resetMidiSummary(): void {
+  tally = { noteOns: 0, sent: 0, others: [] };
+}
+
+export function midiSummary(): MidiSummary {
+  return { ...tally, others: [...tally.others] };
+}
+
+const CHANNEL_MESSAGES: Record<number, { name: string; data: number }> = {
+  0x80: { name: 'a note-off', data: 2 },
+  0x90: { name: 'a note-on', data: 2 },
+  0xa0: { name: 'polyphonic aftertouch', data: 2 },
+  0xb0: { name: 'a control change', data: 2 },
+  0xc0: { name: 'a program change', data: 1 },
+  0xd0: { name: 'channel pressure (aftertouch)', data: 1 },
+  0xe0: { name: 'a pitch bend', data: 2 },
+};
+
+const SYSTEM_MESSAGES: Record<number, string> = {
+  0xf0: 'system exclusive, which is not supported here',
+  0xf1: 'time code',
+  0xf2: 'song position',
+  0xf3: 'song select',
+  0xf6: 'tune request',
+  0xf7: 'end of system exclusive',
+  0xf8: 'timing clock',
+  0xfa: 'start',
+  0xfb: 'continue',
+  0xfc: 'stop',
+  0xfe: 'active sensing',
+  0xff: 'system reset',
+};
+
+/** The bytes as a program writes them: status bytes (80 and up) in hex, data bytes as numbers. */
+function bytesText(bytes: number[]): string {
+  const shown = bytes.slice(0, 6).map((byte) => (byte >= 0x80 ? `0x${byte.toString(16).toUpperCase().padStart(2, '0')}` : String(byte)));
+  return `[${shown.join(', ')}${bytes.length > 6 ? ', …' : ''}]`;
+}
+
+/** What a message is by the spec, as a phrase after its bytes ("is polyphonic aftertouch"). */
+function midiMeaning(sent: number[]): string {
+  const status = sent[0];
+  if (status < 0x80) return 'starts with a data byte where a status byte belongs';
+  if (status >= 0xf0) return `is a system message (${SYSTEM_MESSAGES[status] ?? 'undefined'})`;
+  const { name, data } = CHANNEL_MESSAGES[status & 0xf0];
+  const given = sent.length - 1;
+  if (given > data) return `is ${name} with ${given - data === 1 ? 'an extra byte' : 'extra bytes'}`;
+  if (given < data) return `is ${name} missing ${data - given === 1 ? 'a data byte' : 'its data bytes'}`;
+  if ((status & 0xf0) === 0x90 && sent[2] === 0) return 'is a note-on with velocity 0, which means note-off';
+  return `is ${name}`;
+}
+
+/** One message of a program: counted, and described when it started no note. `played` is what the synth got. */
+function tallyMidi(sent: number[], played?: number[]): void {
+  tally.sent++;
+  if (played && (played[0] & 0xf0) === 0x90 && played[2] > 0) {
+    tally.noteOns++;
+    return;
+  }
+  if (tally.others.length >= OTHERS_KEPT) return;
+  const text = `${bytesText(sent)} ${midiMeaning(sent)}`;
+  if (!tally.others.includes(text)) tally.others.push(text);
 }
 
 // One synth per audio context, re-pointed at each program's output node

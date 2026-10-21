@@ -25,6 +25,11 @@ export interface Blank {
    * start of the statement holding its first use), not by writing the expression at every use
    */
   declareAt?: { offset: number; indent: string };
+  /**
+   * The blank is the expression a name was set from (`const output = midi.outputs.values()[0]`),
+   * not the name: the spans of every place that name is read, which is where the value is used
+   */
+  uses?: Array<{ start: number; end: number }>;
 }
 
 type AnyNode = Node & Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -226,6 +231,44 @@ function blankOf(tree: Tree, code: string, node: AnyNode, why: string, line = fa
   return { line, text: code.slice(node.start, node.end), spans: occurrences(tree, code, node), why };
 }
 
+/** What a program spells out as data: an expression that made one of these isn't what came out undefined or wrong */
+const SPELLED_OUT = /^(?:Literal|TemplateLiteral|ObjectExpression|ArrayExpression|FunctionExpression|ArrowFunctionExpression|ClassExpression)$/;
+
+/**
+ * A name declared once, as a const (or a let nothing writes to) set from an expression
+ * (`const output = midi.outputs.values()[0]`): the blank is that expression, on its declaration
+ * line. The name's uses are many (and in other functions); the expression is one place, so one
+ * filled value reaches all of them. Null for any other name.
+ */
+function atSource(tree: Tree, code: string, node: AnyNode, why: string): Blank | null {
+  if (node.type !== 'Identifier') return null;
+  const scope = resolve(tree, node, node.name);
+  if (!scope) return null;
+  const same = (n: AnyNode) => n.type === 'Identifier' && n.name === node.name && resolve(tree, n, n.name) === scope;
+  const declaring = tree.nodes.filter((n) => same(n) && tree.bindings.has(n));
+  if (declaring.length !== 1 || tree.key.get(declaring[0]) !== 'id') return null;
+  const declarator = tree.parent.get(declaring[0]);
+  const declaration = declarator ? tree.parent.get(declarator) : undefined;
+  const init = declarator?.type === 'VariableDeclarator' ? declarator.init : null;
+  if (!init || !declaration || (declaration.kind !== 'const' && declaration.kind !== 'let')) return null;
+  if (SPELLED_OUT.test(init.type) || (init.type === 'Identifier' && init.name === 'undefined')) return null;
+  const reads = tree.nodes.filter((n) => same(n) && isReference(tree, n));
+  if (reads.some((n) => isTarget(tree, n))) return null;
+  return {
+    line: startLine(init),
+    text: code.slice(init.start, init.end),
+    spans: [{ start: init.start, end: init.end }],
+    why: `${why}; this line sets it`,
+    // (the failing one first: it says how the value is used)
+    uses: [node, ...reads.filter((n) => n !== node)].map((n) => ({ start: n.start, end: n.end })),
+  };
+}
+
+/** The blank for a name that holds nothing (or the wrong thing): where it was set when it was set from an expression, else the name's uses */
+function blankAt(tree: Tree, code: string, node: AnyNode, why: string, line = failLine(node)): Blank {
+  return atSource(tree, code, node, why) ?? blankOf(tree, code, node, why, line);
+}
+
 /** The undeclared name: every reference to it that nothing declares */
 function undeclared(tree: Tree, code: string, name: string, errorLine?: number): Blank | null {
   const refs = tree.nodes.filter((n) => isReference(tree, n) && n.name === name && !isTarget(tree, n) && resolve(tree, n, name) === null);
@@ -289,7 +332,7 @@ export function findBlank(code: string, error: string, errorLine?: number): Blan
         if (receiver.type === 'Super') continue;
         return blankOf(tree, code, receiver, method ? `${code.slice(receiver.start, receiver.end)} has no ${method}` : `${code.slice(receiver.start, receiver.end)} lacks that method`, failLine(callee));
       }
-      if (callee.type === 'Identifier') return blankOf(tree, code, callee, `${callee.name} is not a function`);
+      if (callee.type === 'Identifier') return blankAt(tree, code, callee, `${callee.name} is not a function`);
     }
     return null;
   }
@@ -327,14 +370,14 @@ export function findBlank(code: string, error: string, errorLine?: number): Blan
     if (wanted.length === 0) return null;
     // Several on one line: the first whose object isn't a plain name the program declared as a literal
     const member = wanted[0];
-    return blankOf(tree, code, member.object, `${code.slice(member.object.start, member.object.end)} is ${kind}`, failLine(member));
+    return blankAt(tree, code, member.object, `${code.slice(member.object.start, member.object.end)} is ${kind}`, failLine(member));
   }
 
   // Destructuring nothing: "Cannot destructure property 'x' of 'obj' as it is undefined."
   const destructure = message.match(/Cannot destructure (?:property '[^']*' of )?'([^']+)' as it is (undefined|null)/);
   if (destructure) {
     const inits = near<AnyNode>(tree, line, (n) => n.type === 'VariableDeclarator' && n.id.type === 'ObjectPattern' && !!n.init && matches(code, n.init, destructure[1]));
-    return inits.length ? blankOf(tree, code, inits[0].init, `${code.slice(inits[0].init.start, inits[0].init.end)} is ${destructure[2]}`) : null;
+    return inits.length ? blankAt(tree, code, inits[0].init, `${code.slice(inits[0].init.start, inits[0].init.end)} is ${destructure[2]}`) : null;
   }
 
   // Not a constructor: "Foo is not a constructor", Safari "… (evaluating 'new Foo()')"
@@ -342,7 +385,7 @@ export function findBlank(code: string, error: string, errorLine?: number): Blan
     const evaluating = message.match(/\(evaluating '(.+)'\)/)?.[1];
     const named = message.match(/^(.+?) is not a constructor/)?.[1] ?? '';
     const news = near<AnyNode>(tree, line, (n) => n.type === 'NewExpression' && (evaluating ? strip(code.slice(n.start, n.end)) === strip(evaluating) : matches(code, n.callee, named)));
-    return news.length ? blankOf(tree, code, news[0].callee, `${code.slice(news[0].callee.start, news[0].callee.end)} is not a constructor`) : null;
+    return news.length ? blankAt(tree, code, news[0].callee, `${code.slice(news[0].callee.start, news[0].callee.end)} is not a constructor`) : null;
   }
 
   // Not iterable: where a for-of, spread or array destructuring takes its values
@@ -362,7 +405,7 @@ export function findBlank(code: string, error: string, errorLine?: number): Blan
     const chosen = named ? targets.filter((n) => matches(code, n, named!)) : targets.filter((n) => failLine(n) === (line ?? failLine(n)));
     // Without a name, only a line with exactly one place that could be it
     if (named ? chosen.length === 0 : chosen.length !== 1) return null;
-    return blankOf(tree, code, chosen[0], `${code.slice(chosen[0].start, chosen[0].end)} is not iterable`);
+    return blankAt(tree, code, chosen[0], `${code.slice(chosen[0].start, chosen[0].end)} is not iterable`);
   }
 
   return null;
@@ -416,8 +459,10 @@ function elementHas(member: string): boolean {
 export function blankChoices(code: string, blank: Blank, page: { ids: string[]; fields?: string[] }): string[] {
   const tree = analyse(code);
   const node = tree && blank.spans[0] ? nodeAt(tree, blank.spans[0]) : null;
-  const parent = node && tree ? tree.parent.get(node) : undefined;
-  const key = node && tree ? tree.key.get(node) : undefined;
+  // A blank that is what a name was set from: the value is used as the name is, at its first use
+  const site = (tree && blank.uses?.[0] ? nodeAt(tree, blank.uses[0]) : null) ?? node;
+  const parent = site && tree ? tree.parent.get(site) : undefined;
+  const key = site && tree ? tree.key.get(site) : undefined;
   const role = !parent ? 'value'
     : parent.type === 'NewExpression' && key === 'callee' ? 'constructor'
     : parent.type === 'MemberExpression' && key === 'object' ? 'receiver'
@@ -441,7 +486,7 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
       (n.type === 'BinaryExpression' && /^(?:[-+*/%]|\*\*|<<|>>|>>>|&|\||\^)$/.test(n.operator) && (numberLike(n.left) || numberLike(n.right))));
   const numberSlot =
     numeric ||
-    (parent?.type === 'ArrayExpression' && (parent.elements as AnyNode[]).filter((e) => e && e !== node).length > 0 && (parent.elements as AnyNode[]).filter((e) => e && e !== node).every((e) => numberLike(e) || e.type === 'Identifier'));
+    (parent?.type === 'ArrayExpression' && (parent.elements as AnyNode[]).filter((e) => e && e !== site).length > 0 && (parent.elements as AnyNode[]).filter((e) => e && e !== site).every((e) => numberLike(e) || e.type === 'Identifier'));
   // What can't be a number there: an object made, awaited or written out, or a function
   const madeObject = (init: AnyNode) =>
     /^(?:AwaitExpression|NewExpression|ObjectExpression|ArrayExpression|ArrowFunctionExpression|FunctionExpression|ClassExpression)$/.test(init.type) ||
@@ -553,7 +598,7 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
   // the program uses on it is one that type has), elements added to the page
   if (tree && blank.spans.length > 0) {
     const used = new Set<string>();
-    for (const span of blank.spans) {
+    for (const span of blank.uses ?? blank.spans) {
       const at = nodeAt(tree, span);
       const up = at ? tree.parent.get(at) : undefined;
       if (up?.type === 'MemberExpression' && tree.key.get(at!) === 'object') used.add(up.computed ? '[index]' : (up.property.name as string));

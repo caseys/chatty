@@ -968,10 +968,43 @@ function audioParamTime(code: string, error: string): ErrorHint | null {
 }
 
 /**
+ * Whether a name stands for a value the program hasn't made yet where it is used: a `let`/`var`
+ * declared with nothing to start it (or only null/undefined), a parameter, or a loop's item. A
+ * const, or a variable an expression made, got its value from that expression: when it came out
+ * undefined the expression is the mistake, and calling through `?.` would only hide it. Every
+ * declaration of the name has to be of the first kind.
+ */
+function notMadeYet(code: string, name: string): boolean {
+  const tree = analyse(code);
+  if (!tree) return false;
+  const sites = [...tree.bindings].filter((id) => id.name === name);
+  return (
+    sites.length > 0 &&
+    sites.every((id) => {
+      // Up out of a destructuring pattern to what declares it
+      let at = id;
+      for (let up = tree.parent.get(at); up && /^(?:ObjectPattern|ArrayPattern|RestElement|AssignmentPattern|Property)$/.test(up.type); up = tree.parent.get(at)) at = up;
+      const owner = tree.parent.get(at);
+      if (!owner) return false;
+      if (/Function/.test(owner.type) && tree.key.get(at) === 'params') return true;
+      if (owner.type !== 'VariableDeclarator' || tree.key.get(at) !== 'id') return false;
+      const declaration = tree.parent.get(owner)!;
+      const loop = tree.parent.get(declaration);
+      if ((loop?.type === 'ForOfStatement' || loop?.type === 'ForInStatement') && tree.key.get(declaration) === 'left') return true;
+      if (at !== id || declaration.kind === 'const') return false;
+      const init = owner.init;
+      return !init || (init.type === 'Literal' && init.value === null) || (init.type === 'Identifier' && init.name === 'undefined') || (init.type === 'UnaryExpression' && init.operator === 'void');
+    })
+  );
+}
+
+/**
  * A method called on undefined, in a statement of its own (`p.stop()` when p is undefined):
  * when the value comes from the program's own function that returns nothing but ends in a call
- * (`notes.map((n) => play(n))`, `const p = play(n)`), that call is returned; otherwise the call
- * is made only if there is something to call (`p?.stop?.()`). Only the failing statement.
+ * (`notes.map((n) => play(n))`, `const p = play(n)`), that call is returned; otherwise, for a
+ * value the program hasn't made yet (`let osc; … osc.stop()`, a callback's item), the call is made
+ * only if there is something to call (`p?.stop?.()`). A const or a variable an expression made is
+ * left to the other hints: its expression is what gave undefined. Only the failing statement.
  */
 function callOnUndefined(code: string, error: string, errorLine?: number): ErrorHint | null {
   const safari = error.match(/undefined is not an object \(evaluating '([\w$.]+)\.([\w$]+)'\)/);
@@ -1033,6 +1066,7 @@ function callOnUndefined(code: string, error: string, errorLine?: number): Error
       if (tryParse(fixed)) return { correction: { code: fixed, note: `${maker}() returns nothing, so ${receiver}.${method}() had nothing to call → it returns its last call` } };
     }
   }
+  if (!notMadeYet(code, receiver)) return null;
   const optional = `${source(call.callee.object)}?.${method}?.${code.slice(call.callee.end, call.end).trimStart()}`;
   const fixed = `${code.slice(0, call.start)}${optional}${code.slice(call.end)}`;
   return tryParse(fixed) ? { correction: { code: fixed, note: `${receiver}.${method}() on nothing → ${receiver}?.${method}?.(): called only when there is something to call` } } : null;
@@ -1221,10 +1255,20 @@ export function loopOneFrameAnimations(code: string): { code: string; looped: st
   return tryParse(out) ? { code: out, looped: edits.map((e) => e.name), atLines } : { code, looped: [], atLines: [] };
 }
 
+/** Methods that give an iterator (which has next(), not an index) */
+const ITERATOR_MAKERS = /^(?:values|keys|entries)$/;
+
 /**
- * Before a program runs: `const output = midi.outputs.values().next()` keeps the iterator's
- * result ({ value, done }), not the item. Used for anything but its value and done (output.send),
- * it was meant to be the item: `.next().value`.
+ * Before a program runs: an iterator read as if it were the item or a list.
+ * - `const output = midi.outputs.values().next()` keeps the iterator's result ({ value, done }),
+ *   not the item. Used for anything but its value and done (output.send), it was meant to be the
+ *   item: `.next().value`.
+ * - `midi.outputs.values()[0]` is always undefined, whatever the receiver: an iterator has no index
+ *   properties. It was meant to index the items: `[...midi.outputs.values()][0]`. Left alone: one
+ *   already spread, a `?.` chain (a spread of nothing throws where the chain gives undefined), a
+ *   string or Symbol key (`it.values()['next']`), and a values()/keys()/entries() the program
+ *   defines itself (it may return a list).
+ * `fixed` names the declaration for the first, and says `from → to` for the second.
  */
 export function fixIteratorResults(code: string): { code: string; fixed: string[] } {
   const ast = tryParse(code);
@@ -1232,7 +1276,15 @@ export function fixIteratorResults(code: string): { code: string; fixed: string[
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const declarators: any[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const indexed: any[] = [];
+  const own = new Set<string>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const members = new Map<string, Set<string>>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const optional = (e: any): boolean => {
+    for (let at = e; at; at = at.type === 'CallExpression' ? at.callee : at.type === 'MemberExpression' ? at.object : at.type === 'ChainExpression' ? at.expression : null) if (at.optional) return true;
+    return false;
+  };
   walk(ast, (node) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const n = node as any;
@@ -1245,17 +1297,40 @@ export function fixIteratorResults(code: string): { code: string; fixed: string[
       if (!members.has(n.object.name)) members.set(n.object.name, new Set());
       members.get(n.object.name)!.add(n.property.name);
     }
+    if (n.type === 'MemberExpression' && n.computed && n.object.type === 'CallExpression') {
+      const call = n.object;
+      const maker = call.arguments.length === 0 && call.callee.type === 'MemberExpression' && !call.callee.computed && call.callee.property.type === 'Identifier' ? call.callee.property.name : '';
+      const key = n.property;
+      const named = (key.type === 'Literal' && typeof key.value === 'string') || key.type === 'TemplateLiteral' || (key.type === 'MemberExpression' && key.object.type === 'Identifier' && key.object.name === 'Symbol');
+      if (ITERATOR_MAKERS.test(maker) && !named && !optional(n)) indexed.push(n);
+    }
+    // A method of that name the program defines itself
+    const defines = n.type === 'Property' || n.type === 'MethodDefinition' || n.type === 'PropertyDefinition' ? (n.computed ? null : n.key) : n.type === 'AssignmentExpression' && n.left.type === 'MemberExpression' && !n.left.computed ? n.left.property : null;
+    const defined = defines ? String(defines.name ?? defines.value) : '';
+    if (ITERATOR_MAKERS.test(defined)) own.add(defined);
   });
-  const edits: Array<{ at: number; name: string }> = [];
+  const edits: Array<{ at: number; text: string }> = [];
+  const labels: Array<{ at: number; label: string }> = [];
   for (const d of declarators) {
     const used = members.get(d.id.name);
     if (!used || used.has('value') || used.has('done')) continue;
-    edits.push({ at: d.init.end, name: d.id.name });
+    edits.push({ at: d.init.end, text: '.value' });
+    labels.push({ at: d.start, label: d.id.name });
+  }
+  const brief = (text: string) => {
+    const one = text.replace(/\s+/g, ' ').trim();
+    return one.length > 60 ? `${one.slice(0, 59)}…` : one;
+  };
+  for (const n of indexed) {
+    if (own.has(n.object.callee.property.name)) continue;
+    edits.push({ at: n.object.start, text: '[...' }, { at: n.object.end, text: ']' });
+    labels.push({ at: n.start, label: `${brief(code.slice(n.start, n.end))} → [...${brief(code.slice(n.object.start, n.object.end))}]${brief(code.slice(n.object.end, n.end))}` });
   }
   if (edits.length === 0) return { code, fixed: [] };
   let out = code;
-  for (const e of edits.sort((a, b) => b.at - a.at)) out = `${out.slice(0, e.at)}.value${out.slice(e.at)}`;
-  return tryParse(out) ? { code: out, fixed: edits.map((e) => e.name) } : { code, fixed: [] };
+  for (const e of edits.sort((a, b) => b.at - a.at)) out = `${out.slice(0, e.at)}${e.text}${out.slice(e.at)}`;
+  const fixed = [...new Set(labels.sort((a, b) => a.at - b.at).map((e) => e.label))];
+  return tryParse(out) ? { code: out, fixed } : { code, fixed: [] };
 }
 
 /** The audio nodes an AudioContext makes with create…() (for where the browser's own type isn't there) */

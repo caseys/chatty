@@ -45,7 +45,7 @@ async function withThree(code: string, win: Window | null, live: () => boolean =
   }
 }
 import { withActivity } from '../core/activity-breadcrumbs.ts';
-import { silenceSoftwareMidi, softwareMidiAccess } from '../audio/software-midi.ts';
+import { midiSummary as softwareMidiSummary, resetMidiSummary, silenceSoftwareMidi, softwareMidiAccess, type MidiSummary } from '../audio/software-midi.ts';
 
 export type JavascriptExecutionMode = 'iframe' | 'worker' | 'eval';
 
@@ -1138,11 +1138,17 @@ export class JavascriptRuntime {
       // Silent with the audio running: the sound went nowhere (a node never connected). A paused
       // context (no tap yet) says nothing either way.
       if (!heard && context.state === 'running') this.soundSilent++;
+      // MIDI that never started a note is silent for that reason, whatever the audio is doing
+      const midi = softwareMidiSummary();
+      const noMidiNote = midi.sent > 0 && midi.noteOns === 0;
+      const audio = `audio ${context.state}, ${context.sampleRate} Hz${session}`;
       this.onRunLog?.(
         peak > 0.001 ? 'console' : 'error',
         peak > 0.001
-          ? `sound: reached the speakers (level ${peak.toFixed(2)}, audio ${context.state}, ${context.sampleRate} Hz${session})`
-          : `sound: notes were sent, but nothing reached the speakers (audio ${context.state}, ${context.sampleRate} Hz${session})`
+          ? `sound: reached the speakers (level ${peak.toFixed(2)}, ${audio})`
+          : noMidiNote
+            ? `sound: no MIDI note-on above velocity 0 was sent, so nothing reached the speakers (${audio}); the messages were ${midi.others.join('; ')}`
+            : `sound: notes were sent, but nothing reached the speakers (${audio})`
       );
     }, 100);
   }
@@ -1352,6 +1358,11 @@ export class JavascriptRuntime {
     return this.soundSilent;
   }
   private soundSilent = 0;
+
+  /** The MIDI messages the current program sent, by kind (note-ons above velocity 0, the others named) */
+  midiSummary(): MidiSummary {
+    return softwareMidiSummary();
+  }
 
   /** How many times programs have asked for sound (Web Audio, MIDI, out, playNotes) so far */
   soundUseCount(): number {
@@ -3367,6 +3378,8 @@ export class JavascriptRuntime {
     const start = performance.now();
     const spokenTexts: string[] = [];
     this.lastRunOptions = options;
+    // Each program run is counted on its own (what its MIDI was, see midiSummary)
+    resetMidiSummary();
 
     return new Promise((resolve) => {
       const settle = (

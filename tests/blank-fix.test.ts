@@ -106,17 +106,19 @@ describe('reading from nothing', () => {
   });
   it('Firefox: the object is named', () => {
     const code = "const box = document.querySelector('#box');\nbox.style.color = 'red';";
+    // (box is set once, from a lookup: the lookup is the blank)
     const blank = findBlank(code, "can't access property \"style\", box is null", 2)!;
-    expect(blank.text).toBe('box');
+    expect(blank.text).toBe("document.querySelector('#box')");
     const call = findBlank("const el = document.getElementById('q');\nconsole.log(el.value);", 'can\'t access property "value", document.getElementById(...) is null', 2);
     expect(call).toBeNull(); // the lookup is on another line, but the member is el.value
     expect(findBlank(code, "Cannot set properties of null (setting 'color')", 2)?.text).toBe('box.style');
   });
   it('Chrome: setting; old wording; destructuring', () => {
     const code = "const cfg = window.config;\nconst { size } = cfg;\ncfg.size = 4;";
-    expect(findBlank(code, "Cannot destructure property 'size' of 'cfg' as it is undefined.", 2)?.text).toBe('cfg');
-    expect(findBlank(code, "Cannot set properties of undefined (setting 'size')", 3)?.text).toBe('cfg');
-    expect(findBlank(code, "Cannot read property 'size' of undefined", 3)?.text).toBe('cfg');
+    // (cfg is set once, from window.config: that is the blank)
+    expect(findBlank(code, "Cannot destructure property 'size' of 'cfg' as it is undefined.", 2)?.text).toBe('window.config');
+    expect(findBlank(code, "Cannot set properties of undefined (setting 'size')", 3)?.text).toBe('window.config');
+    expect(findBlank(code, "Cannot read property 'size' of undefined", 3)?.text).toBe('window.config');
   });
   it('does not choose optional chains, globals or literals', () => {
     expect(findBlank("const a = x?.y;\nconst b = 'abc'.length;", "Cannot read properties of undefined (reading 'y')", 1)).toBeNull();
@@ -218,7 +220,7 @@ describe('blankChoices', () => {
   it('close ids first for a failed lookup', () => {
     const code = "const el = document.getElementById('volumn');\nel.value = 3;";
     const blank = findBlank(code, "Cannot set properties of null (setting 'value')", 2)!;
-    expect(blank.text).toBe('el');
+    expect(blank.text).toBe("document.getElementById('volumn')");
     const choices = blankChoices(code, blank, { ids: ['pan', 'volume'], fields: ['volume'] });
     expect(choices).toContain("document.getElementById('volume')");
   });

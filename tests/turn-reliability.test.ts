@@ -10,6 +10,7 @@ import {
 import { prefersLineFix, promptRules, runScore } from '../src/core/orchestrator.ts';
 import { FIX_SYSTEM_PROMPT } from '../src/core/line-fix.ts';
 import { StateMachineCoordinator } from '../src/core/state-machine.ts';
+import { runLogText } from '../src/core/run-log.ts';
 import type { JavascriptExecutionResult, JavascriptRuntime } from '../src/tools/javascript-runtime.ts';
 import type {
   ConversationMessage,
@@ -70,6 +71,21 @@ class QueueLlm implements LlmRuntimeProvider {
   cancel(): void {}
   async reset(): Promise<void> {}
   async dispose(): Promise<void> {}
+}
+
+/** A QueueLlm that can also score a multiple-choice question (scoreChoices), with the scores it is given */
+class ScoringLlm extends QueueLlm {
+  scored: Array<{ options: LlmGenerationOptions; labels: string[] }> = [];
+  constructor(
+    replies: string[],
+    private readonly scores: number[] | null
+  ) {
+    super(replies);
+  }
+  async scoreChoices(options: LlmGenerationOptions, labels: string[]): Promise<number[] | null> {
+    this.scored.push({ options: structuredClone({ ...options, signal: undefined }), labels });
+    return this.scores;
+  }
 }
 
 function countingTts(spoken: string[]): TtsRuntimeProvider {
@@ -1061,6 +1077,59 @@ describe('the blank stage', () => {
     expect(trialled.length).toBe(1);
     expect(executed[1]).toContain("'Total: ' + sum;");
     expect(notices).toEqual(['Fixing (1 of 5): sumTotal is not defined']);
+  });
+
+  // TOTAL's choices, in order of fit to the name: A sum, B document.getElementById('total'), C cart
+  const WHICH = (code: string) => (code.includes(', sum)') ? 'sum' : code.includes(', cart)') ? 'cart' : code.includes('getElementById(\'total\')') ? 'element' : 'other');
+
+  it('scores the choices in one pass and runs the likeliest first, asking for no letter', async () => {
+    const llm = new ScoringLlm([TOTAL], [0.1, 0.2, 0.7]);
+    const { executed, trialled, runtime } = fakeRuntime([TOTAL_ERROR, {}], {
+      trials: (code) => (WHICH(code) === 'cart' ? { error: null, reached: true } : { error: 'nope is not defined', errorLine: 4 }),
+      ids: ['total'],
+    });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Add up my cart');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    // One scoring pass of the choice question; no letter, no expressions: the likeliest ran cleanly
+    expect(llm.scored.length).toBe(1);
+    expect(llm.scored[0].labels).toEqual(['A', 'B', 'C']);
+    expect(llm.scored[0].options.messages[0].content).toContain('C. cart');
+    expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined]);
+    expect(trialled.map(WHICH)).toEqual(['cart']);
+    expect(executed[1]).toContain("'Total: ' + cart;");
+  });
+
+  it('tries the choices best-first by probability, equal scores in the order of fit, and logs the ranking', async () => {
+    const llm = new ScoringLlm([TOTAL, '0', '0', '0'], [0.5, 0, 0.4]);
+    const { executed, trialled, runtime } = fakeRuntime([TOTAL_ERROR, {}], {
+      trials: (code) => (WHICH(code) === 'element' ? { error: null, reached: true } : { error: 'nope is not defined', errorLine: 4 }),
+      ids: ['total'],
+    });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Add up my cart');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    // sum (0.5), then the expressions the model writes (literals, never tried), then cart (0.4), then
+    // the one scored 0
+    expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'expression', 'expression', 'expression']);
+    expect(trialled.map(WHICH)).toEqual(['sum', 'cart', 'element']);
+    expect(executed[1]).toContain("'Total: ' + document.getElementById('total');");
+    expect(runLogText()).toContain("scored the choices by probability: `sum` 0.50, `cart` 0.40 (1 more, less likely)");
+  });
+
+  it('asks for the letter as before when the runtime has no scores', async () => {
+    const llm = new ScoringLlm([TOTAL, 'A'], null);
+    const { executed, trialled, runtime } = fakeRuntime([TOTAL_ERROR, {}], {
+      trials: (code) => (WHICH(code) === 'sum' ? { error: null, reached: true } : { error: 'nope is not defined', errorLine: 4 }),
+      ids: ['total'],
+    });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Add up my cart');
+    await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
+    expect(llm.scored.length).toBe(1);
+    expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'choice']);
+    expect(trialled.map(WHICH)).toEqual(['sum']);
+    expect(executed[1]).toContain("'Total: ' + sum;");
   });
 
   it('asks for expressions when the best-fitting choice fails, and prefers a clean run to the votes', async () => {
