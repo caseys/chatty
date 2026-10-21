@@ -225,3 +225,48 @@ describe('a page whose buttons call its functions', async () => {
     expect(code).toContain('window.startGame = startGame;');
   });
 });
+
+describe("Fable's repairs from the logs", async () => {
+  const { errorHint, fixKeySlips } = await import('../src/core/error-hints.ts');
+
+  it('a key its own literal lacks, one slip from one it has, is renamed', () => {
+    const code = "const sounds = { drums: 'kick', piano: 'C4' };\nconst notes = { boomKick: 36 };\nplay(sounds.drum);\nplay(notes['boom_kick']);";
+    const { code: out, fixed } = fixKeySlips(code);
+    expect(out).toContain('play(sounds.drums);');
+    expect(out).toContain("play(notes['boomKick']);");
+    expect(fixed).toEqual([{ object: 'sounds', from: 'drum', to: 'drums' }, { object: 'notes', from: 'boom_kick', to: 'boomKick' }]);
+  });
+
+  it('leaves a literal alone once it is changed or handed elsewhere', () => {
+    expect(fixKeySlips("const s = { drums: 1 };\ns.drum = 2;\nplay(s.drum);").fixed).toEqual([]);
+    expect(fixKeySlips("const s = { drums: 1 };\nfill(s);\nplay(s.drum);").fixed).toEqual([]);
+    // Two close keys: not sure which
+    expect(fixKeySlips("const s = { drums: 1, drumz: 2 };\nplay(s.drum);").fixed).toEqual([]);
+  });
+
+  it('setValueAtTime without a time gets 0', () => {
+    const code = 'const g = ctx.createGain();\ng.gain.setValueAtTime(0.5);';
+    const hint = errorHint(code, "Failed to execute 'setValueAtTime' on 'AudioParam': 2 arguments required, but only 1 present.", 2)!;
+    expect(hint.correction!.code.split('\n')[1]).toBe('g.gain.setValueAtTime(0.5, 0);');
+  });
+
+  it('a list mapped through a function that returns nothing: the function returns its last call', () => {
+    const code = [
+      'function playNote(n) {',
+      '  out.send({ notes: n });',
+      '}',
+      'const plays = [1, 2].map((n) => playNote(n));',
+      'plays.forEach((p) => {',
+      '  p.stop();',
+      '});',
+    ].join('\n');
+    const hint = errorHint(code, "undefined is not an object (evaluating 'p.stop')", 6)!;
+    expect(hint.correction!.code.split('\n')[1]).toBe('  return out.send({ notes: n });');
+  });
+
+  it('otherwise the call is made only when there is something to call', () => {
+    const code = 'let sound;\nsound.stop();';
+    const hint = errorHint(code, "Cannot read properties of undefined (reading 'stop')", 2)!;
+    expect(hint.correction!.code.split('\n')[1]).toBe('sound?.stop?.();');
+  });
+});

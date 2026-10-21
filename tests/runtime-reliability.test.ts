@@ -161,3 +161,15 @@ describe('leaving off-page what is meant to stay off-page', () => {
     win.close();
   });
 });
+
+describe('undefined where a browser call needs a value', () => {
+  it('is the program error, like NaN', async () => {
+    const { win, posted } = loadRunner();
+    win.postMessage({ type: 'execute', id: 'u', code: 'const d = document.createElement("div");\nd.setAttribute("title", undefined);' }, '*');
+    await wait(40);
+    const result = posted.find((m) => m.type === 'result');
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('setAttribute');
+    win.close();
+  });
+});

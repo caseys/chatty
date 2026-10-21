@@ -41,7 +41,7 @@ import {
 import { appendRunLog } from './run-log.ts';
 import { blankChoices, blankRequest, choiceRequest, declareMissing, fillBlank, findBlank, type Blank } from './blank-fix.ts';
 import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest, restoreDeclarations } from './line-fix.ts';
-import { dropBrowserCopies, dropHelperCopies, dropStrayQuote, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
+import { dropBrowserCopies, dropHelperCopies, dropStrayQuote, fixKeySlips, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
 import { applyAssignmentFixes, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { LOCAL_CHAT_MODELS } from './settings.ts';
@@ -1384,6 +1384,12 @@ export class ConversationOrchestrator {
             if (cased.fixed.length > 0) {
               executableCode = cased.code;
               for (const { from, to } of cased.fixed) appendRunLog('imagined', `${from} → ${to}: corrected before running`);
+            }
+            // A key its own object literal doesn't have, one slip from one it does (sounds.drum for drums)
+            const keys = fixKeySlips(executableCode);
+            if (keys.fixed.length > 0) {
+              executableCode = keys.code;
+              for (const { object, from, to } of keys.fixed) appendRunLog('imagined', `${object}.${from} → ${object}.${to} (the key it has): corrected before running`);
             }
             // A drawing context, canvas or audio context it uses but never made: made at its top
             const missing = declareMissing(executableCode);

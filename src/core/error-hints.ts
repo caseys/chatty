@@ -771,6 +771,184 @@ function propertyCalled(code: string, error: string): ErrorHint | null {
   return tryParse(fixed) ? { correction: { code: fixed, note: `${object}.${prop}(value) → ${object}.${prop} = value` } } : null;
 }
 
+/** `setValueAtTime(value)` without its time (the browser needs two): 0, a time already past, sets it now */
+function audioParamTime(code: string, error: string): ErrorHint | null {
+  if (!/'setValueAtTime' on 'AudioParam': 2 arguments required/.test(error)) return null;
+  const ast = tryParse(code);
+  if (!ast) return null;
+  const ends: number[] = [];
+  walk(ast, (node) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression' && !n.callee.computed && n.callee.property.name === 'setValueAtTime' && n.arguments.length === 1) {
+      ends.push(n.arguments[0].end);
+    }
+  });
+  if (ends.length === 0) return null;
+  let fixed = code;
+  for (const at of ends.sort((a, b) => b - a)) fixed = `${fixed.slice(0, at)}, 0${fixed.slice(at)}`;
+  return tryParse(fixed) ? { correction: { code: fixed, note: 'setValueAtTime(value) → setValueAtTime(value, 0): a time already past sets it now' } } : null;
+}
+
+/**
+ * A method called on undefined, in a statement of its own (`p.stop()` when p is undefined):
+ * when the value comes from the program's own function that returns nothing but ends in a call
+ * (`notes.map((n) => play(n))`, `const p = play(n)`), that call is returned; otherwise the call
+ * is made only if there is something to call (`p?.stop?.()`). Only the failing statement.
+ */
+function callOnUndefined(code: string, error: string, errorLine?: number): ErrorHint | null {
+  const safari = error.match(/undefined is not an object \(evaluating '([\w$.]+)\.([\w$]+)'\)/);
+  const chrome = error.match(/Cannot read propert(?:y|ies) of undefined \(reading '([\w$]+)'\)/);
+  if ((!safari && !chrome) || !errorLine) return null;
+  const method = safari ? safari[2] : chrome![1];
+  const ast = tryParse(code);
+  if (!ast) return null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let call: any = null;
+  walk(ast, (node) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    if (call || n.type !== 'ExpressionStatement' || n.loc?.start.line !== errorLine) return;
+    const c = n.expression;
+    if (c.type !== 'CallExpression' || c.callee.type !== 'MemberExpression' || c.callee.computed || c.callee.property.name !== method) return;
+    if (c.callee.object.type !== 'Identifier' || (safari && safari[1] !== c.callee.object.name)) return;
+    call = c;
+  });
+  if (!call) return null;
+  const receiver: string = call.callee.object.name;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const nodes: any[] = [];
+  walk(ast, (node) => nodes.push(node));
+  const source = (n: { start: number; end: number }) => code.slice(n.start, n.end);
+  // The function whose call made the value: `const p = f(…)`, or `xs.forEach((p) => …)` / a
+  // callback over `xs` where `xs = ys.map((n) => f(…))`
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const calledIn = (expr: any): string | null => (expr?.type === 'CallExpression' && expr.callee.type === 'Identifier' ? expr.callee.name : null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mapped = (expr: any): string | null => {
+    if (expr?.type !== 'CallExpression' || expr.callee.type !== 'MemberExpression' || expr.callee.property?.name !== 'map') return null;
+    const cb = expr.arguments[0];
+    return cb && /Function/.test(cb.type) && cb.body.type !== 'BlockStatement' ? calledIn(cb.body) : null;
+  };
+  let maker: string | null = null;
+  for (const n of nodes) {
+    if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.id.name === receiver) maker = calledIn(n.init);
+    // A callback whose first parameter is the receiver, over a list made by mapping
+    if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression' && /^(?:forEach|map|filter|some|every)$/.test(n.callee.property?.name ?? '')) {
+      const cb = n.arguments[0];
+      if (!cb || !/Function/.test(cb.type) || cb.params[0]?.type !== 'Identifier' || cb.params[0].name !== receiver) continue;
+      const list = n.callee.object;
+      maker =
+        mapped(list) ??
+        (list.type === 'Identifier' ? mapped(nodes.find((d) => d.type === 'VariableDeclarator' && d.id.type === 'Identifier' && d.id.name === list.name)?.init) : null) ??
+        maker;
+    }
+  }
+  const fn = maker ? nodes.find((n) => n.type === 'FunctionDeclaration' && n.id?.name === maker) : null;
+  if (fn) {
+    let returns = false;
+    walk(fn.body, (n) => {
+      if (n.type === 'ReturnStatement' && (n as AnyNode).argument) returns = true;
+    });
+    const last = fn.body.body[fn.body.body.length - 1];
+    if (!returns && last?.type === 'ExpressionStatement' && /^(?:Call|New)Expression$/.test(last.expression.type)) {
+      const fixed = `${code.slice(0, last.start)}return ${code.slice(last.start)}`;
+      if (tryParse(fixed)) return { correction: { code: fixed, note: `${maker}() returns nothing, so ${receiver}.${method}() had nothing to call → it returns its last call` } };
+    }
+  }
+  const optional = `${source(call.callee.object)}?.${method}?.${code.slice(call.callee.end, call.end).trimStart()}`;
+  const fixed = `${code.slice(0, call.start)}${optional}${code.slice(call.end)}`;
+  return tryParse(fixed) ? { correction: { code: fixed, note: `${receiver}.${method}() on nothing → ${receiver}?.${method}?.(): called only when there is something to call` } } : null;
+}
+
+/**
+ * Before a program runs: a key read from the program's own object literal that the literal
+ * doesn't have, with exactly one close key it does (`sounds.drum` for `drums`, `notes['boom_kick']`
+ * for `boomKick`), is renamed to that key. Only for a literal declared once and never changed or
+ * handed elsewhere, so its keys are all it will ever have.
+ */
+export function fixKeySlips(code: string): { code: string; fixed: Array<{ object: string; from: string; to: string }> } {
+  const ast = tryParse(code);
+  if (!ast) return { code, fixed: [] };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const nodes: Array<{ node: any; parent: any; key: string }> = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const visit = (node: any, parent: any, key: string) => {
+    if (!node || typeof node.type !== 'string') return;
+    nodes.push({ node, parent, key });
+    for (const k of Object.keys(node)) {
+      if (k === 'loc') continue;
+      const v = node[k];
+      if (Array.isArray(v)) v.forEach((c) => visit(c, node, k));
+      else if (v && typeof v.type === 'string') visit(v, node, k);
+    }
+  };
+  visit(ast, null, '');
+  const keyOf = (p: { type: string; key?: { type: string; name?: string; value?: unknown }; computed?: boolean }) =>
+    p.type === 'Property' && !p.computed ? (p.key!.type === 'Identifier' ? p.key!.name! : typeof p.key!.value === 'string' ? (p.key!.value as string) : null) : null;
+  const norm = (k: string) => k.toLowerCase().replace(/[_-]/g, '');
+  const close = (wanted: string, keys: string[]) =>
+    keys.filter(
+      (k) =>
+        norm(k) === norm(wanted) ||
+        k === `${wanted}s` ||
+        wanted === `${k}s` ||
+        (wanted.length >= 4 && distance(wanted.toLowerCase(), k.toLowerCase()) <= (wanted.length >= 7 ? 2 : 1))
+    );
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const fixed: Array<{ object: string; from: string; to: string }> = [];
+  for (const { node: decl } of nodes) {
+    if (decl.type !== 'VariableDeclarator' || decl.id.type !== 'Identifier' || decl.init?.type !== 'ObjectExpression') continue;
+    const name: string = decl.id.name;
+    const keys = decl.init.properties.map(keyOf);
+    if (keys.some((k: string | null) => k === null)) continue; // spread or computed keys
+    // Declared once, with no other binding of the name anywhere
+    const bindings = nodes.filter(
+      ({ node, parent, key }) =>
+        node.type === 'Identifier' &&
+        node.name === name &&
+        ((parent?.type === 'VariableDeclarator' && key === 'id') || key === 'params' || (/Function/.test(parent?.type ?? '') && key === 'id'))
+    );
+    if (bindings.length !== 1) continue;
+    const reads: Array<{ member: any; wanted: string }> = []; // eslint-disable-line @typescript-eslint/no-explicit-any
+    let safe = true;
+    for (const { node, parent, key } of nodes) {
+      if (node.type !== 'Identifier' || node.name !== name || node === decl.id) continue;
+      if ((parent?.type === 'MemberExpression' && key === 'property' && !parent.computed) || (parent?.type === 'Property' && key === 'key' && !parent.computed)) continue;
+      if (parent?.type === 'MemberExpression' && key === 'object') {
+        const grand = nodes.find((n) => n.node === parent);
+        const written = (grand?.parent?.type === 'AssignmentExpression' && grand.key === 'left') || grand?.parent?.type === 'UpdateExpression' || (grand?.parent?.type === 'UnaryExpression' && grand.parent.operator === 'delete');
+        if (written) {
+          safe = false;
+          break;
+        }
+        const wanted = !parent.computed ? parent.property.name : parent.property.type === 'Literal' && typeof parent.property.value === 'string' ? parent.property.value : null;
+        if (wanted !== null) reads.push({ member: parent, wanted });
+        continue;
+      }
+      // Read whole: its keys listed, or looped over
+      const keysCall = parent?.type === 'CallExpression' && key === 'arguments' && /^Object\.(?:keys|values|entries)$|^JSON\.stringify$/.test(code.slice(parent.callee.start, parent.callee.end));
+      if (keysCall || ((parent?.type === 'ForInStatement' || parent?.type === 'ForOfStatement') && key === 'right')) continue;
+      safe = false; // handed elsewhere: it may be changed there
+      break;
+    }
+    if (!safe) continue;
+    for (const { member, wanted } of reads) {
+      if (keys.includes(wanted) || wanted in Object.prototype) continue;
+      const near = close(wanted, keys);
+      if (near.length !== 1) continue;
+      const to = near[0];
+      if (!member.computed) edits.push({ start: member.property.start, end: member.property.end, text: to });
+      else edits.push({ start: member.property.start + 1, end: member.property.end - 1, text: to });
+      if (!fixed.some((f) => f.object === name && f.from === wanted)) fixed.push({ object: name, from: wanted, to });
+    }
+  }
+  if (edits.length === 0) return { code, fixed: [] };
+  let out = code;
+  for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + e.text + out.slice(e.end);
+  return tryParse(out) ? { code: out, fixed } : { code, fixed: [] };
+}
+
 /** The browser's timing and loading functions: a program's own function of that name hides the real one */
 const BROWSER_FUNCTIONS = ['requestAnimationFrame', 'cancelAnimationFrame', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'fetch'];
 
@@ -800,7 +978,12 @@ export function dropBrowserCopies(code: string): { code: string; dropped: string
 
 export function errorHint(code: string, error: string, errorLine?: number, page?: PageFacts): ErrorHint | null {
   // Corrections by rule first: they need no model
-  const rule = redeclaredHelper(code, error) ?? missingAwait(code, error, errorLine) ?? syntaxSlip(code, error, errorLine) ?? propertyCalled(code, error);
+  const rule =
+    redeclaredHelper(code, error) ??
+    missingAwait(code, error, errorLine) ??
+    syntaxSlip(code, error, errorLine) ??
+    propertyCalled(code, error) ??
+    audioParamTime(code, error);
   if (rule) return rule;
   const helper = helperDeclared(code, error);
   if (helper) return helper;
@@ -820,6 +1003,10 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
   }
   const found = argumentCountFacts(code, error, errorLine) ?? notDefined(code, error, errorLine, page) ?? nothingThere(code, error, errorLine, page) ?? leftOpen(code, error) ?? tooEarly(code, error, errorLine);
   if (found?.correction) return found;
+  // A method called on undefined (not on a missing element, which is null): its maker returns,
+  // or the call is made only when there is something to call
+  const nothingToCall = callOnUndefined(code, error, errorLine);
+  if (nothingToCall) return nothingToCall;
   // Calls of the failing function that pass too few values, added to whatever else was found
   const calls = shortCalls(code, errorLine);
   const text = [found?.text, calls].filter(Boolean).join(' ');

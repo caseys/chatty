@@ -1888,9 +1888,12 @@ export class JavascriptRuntime {
         if (!d || typeof d.value !== 'function' || key === 'constructor' || !d.configurable) continue;
         const fn = d.value;
         proto[key] = function (...args) {
-          const bad = args.find((a) => (typeof a === 'number' && !Number.isFinite(a)) || (typeof a === 'string' && badValue(a)));
-          if (bad !== undefined) {
-            noteRejected(label + '.' + key + '(' + args.map((a) => (typeof a === 'number' ? String(a) : typeof a === 'string' ? shown(a.slice(0, 40)) : '…')).join(', ') + ') got ' + shown(typeof bad === 'string' ? bad.slice(0, 40) : bad) + ': almost surely a bug');
+          // A value the browser can't use: NaN or Infinity, text that says so, or undefined where
+          // the call needs a value (a required parameter: within fn.length)
+          const at = args.findIndex((a, i) => (typeof a === 'number' && !Number.isFinite(a)) || (typeof a === 'string' && badValue(a)) || (a === undefined && i < fn.length));
+          if (at >= 0) {
+            const bad = args[at];
+            noteRejected(label + '.' + key + '(' + args.map((a) => (typeof a === 'number' ? String(a) : typeof a === 'string' ? shown(a.slice(0, 40)) : a === undefined ? 'undefined' : '…')).join(', ') + ') got ' + (bad === undefined ? 'undefined' : shown(typeof bad === 'string' ? bad.slice(0, 40) : bad)) + ': almost surely a bug');
           }
           return fn.apply(this, args);
         };
