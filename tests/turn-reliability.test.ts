@@ -7,7 +7,7 @@ import {
   FORMAT_TURNS,
   type RunStatus,
 } from '../src/core/orchestrator.ts';
-import { prefersLineFix, promptRules } from '../src/core/orchestrator.ts';
+import { prefersLineFix, promptRules, runScore } from '../src/core/orchestrator.ts';
 import { FIX_SYSTEM_PROMPT } from '../src/core/line-fix.ts';
 import { StateMachineCoordinator } from '../src/core/state-machine.ts';
 import type { JavascriptExecutionResult, JavascriptRuntime } from '../src/tools/javascript-runtime.ts';
@@ -220,8 +220,8 @@ describe('a fix that loses the program', () => {
 
     await orchestrator.submitUserInput('draw a red circle');
     await vi.waitFor(() => expect(statuses.some((s) => s.text.includes('lost the program'))).toBe(true), { timeout: 3000 });
-    // Each lost reply starts the next try at once; after the fifth Chatty gives up
-    await vi.waitFor(() => expect(llm.turns.length).toBe(6), { timeout: 10000 });
+    // Each lost reply starts the next try at once; after four that got nowhere Chatty gives up
+    await vi.waitFor(() => expect(llm.turns.length).toBe(5), { timeout: 10000 });
     await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
 
     // The fix asked for the program again, led by the original request
@@ -242,7 +242,7 @@ describe('a fix that loses the program', () => {
     expect(spoken.join(' ')).not.toMatch(/Sorry about that|corrected program|let me fix/i);
     expect(bubbles.join(' ')).not.toMatch(/Sorry about that|corrected program|let me fix/i);
     const fixReplyMsg = orchestrator.memoryStore.getMessages().filter((m) => m.role === 'assistant').at(-1)!;
-    expect(fixReplyMsg.canonicalContent).toContain("I couldn't get this working after 5 tries");
+    expect(fixReplyMsg.canonicalContent).toContain("I couldn't get this working after 4 tries");
 
     // The original program is still the one follow-ups edit and errors are tracked against
     const internals = orchestrator as unknown as { lastRun: { code: string; error: string }; lastAction: { code: string } };
@@ -912,7 +912,7 @@ describe('the order of a request\'s fix questions', () => {
   // (the same error on every try: a new error would start again from the first question)
   const errors = (names: string[]) => [{ error: 'boom is not defined', errorLine: 2 }, ...names.map(() => ({ error: 'boom is not defined', errorLine: 2 }))];
 
-  it('asks a small model the blank, line, function, program and a different question, then gives up', async () => {
+  it('asks a small model the blank, line, function and program questions, then gives up when none got anywhere', async () => {
     const TOTAL = [
       'function show() {',
       "  const label = document.getElementById('total');",
@@ -940,14 +940,15 @@ describe('the order of a request\'s fix questions', () => {
     });
     const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
     await orchestrator.submitUserInput('Add up my cart');
-    await vi.waitFor(() => expect(llm.turns.filter((t) => t.fixShape && t.fixShape !== 'choice' && t.fixShape !== 'expression').length).toBeGreaterThanOrEqual(4), { timeout: 20000 });
+    await vi.waitFor(() => expect(llm.turns.filter((t) => t.fixShape && t.fixShape !== 'choice' && t.fixShape !== 'expression').length).toBeGreaterThanOrEqual(3), { timeout: 20000 });
     await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull(), { timeout: 20000 });
     const shapes = llm.turns.map((t) => t.fixShape);
     // Try 1 is the blank stage, then each try asks the next kind, never one it asked before
     expect(shapes[1]).toBe('choice');
-    expect(shapes.slice(shapes.lastIndexOf('expression') + 1)).toEqual(['line', 'function', 'program', 'line']);
+    // Four tries that got nowhere: every kind has been asked, so Chatty stops (no fifth line)
+    expect(shapes.slice(shapes.lastIndexOf('expression') + 1)).toEqual(['line', 'function', 'program']);
     const said = orchestrator.memoryStore.getMessages().filter((m) => m.role === 'assistant').map((m) => m.canonicalContent).join('\n');
-    expect(said).toContain("I couldn't get this working after 5 tries");
+    expect(said).toContain("I couldn't get this working after 4 tries");
     expect(executed.length).toBe(1); // no reply ran: each failed its test run
   }, 30000);
 
@@ -963,15 +964,16 @@ describe('the order of a request\'s fix questions', () => {
       events: { onMessageCreated: (m) => void (m.fixNotice && m.fixNotice !== 'Generating…' && notices.push(m.fixNotice)) },
     });
     await orchestrator.submitUserInput('Draw it');
-    await vi.waitFor(() => expect(executed.length).toBe(6), { timeout: 20000 });
+    await vi.waitFor(() => expect(executed.length).toBe(5), { timeout: 20000 });
     await new Promise((r) => setTimeout(r, 1000));
-    expect(llm.turns.length).toBe(6); // the request and five tries, nothing after the fifth
-    expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'line', 'function', 'program', 'line', 'program']);
+    // The same error after four tries: nothing got better, so Chatty stops before the fifth
+    expect(llm.turns.length).toBe(5);
+    expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined, 'line', 'function', 'program', 'line']);
     expect(llm.turns[1].exact).toBe(true);
-    expect(llm.turns.slice(2).map((t) => t.sampling)).toEqual(SWINGS);
-    expect(notices.map((n) => n.replace(/:.*/, ''))).toEqual(['Fixing (1 of 5)', 'Fixing (2 of 5)', 'Fixing (3 of 5)', 'Fixing (4 of 5)', 'Fixing (5 of 5)']);
+    expect(llm.turns.slice(2).map((t) => t.sampling)).toEqual(SWINGS.slice(0, 3));
+    expect(notices.map((n) => n.replace(/:.*/, ''))).toEqual(['Fixing (1 of 5)', 'Fixing (2 of 5)', 'Fixing (3 of 5)', 'Fixing (4 of 5)']);
     const said = orchestrator.memoryStore.getMessages().filter((m) => m.role === 'assistant').map((m) => m.canonicalContent).join('\n');
-    expect(said).toContain("I couldn't get this working after 5 tries (the last error: boom is not defined)");
+    expect(said).toContain("I couldn't get this working after 4 tries (the last error: boom is not defined)");
     expect(said.match(/I couldn't get this working/g)).toHaveLength(1);
   }, 30000);
 
@@ -1433,4 +1435,54 @@ describe('notes on a run', () => {
     expect(reply.canonicalContent).toBe('Generation complete.');
     expect(reply.fromProgram).toBe(false);
   });
+});
+
+describe('the best version so far (keep it, build on it, come back to it)', () => {
+  it('scores a run by how far it got: what was asked first, then whether it failed', () => {
+    expect(runScore(null, true)).toBe(4);
+    expect(runScore('ctx.foo is not a function', true)).toBe(3);
+    expect(runScore('The program showed nothing: what it adds to document.body appears in the card on screen.', false)).toBe(2);
+    expect(runScore('boom is not defined', false)).toBe(1);
+    expect(runScore("SyntaxError: Unexpected token '}'", false)).toBe(0);
+  });
+
+  const program = 'function draw() {\n  boom();\n}\ndraw();\nspeak("Drawn.");';
+  const fix = (n: number) => `// Cause: ${n}\n  zap${n}();`;
+  const worse = { error: "SyntaxError: Unexpected token '}'", errorLine: 2 };
+
+  it('starts the next try from an earlier version that did better, and shows it again after giving up', async () => {
+    const llm = new QueueLlm([program, fix(1), fix(2), fix(3), fix(4), fix(5)]);
+    llm.modelId = 'qwen3-0.6b';
+    // The request's program fails; every fix that runs does worse (it never runs at all)
+    const { executed, runtime } = fakeRuntime([{ error: 'boom is not defined', errorLine: 2 }, worse, worse, worse, worse, worse, {}]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Draw it');
+    await vi.waitFor(() => expect(llm.turns.length).toBeGreaterThanOrEqual(3), { timeout: 20000 });
+    // The second try fixes the request's own program, not the first fix (which did worse)
+    const second = llm.turns[2].messages.at(-1)!.content;
+    expect(second).toContain('boom();');
+    expect(second).not.toContain('zap1();');
+    // Four tries got nowhere: Chatty stops, and the best version runs again
+    await vi.waitFor(() => expect(executed.at(-1)).toBe(program), { timeout: 20000 });
+    const said = orchestrator.memoryStore.getMessages().filter((m) => m.role === 'assistant').map((m) => m.canonicalContent).join('\n');
+    expect(said).toContain("I couldn't get this working after 4 tries");
+    const internals = orchestrator as unknown as { lastRun: { code: string } };
+    expect(internals.lastRun.code).toBe(program);
+  }, 30000);
+
+  it('keeps going while each try meets a new error (one bug fixed, the next found)', async () => {
+    const llm = new QueueLlm([program, fix(1), fix(2), fix(3), fix(4), fix(5), fix(6)]);
+    llm.modelId = 'qwen3-0.6b';
+    const errors = ['boom', 'zap1', 'zap2', 'zap3', 'zap4', 'zap5'].map((n) => ({ error: `${n} is not defined`, errorLine: 2 }));
+    const { executed, runtime } = fakeRuntime(errors);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Draw it');
+    // All five tries are used: none was "no progress" (the third reply, a line where the
+    // function was asked, is discarded and not run)
+    await vi.waitFor(() => expect(llm.turns.length).toBe(6), { timeout: 20000 });
+    expect(executed.length).toBe(5);
+    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+    const said = orchestrator.memoryStore.getMessages().filter((m) => m.role === 'assistant').map((m) => m.canonicalContent).join('\n');
+    expect(said).toContain("I couldn't get this working after 5 tries");
+  }, 30000);
 });

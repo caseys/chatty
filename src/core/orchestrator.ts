@@ -304,6 +304,31 @@ const asksForOutcome = (request: string) =>
  */
 const MAX_FIX_TRIES = 5;
 /**
+ * Tries in a row that don't improve on the best version so far before Chatty stops early: by
+ * then each kind of question has had its turn (the blank, the line, the function, the whole
+ * program; the fifth only asks the line again), and each try costs a reply. See recordRun.
+ */
+const FIX_PATIENCE = 4;
+
+/** A program that never ran: a syntax error, or no program at all */
+const NOTHING_RAN = /SyntaxError|Unexpected (?:token|end|identifier|string|number|keyword|character)|Invalid or unexpected token|Unterminated|missing \) after|The reply had no program/i;
+/** The outcome check's errors: it ran without an error, but did nothing that was asked */
+const OUTCOME_MISSING = /^The program (?:played nothing|showed nothing)|^The program's sound never reached/;
+
+/**
+ * How far a run got, so a fix loop keeps the best version (after RePair, Findings of ACL 2024:
+ * score every attempt, keep going only while it improves, and roll back to the best). Higher is
+ * better: 4 ran and did what was asked; 3 failed but did some of it (drew the scene, played
+ * notes); 2 ran without an error but did nothing asked; 1 failed with nothing asked done; 0 never
+ * ran. Only a higher score counts as progress.
+ */
+export function runScore(error: string | null, didAsked: boolean): number {
+  if (!error) return 4;
+  if (NOTHING_RAN.test(error)) return 0;
+  if (didAsked) return 3;
+  return OUTCOME_MISSING.test(error) ? 2 : 1;
+}
+/**
  * A line fix whose reply is unchanged or unusable is asked for again at once (this many times,
  * sampled differently) within the same try: a one-line reply is quick, so it costs no try of its
  * own. Every other kind is asked once per try, and each try asks a new question (see fixSampling).
@@ -528,15 +553,15 @@ export function prefersLineFix(modelId: string): boolean {
   return !!model && !model.phone && model.sizeBytes >= LINE_FIX_MIN_BYTES;
 }
 
-/** The run status once every fix try has failed (the page clears the card on it) */
-export const GAVE_UP_STATUS = `(gave up after ${MAX_FIX_TRIES} tries)`;
+/** The run status once Chatty stops fixing (the page clears the card on it) */
+export const GAVE_UP_STATUS = '(gave up fixing it)';
 /** The run note for a fresh ask after a talk-only reply: not a fix */
 export const GENERATING_NOTE = 'Generating…';
 
 /** What Chatty says when the last fix attempt failed too */
-function gaveUpText(error: string): string {
+function gaveUpText(error: string, tries = MAX_FIX_TRIES): string {
   const short = error.length > 80 ? `${error.slice(0, 77)}…` : error;
-  return `I couldn't get this working after ${MAX_FIX_TRIES} tries (the last error: ${short}). You could ask again in other words, or choose a larger model in Settings.`;
+  return `I couldn't get this working after ${tries} ${tries === 1 ? 'try' : 'tries'} (the last error: ${short}). You could ask again in other words, or choose a larger model in Settings.`;
 }
 
 /** Whether an error is about the candidate itself (`Cannot access 'notes' before …` for `notes`) */
@@ -566,6 +591,26 @@ export function earlierErrors(history: FixError[] | undefined, current: string):
 
 /** Markup in a streaming reply */
 const STREAM_MARKUP = /<(?:script|canvas|html|!doctype)\b/i;
+
+/** A program run, as the fix loop knows it */
+type RunRecord = {
+  turnId: string;
+  code: string;
+  /** What the user asked for, so a fix request can lead with it (see fixRequest) */
+  task: string;
+  isAutoFix: boolean;
+  fixRequested: boolean;
+  error: string | null;
+  errorLine?: number;
+  /** Slips already corrected without the model in this program (see runCorrected) */
+  corrections?: number;
+  /** Which model fix this program came from (0: the reply to the request itself) */
+  fixAttempt?: number;
+  /** The request's own turn, which every fix of it stands for */
+  originalTurnId?: string;
+  /** Errors of the programs before this one for the same request, oldest first */
+  errorHistory?: FixError[];
+};
 
 export class ConversationOrchestrator {
   readonly stateCoordinator: StateMachineCoordinator;
@@ -597,24 +642,12 @@ export class ConversationOrchestrator {
   private gaveUp = new Set<string>();
   /** When the last test run ended, to pause between them */
   private lastTrialEnd = 0;
-  private lastRun: {
-    turnId: string;
-    code: string;
-    /** What the user asked for, so a fix request can lead with it (see fixRequest) */
-    task: string;
-    isAutoFix: boolean;
-    fixRequested: boolean;
-    error: string | null;
-    errorLine?: number;
-    /** Slips already corrected without the model in this program (see runCorrected) */
-    corrections?: number;
-    /** Which model fix this program came from (0: the reply to the request itself) */
-    fixAttempt?: number;
-    /** The request's own turn, which every fix of it stands for */
-    originalTurnId?: string;
-    /** Errors of the programs before this one for the same request, oldest first */
-    errorHistory?: FixError[];
-  } | null = null;
+  private lastRun: RunRecord | null = null;
+  /**
+   * Each request's fix loop: its best run so far and that run's score, the latest run's score,
+   * and how many model tries in a row haven't beaten the best (see runScore, FIX_PATIENCE)
+   */
+  private fixProgress = new Map<string, { best: RunRecord; score: number; latest: number; latestCode: string; stale: number; rolledBack: boolean; errors: Set<string> }>();
   /** The system prompt last written to the run log, so it is logged only when it changes */
   private loggedSystemPrompt: { chat: string; text: string } | null = null;
   /** Programs whose slips were corrected and re-run, by turn: they stand for the turn's program in later prompts */
@@ -1563,12 +1596,15 @@ export class ConversationOrchestrator {
                 this.failedReplies.set(key, [...(this.failedReplies.get(key) ?? []), shown]);
               }
             }
-            if (failed?.error && attempt < MAX_FIX_TRIES) {
+            // A try that couldn't even run made no progress
+            if (failed && options?.autoFix && attempt >= 1) this.noteStaleTry(failed);
+            if (failed?.error && attempt < MAX_FIX_TRIES && !this.outOfPatience(failed)) {
               this.nextTry(failed, attempt + 1, `Your last reply was not a working fix (${why.toLowerCase()}).`);
             } else if (failed?.error && options?.autoFix) {
-              // That was the last attempt: say so, and what the user can do
+              // That was the last attempt (or tries stopped getting anywhere): say so, and what
+              // the user can do
               this.markGaveUp(failed);
-              const text = gaveUpText(failed.error);
+              const text = gaveUpText(failed.error, attempt);
               assistantMsg.canonicalContent = text;
               this.events.onTokenStream?.(turnId, text, text);
               this.events.onMessageUpdated?.({ ...assistantMsg });
@@ -1703,6 +1739,7 @@ export class ConversationOrchestrator {
               originalTurnId: fixedTurnId ?? turnId,
               errorHistory: options?.errorHistory,
             };
+            this.recordRun(this.lastRun, this.didAsked(codeTask, soundMark.uses), !!options?.autoFix && (options.fixAttempt ?? 0) >= 1);
             // A reply that only talked, for a request to make something: not a failed program, the
             // program is still to come (its talk was said; the next turn asks for the program)
             const onlyTalked = !!execResult.error && !options?.autoFix && this.autoFixErrors && isTalkOnly(executableCode) && ACTION_REQUEST.test(normalized);
@@ -1765,10 +1802,11 @@ export class ConversationOrchestrator {
                     ? JSON.stringify(execResult.output)
                     : String(execResult.output);
                 programSaid = true;
-              } else if (execResult.error && options?.autoFix && (options.fixAttempt ?? 0) >= MAX_FIX_TRIES) {
-                // The last fix failed too: say so, and what the user can do
+              } else if (execResult.error && options?.autoFix && ((options.fixAttempt ?? 0) >= MAX_FIX_TRIES || this.outOfPatience(this.lastRun))) {
+                // The last fix failed too, or tries stopped getting anywhere: say so, and what the
+                // user can do (the best version comes back once the turn is over)
                 this.gaveUp.add(fixedTurnId ?? turnId);
-                spokenText = gaveUpText(execResult.error);
+                spokenText = gaveUpText(execResult.error, options.fixAttempt ?? MAX_FIX_TRIES);
                 this.events.onRunStatus?.(turnId, { kind: 'error', text: `${errorText(execResult.error, execResult.errorLine)} ${GAVE_UP_STATUS}` });
               } else if (execResult.error && !this.autoFixErrors) {
                 // (When a fix follows, its reply is the answer)
@@ -1857,6 +1895,7 @@ export class ConversationOrchestrator {
       this.stateCoordinator.transitionInteraction('idle', null);
       this.events.onMessageUpdated?.({ ...assistantMsg });
       this.emitTelemetry();
+      void this.rollBackToBest();
       this.maybeAutoFix(turnId);
 
       // If this was the first completed turn in this session, generate a concise title
@@ -1966,6 +2005,7 @@ export class ConversationOrchestrator {
     }
     if (this.scheduler.getActiveTurnId() || this.gaveUp.has(this.requestKey(run))) return; // the user has moved on
     const said = this.memoryStore.getMessages().find((m) => m.id === `msg_assistant_${run.turnId}`)?.canonicalContent ?? '';
+    const soundBefore = this.javascriptRuntime.soundUseCount?.() ?? 0;
     const result = await this.javascriptRuntime.execute(code, undefined, {
       onSpeak: (phrase) => {
         if (phrase.trim() && !said.includes(phrase.trim())) void this.speakOutOfTurn(phrase);
@@ -1983,13 +2023,18 @@ export class ConversationOrchestrator {
       fixRequested: false,
       ...(blankFix ? { fixAttempt: blankFix.fixAttempt, errorHistory: blankFix.errorHistory } : { corrections: (run.corrections ?? 0) + 1 }),
     };
+    // (a blank-stage fix is one of the model's tries; a correction by rule isn't)
+    this.recordRun(this.lastRun, this.didAsked(run.task, soundBefore), !!blankFix);
     this.events.onRunStatus?.(
       run.turnId,
       result.error
         ? { kind: 'error', text: errorText(result.error, result.errorLine) }
         : { kind: 'ok', text: `Ran in ${Math.max(1, Math.round(result.executionTimeMs))} ms (corrected ${named})` }
     );
-    if (result.error && blankFix && blankFix.fixAttempt >= MAX_FIX_TRIES) this.sayGaveUp(run.turnId, result.error);
+    if (result.error && blankFix && (blankFix.fixAttempt >= MAX_FIX_TRIES || this.outOfPatience(this.lastRun))) {
+      this.sayGaveUp(run.turnId, result.error, blankFix.fixAttempt);
+      return;
+    }
     if (result.error) this.maybeAutoFix(run.turnId);
   }
 
@@ -2009,6 +2054,21 @@ export class ConversationOrchestrator {
       run.fixRequested = true;
       this.askForProgram(run);
       return;
+    }
+    // Tries that stopped getting anywhere: Chatty stops, and the best version comes back
+    if (run.isAutoFix && this.outOfPatience(run)) {
+      run.fixRequested = true;
+      appendRunLog('retry', `${FIX_PATIENCE} tries in a row did no better than the best version so far: stopping`);
+      this.sayGaveUp(run.turnId, run.error, run.fixAttempt ?? FIX_PATIENCE);
+      return;
+    }
+    // A fix that did worse than the best version so far isn't built on: the next try starts from the best
+    const base = this.fixBase(run);
+    if (base !== run) {
+      run.fixRequested = true;
+      this.lastRun = base;
+      this.events.onRawOutput?.(run.turnId, base.code);
+      return this.maybeAutoFix(turnId);
     }
     // A line past the program's end came from somewhere else (the sandbox's own code): no line
     if (run.errorLine && run.errorLine > run.code.split('\n').length) run.errorLine = undefined;
@@ -2034,8 +2094,9 @@ export class ConversationOrchestrator {
    */
   private nextTry(run: NonNullable<typeof this.lastRun>, attempt: number, note?: string, hintText?: string): void {
     if (!run.error) return;
-    if (attempt > MAX_FIX_TRIES) {
-      this.sayGaveUp(run.turnId, run.error);
+    if (attempt > MAX_FIX_TRIES || this.outOfPatience(run)) {
+      if (attempt <= MAX_FIX_TRIES) appendRunLog('retry', `${FIX_PATIENCE} tries in a row did no better than the best version so far: stopping`);
+      this.sayGaveUp(run.turnId, run.error, attempt - 1);
       return;
     }
     // In speech mode, each try says so
@@ -2194,8 +2255,8 @@ export class ConversationOrchestrator {
   }
 
   /** Chatty's closing message when the last fix attempt failed, outside any chat turn */
-  private sayGaveUp(turnId: string, error: string): void {
-    const text = gaveUpText(error);
+  private sayGaveUp(turnId: string, error: string, tries = MAX_FIX_TRIES): void {
+    const text = gaveUpText(error, tries);
     this.events.onRunStatus?.(turnId, { kind: 'error', text: `${errorText(error)} ${GAVE_UP_STATUS}` });
     if (this.lastRun?.turnId === turnId) this.markGaveUp(this.lastRun);
     else this.gaveUp.add(turnId);
@@ -2211,6 +2272,104 @@ export class ConversationOrchestrator {
     this.memoryStore.addMessage(msg);
     this.events.onMessageCreated?.({ ...msg });
     void this.speakOutOfTurn(text);
+    void this.rollBackToBest();
+  }
+
+  /** Whether the run is the program that does what was asked, or some of it (the sandbox saw it: shown, or sound started) */
+  private didAsked(request: string, soundUsesBefore: number): boolean {
+    if (!asksForOutcome(request)) return false;
+    const shown = VISUAL_THING.test(request) && !!this.javascriptRuntime.hasVisualContent?.();
+    const sound = SOUND_WORDS_REQUEST.test(request) && (this.javascriptRuntime.soundUseCount?.() ?? 0) > soundUsesBefore;
+    return shown || sound;
+  }
+
+  /**
+   * Scores a run for its request's fix loop: the request's own run starts the loop; a run that
+   * beats the best so far becomes the best. A model try that doesn't is one more without
+   * progress, unless it failed with an error not seen before for this request and scored no
+   * lower than the best (it fixed one bug and met the next: the scores are too coarse to show it)
+   */
+  private recordRun(run: NonNullable<typeof this.lastRun>, didAsked: boolean, modelTry: boolean): void {
+    const key = this.requestKey(run);
+    const score = runScore(run.error, didAsked);
+    const progress = this.fixProgress.get(key);
+    const error = run.error ? normalizedError(run.error) : '';
+    if (!run.isAutoFix || !progress) {
+      this.fixProgress.set(key, { best: run, score, latest: score, latestCode: run.code, stale: 0, rolledBack: false, errors: new Set(error ? [error] : []) });
+      return;
+    }
+    const fresh = !!error && !progress.errors.has(error);
+    if (error) progress.errors.add(error);
+    // (the latest program that ran: what the card shows)
+    progress.latest = score;
+    progress.latestCode = run.code;
+    if (score > progress.score) {
+      appendRunLog('retry', `progress: this version did better than the best so far (${progress.score} → ${score} of 4)`);
+      Object.assign(progress, { best: run, score, stale: 0 });
+    } else if (modelTry) {
+      progress.stale = fresh && score >= progress.score ? 0 : progress.stale + 1;
+    }
+  }
+
+  /** A model try that couldn't be run (its reply was unusable): no progress */
+  private noteStaleTry(run: { turnId: string; originalTurnId?: string }): void {
+    const progress = this.fixProgress.get(this.requestKey(run));
+    if (progress) progress.stale++;
+  }
+
+  /** FIX_PATIENCE tries in a row without beating the best version */
+  private outOfPatience(run: { turnId: string; originalTurnId?: string } | null): boolean {
+    if (!run) return false;
+    return (this.fixProgress.get(this.requestKey(run))?.stale ?? 0) >= FIX_PATIENCE;
+  }
+
+  /**
+   * The program the next try fixes: the latest, unless it did worse than the best so far, then
+   * the best (its code and error), keeping the latest's place in the tries
+   */
+  private fixBase(run: NonNullable<typeof this.lastRun>): NonNullable<typeof this.lastRun> {
+    const progress = this.fixProgress.get(this.requestKey(run));
+    if (!progress || progress.latest >= progress.score || progress.best.code === run.code || !progress.best.error) return run;
+    appendRunLog('retry', `the last fix did worse than an earlier version (${progress.latest} against ${progress.score} of 4): the next try starts from that version`);
+    return {
+      ...run,
+      code: progress.best.code,
+      error: progress.best.error,
+      errorLine: progress.best.errorLine,
+      fixRequested: false,
+    };
+  }
+
+  /**
+   * After giving up: when an earlier version did better than the last one, it comes back (run
+   * again, quietly) and is the program follow-ups edit. Once per request, when no turn is running.
+   */
+  private async rollBackToBest(): Promise<void> {
+    const run = this.lastRun;
+    if (!run || !this.gaveUp.has(this.requestKey(run))) return;
+    const progress = this.fixProgress.get(this.requestKey(run));
+    if (!progress || progress.rolledBack) return;
+    progress.rolledBack = true;
+    // The card already shows the best (or as good)
+    if (progress.score <= progress.latest || progress.best.code === progress.latestCode) return;
+    await settle(AFTER_HEAVY_MS);
+    if (this.scheduler.getActiveTurnId()) return;
+    appendRunLog('retry', `gave up: showing the best version again (${progress.score} of 4, against ${progress.latest} for the last)`);
+    const best = progress.best;
+    this.events.onRawOutput?.(run.turnId, best.code);
+    if (this.javascriptRuntime.hasRunningProgram?.()) {
+      await this.javascriptRuntime.resetVisual();
+      await settle(AFTER_HEAVY_MS);
+    }
+    if (this.scheduler.getActiveTurnId()) return;
+    // Its words were said when it first ran
+    const result = await this.javascriptRuntime.execute(best.code, undefined, { onSpeak: () => {}, audioContextAccessor: this.audioContextAccessor });
+    this.lastRun = { ...run, code: best.code, error: result.error ?? best.error, errorLine: result.errorLine ?? best.errorLine, fixRequested: true };
+    if (this.lastAction?.kind === 'code') this.lastAction = { ...this.lastAction, code: best.code };
+    this.events.onRunStatus?.(run.turnId, {
+      kind: 'error',
+      text: `${result.error ? errorText(result.error, result.errorLine) : 'The best version ran'} ${GAVE_UP_STATUS}`,
+    });
   }
 
   /**
@@ -2409,6 +2568,8 @@ export class ConversationOrchestrator {
     }
     this.finishFixLog('unchanged');
     appendRunLog('retry', `no expression passed a test run (${count} tried for \`${blank.text}\`): asking for the marked line instead`);
+    // A try that got nowhere
+    this.noteStaleTry(run);
     this.nextTry(run, attempt + 1, undefined, hintText);
   }
 
