@@ -1312,8 +1312,9 @@ export class ConversationOrchestrator {
             }
           }
           if (fixedProgram !== rawContent && !options?.autoFix) this.events.onRawOutput?.(turnId, fixedProgram);
-          // (a fix reply cut off is judged incomplete instead: closing it could cut its program short)
-          const inspected = inspectExecutableCode(fixedProgram, { closeCutOff: !options?.autoFix });
+          // (a fix reply cut off is judged incomplete instead: closing it could cut its program short;
+          // a new program asked for when there was none is closed like any first reply)
+          const inspected = inspectExecutableCode(fixedProgram, { closeCutOff: !options?.autoFix || options.autoFix === NO_PROGRAM_YET });
           if (inspected.cutOff) {
             const { dropped, closed } = inspected.cutOff;
             appendRunLog('imagined', `the reply was cut off: ${dropped ? `its unfinished last ${dropped === 1 ? 'line' : `${dropped} lines`} removed and ` : ''}${closed} open block${closed === 1 ? '' : 's'} closed: corrected before running`);

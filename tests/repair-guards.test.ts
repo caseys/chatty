@@ -129,3 +129,13 @@ describe('an undeclared name the program uses again and again', () => {
   });
 });
 
+
+describe('a drawing method called on the canvas', async () => {
+  const { methodHint, applyCorrection } = await import('../src/core/method-hints.ts');
+  it('says the method is its 2D context’s, and corrects it without the model', () => {
+    const code = 'var ballCanvas = document.createElement("canvas");\ndocument.body.appendChild(ballCanvas);\nballCanvas.clearRect(0, 0, 10, 10);';
+    const hint = methodHint(code, "ballCanvas.clearRect is not a function. (In 'ballCanvas.clearRect(0, 0, 10, 10)', 'ballCanvas.clearRect' is undefined)")!;
+    expect(hint.text).toContain("ballCanvas.getContext('2d').clearRect");
+    expect(applyCorrection(code, hint.correction!).split('\n')[2]).toBe('ballCanvas.getContext("2d").clearRect(0, 0, 10, 10);');
+  });
+});

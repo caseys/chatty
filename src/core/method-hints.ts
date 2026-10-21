@@ -180,6 +180,14 @@ export function closestMethods(missing: string, names: string[], count = 3): str
   return [...names].sort((a, b) => score(a) - score(b)).slice(0, count);
 }
 
+/** The methods of the browser's CanvasRenderingContext2D (a canvas's 2D drawing context) */
+const CONTEXT_2D_METHODS = new Set([
+  'arc', 'arcTo', 'beginPath', 'bezierCurveTo', 'clearRect', 'clip', 'closePath', 'createLinearGradient',
+  'createPattern', 'createRadialGradient', 'drawImage', 'ellipse', 'fill', 'fillRect', 'fillText', 'getImageData',
+  'lineTo', 'measureText', 'moveTo', 'putImageData', 'quadraticCurveTo', 'rect', 'restore', 'rotate', 'roundRect',
+  'save', 'scale', 'setTransform', 'stroke', 'strokeRect', 'strokeText', 'transform', 'translate',
+]);
+
 /** The one real method a missing name is surely a slip of (wrong case, a typo), or null */
 export function nearMiss(missing: string, names: string[]): string | null {
   const lower = missing.toLowerCase();
@@ -206,6 +214,13 @@ export function methodHint(code: string, error: string, scope?: Record<string, u
   const names = methodNames(type, scope);
   if (names.length === 0) return null;
   const typeName = typeLabel(type, missing.object);
+  // A drawing method called on the canvas instead of its 2D context: the context is one call away
+  if ((type === 'HTMLCanvasElement' || type === 'element:canvas') && CONTEXT_2D_METHODS.has(missing.method)) {
+    return {
+      text: `${missing.object} is ${typeName}; ${missing.method}() is a method of its 2D drawing context: ${missing.object}.getContext('2d').${missing.method}(…).`,
+      correction: { object: missing.object, from: missing.method, to: `getContext("2d").${missing.method}` },
+    };
+  }
   const fix = nearMiss(missing.method, names);
   const closest = closestMethods(missing.method, names);
   return {
