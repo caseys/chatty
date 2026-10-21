@@ -193,7 +193,9 @@ export class WebLlmProvider implements LlmRuntimeProvider {
             onProgress?.(Math.round(report.progress * total), total);
           },
         },
-        { context_window_size: this.spec.contextLimit }
+        // Our context size, never a sliding window: WebLLM accepts only one of the two, and some
+        // models (Gemma 3) ship both
+        { context_window_size: this.spec.contextLimit, sliding_window_size: -1 }
       );
       if (this.worker !== worker) {
         // Disposed while loading
