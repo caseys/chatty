@@ -156,6 +156,28 @@ describe('the fix for silence', () => {
     expect(message).not.toContain('destination');
   });
 
+  it('says a Web MIDI program sent nothing, in place of the audio context advice (the live violin run)', async () => {
+    // The real program from Qwen3 0.6B: asks for MIDI access and never sends to an output
+    const code = 'navigator.requestMIDIAccess().then((midiData) => {\n  // Example: playInstrument(\'violin\', midiData)\n});';
+    const said = await (ConversationOrchestrator.prototype as any).missingOutcome.call(
+      { javascriptRuntime: { ...silent, midiSummary: () => ({ noteOns: 0, sent: 0, others: [] }) } },
+      'Play a short melody on a violin',
+      { uses: 0, heard: 0, silent: 0 },
+      code
+    );
+    expect(said).toContain('asked for Web MIDI but sent no message to an output');
+    expect(said).toContain('access.outputs.values()');
+    expect(said).not.toContain('destination');
+    // (a Web Audio program that sent no MIDI keeps its advice)
+    const audio = await (ConversationOrchestrator.prototype as any).missingOutcome.call(
+      { javascriptRuntime: { ...silent, midiSummary: () => ({ noteOns: 0, sent: 0, others: [] }) } },
+      'Play a short melody on a violin',
+      { uses: 0, heard: 0, silent: 0 },
+      'const ctx = new AudioContext(); const osc = ctx.createOscillator(); osc.start();'
+    );
+    expect(audio).toContain('destination');
+  });
+
   it('keeps the audio context advice for Web Audio silence, and when notes were started', async () => {
     const advice = 'never reached the speakers';
     expect(await outcome({ ...silent, midiSummary: () => ({ noteOns: 0, sent: 0, others: [] }) })).toContain(advice);

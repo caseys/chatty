@@ -14,14 +14,14 @@ describe('webLlmSampling', () => {
       expect(s.presence_penalty).toBeUndefined();
     }
   });
-  it('Qwen3 normal: no presence or repetition penalty (code repeats tokens), temperature floor', () => {
+  it('Qwen3 normal: a mild presence penalty against loops, no repetition penalty, temperature floor', () => {
     const s = webLlmSampling({ temperature: 0.1 }, qwen3);
-    expect(s).toMatchObject({ temperature: 0.6, presence_penalty: 0 });
+    expect(s).toMatchObject({ temperature: 0.7, presence_penalty: 0.5 });
     expect(s.repetition_penalty).toBeUndefined();
   });
-  it('Qwen2.5-Coder normal: repetition penalty 1.05', () => {
+  it('Qwen2.5-Coder normal: repetition penalty 1.1', () => {
     const s = webLlmSampling({ temperature: 0.9 }, coder);
-    expect(s).toMatchObject({ temperature: 0.9, repetition_penalty: 1.05 });
+    expect(s).toMatchObject({ temperature: 0.9, repetition_penalty: 1.1 });
     expect(s.presence_penalty).toBeUndefined();
   });
 });

@@ -491,14 +491,14 @@ describe('rules picked for small models', () => {
     expect(tip).not.toContain('<canvas>');
     expect(tip).not.toMatch(/^\d+\. /m);
     const music = promptRules('Play a music loop with a G major chord on piano', true);
-    expect(music).toContain('For music, Tone (Tone.js) is ready to use');
+    expect(music).toContain('For music, this browser has a General MIDI software instrument library');
     // An edit is matched against the program it changes too
-    expect(promptRules('make it faster\nconst out = (await navigator.requestMIDIAccess())', true)).toContain('For music, Tone (Tone.js) is ready to use');
+    expect(promptRules('make it faster\nconst out = (await navigator.requestMIDIAccess())', true)).toContain('For music, this browser has a General MIDI software instrument library');
     expect(promptRules('Draw a rainbow over green hills', true)).toContain('<canvas>');
     expect(promptRules('Who was Ada Lovelace?', true)).toContain('Wikipedia');
     // Unfiltered: every rule
     const all = promptRules();
-    for (const part of ['For music, Tone (Tone.js) is ready to use', 'Beeps, tones and sound effects use Web Audio', '<canvas>', '<svg>', 'WebGL', 'Wikipedia']) expect(all).toContain(part);
+    for (const part of ['For music, this browser has a General MIDI software instrument library', 'Beeps, tones and sound effects use Web Audio', '<canvas>', '<svg>', 'WebGL', 'Wikipedia']) expect(all).toContain(part);
   });
 });
 
@@ -617,7 +617,7 @@ describe('fix turns and compaction', () => {
 
 describe('the optional rules follow the request', () => {
   const canvas = 'Use <canvas>';
-  const sound = 'For music, Tone (Tone.js) is ready to use';
+  const sound = 'For music, this browser has a General MIDI software instrument library';
   const facts = 'en.wikipedia.org/api/rest_v1';
   const cases: Array<[string, { canvas?: boolean; sound?: boolean; facts?: boolean }]> = [
     ['Draw a beach sunset with rainbow sky and deep purple ocean', { canvas: true }],
@@ -1761,7 +1761,7 @@ describe('a program that does nothing the request asked for', () => {
     await orchestrator.submitUserInput('Play a G major chord');
     await vi.waitFor(() => expect(llm.turns.length).toBe(2), { timeout: 10000 });
     expect(statuses.some((t) => t.includes('The program played nothing'))).toBe(true);
-    expect(llm.turns[1].messages.at(-1)!.content).toContain('Tone synths');
+    expect(llm.turns[1].messages.at(-1)!.content).toContain('Web MIDI');
     uses = 1;
   }, 20000);
 

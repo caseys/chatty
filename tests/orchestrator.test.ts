@@ -1270,7 +1270,7 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
 
       // iPhone and iPad (Safari) ask for the shortest program; everything else keeps the usual wording
       const tail = () => (orchestrator as any).staticPromptParts().tail.join('\n');
-      expect(tail()).toContain('one simple, complete JavaScript program');
+      expect(tail()).toContain('one simple, complete JavaScript program for the request in a ```javascript block, ending with one speak() sentence');
       vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', maxTouchPoints: 5 });
       try {
         expect(tail()).toContain('the shortest complete JavaScript program');

@@ -31,7 +31,7 @@ export interface WebLlmModelSpec {
 type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
 /** Lowest temperature used with WebLLM models (see runGeneration) */
-const WEBLLM_MIN_TEMPERATURE = 0.6;
+const WEBLLM_MIN_TEMPERATURE = 0.7;
 /** Temperature for an exact answer (a fix turn's corrected line) */
 const WEBLLM_EXACT_TEMPERATURE = 0.2;
 
@@ -43,11 +43,11 @@ const WEBLLM_EXACT_TEMPERATURE = 0.2;
 export const WEBLLM_MAX_TEMPERATURE = 1;
 
 /**
- * Sampling fields for a WebLLM request. Code repeats lines and tokens on purpose (`out.send(...)`,
- * `ctx.`), so a repetition or presence penalty hurts it: Qwen3 / Qwen3.5 get presence penalty 0
- * (Qwen's recommended 0.5 targets thinking-mode loops, and these models run without thinking), and
- * other models (Qwen2.5-Coder ships 1.05) keep a mild repetition penalty. An exact turn is
- * near-greedy with no penalty at all.
+ * Sampling fields for a WebLLM request. Small models loop (the same lines written again and again),
+ * so normal turns carry a penalty, kept mild because code repeats tokens on purpose (`ctx.`, `(`,
+ * a name used thirty times) and a strong one renames things: Qwen3 / Qwen3.5 get presence penalty
+ * 0.5 (Qwen suggests 0 to 2 against endless repetition), other models repetition penalty 1.1
+ * (Qwen2.5-Coder ships 1.05). An exact turn is near-greedy with no penalty at all.
  */
 export function webLlmSampling(
   options: Pick<LlmGenerationOptions, 'temperature' | 'topP' | 'exact' | 'retry' | 'sampling'>,
@@ -64,8 +64,8 @@ export function webLlmSampling(
   );
   const qwen3 = spec.noThinking || /^qwen3/i.test(spec.mlcId);
   return qwen3
-    ? { temperature, top_p, presence_penalty: 0 }
-    : { temperature, top_p, repetition_penalty: 1.05 };
+    ? { temperature, top_p, presence_penalty: 0.5 }
+    : { temperature, top_p, repetition_penalty: 1.1 };
 }
 
 /** The most tokens WebLLM reports probabilities for at one position (its top_logprobs is 0 to 5) */

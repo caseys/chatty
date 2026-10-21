@@ -27,6 +27,13 @@ describe('fix requests for failed programs', () => {
     );
   });
 
+  it('ends a whole-program ask with a "Corrected program:" cue, and drops the label when a reply copies it', () => {
+    const code = 'const a = 1;\nb();';
+    const ask = fixRequest('Play a song.', code, undefined, 'b is not defined.');
+    expect(ask.endsWith('```\nCorrected program:')).toBe(true);
+    expect(applyFixReply(code, 'Corrected program:\nconst a = 1;\nconst b = () => {};\nb();', undefined, undefined, true)).toBe('const a = 1;\nconst b = () => {};\nb();');
+  });
+
   it('drops copied labels, and a leading "Corrected line:" label', () => {
     const failed = 'a();\n  g(t);\nb();';
     expect(applyFixReply(failed, 'Corrected line: g(1);', 2).split('\n')[1]).toBe('  g(1);');

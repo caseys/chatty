@@ -61,9 +61,9 @@ describe('LiteRT sampling', () => {
 });
 
 describe('WebLLM Qwen3 penalties', () => {
-  it('code turns carry no presence or repetition penalty', () => {
+  it('code turns carry a mild presence penalty and no repetition penalty', () => {
     const s = webLlmSampling({ temperature: 0.1 }, { mlcId: 'Qwen3-4B-q4f16_1-MLC', noThinking: true });
-    expect(s.presence_penalty).toBe(0);
+    expect(s.presence_penalty).toBe(0.5);
     expect(s.repetition_penalty).toBeUndefined();
   });
   it('a fix turn\'s sampling swing is used as given', () => {

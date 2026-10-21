@@ -1818,7 +1818,7 @@ function standInElement(code: string, error: string, errorLine: number | undefin
       return { text: `${missing} ${uses[0].text}` };
     }
     let text = `${missing} Create the element it needs with document.createElement and give it id "${id}".`;
-    if (member && SOUND_MEMBER.test(member)) text += ' Notes play through Tone: a synth such as Tone.PolySynth connected with .toDestination(), played with synth.triggerAttackRelease(note, duration, time).';
+    if (member && SOUND_MEMBER.test(member)) text += ' Notes play through Web MIDI: navigator.requestMIDIAccess() gives an output, and output.send() starts and ends notes on it.';
     return { text };
   }
   return null;

@@ -10,7 +10,8 @@ const outcome = (request: string, runtime: object, code = '') =>
   (ConversationOrchestrator.prototype as any).missingOutcome.call({ javascriptRuntime: runtime }, request, { uses: 0, heard: 0, silent: 0 }, code) as Promise<string | null>;
 const nothing = { soundUseCount: () => 0, hasVisualContent: () => false };
 /** The two sound rules: Tone for music, Web Audio for beeps and sound effects */
-const TONE_RULE = 'For music, Tone (Tone.js) is ready to use';
+const TONE_RULE = 'For music, this browser has a General MIDI software instrument library';
+// (the music rule: General MIDI through Web MIDI; Tone is no longer advertised)
 const WEB_AUDIO_RULE = 'Beeps, tones and sound effects use Web Audio (new AudioContext()';
 const hasSoundRule = (rules: string) => rules.includes(TONE_RULE) || rules.includes(WEB_AUDIO_RULE);
 const sees = { soundUseCount: () => 0, hasVisualContent: () => true };
@@ -83,19 +84,18 @@ describe('the outcome check', () => {
 });
 
 describe('prompt rules', () => {
-  it('teaches real browser interfaces: fetch for facts, Tone for music', () => {
+  it('teaches real browser interfaces: fetch for facts, General MIDI through Web MIDI for music', () => {
     expect(promptRules('Who was Ada Lovelace?', true)).toContain('https://en.wikipedia.org/api/rest_v1/page/summary/');
     const drums = promptRules('Play a drum beat', true);
     expect(drums).toContain(TONE_RULE);
-    expect(drums).not.toMatch(/requestMIDIAccess|out\.send|out\.loop/);
+    expect(drums).toContain('navigator.requestMIDIAccess');
+    expect(drums).not.toMatch(/Tone|out\.send|out\.loop/);
   });
 
-  it('names the Tone API, positively and without example code', () => {
+  it('names Web MIDI, short and positive, with no example code and no message bytes', () => {
     const rule = promptRules('Play a melody', true).split('\n').find((line) => line.includes(TONE_RULE))!;
-    for (const name of ['Tone.PolySynth', 'Tone.PluckSynth', 'Tone.MembraneSynth', 'Tone.NoiseSynth', 'Tone.MetalSynth', '.toDestination()', 'triggerAttackRelease(note, duration, time)', '"8n"', 'Tone.Transport.bpm.value', 'Tone.Loop', 'Tone.Part', '.start(0)', 'Tone.Transport.start()']) {
-      expect(rule).toContain(name);
-    }
-    expect(rule).not.toMatch(/\bnew Tone\.|\bconst |=>|;\s/);
+    expect(rule).toBe('- For music, this browser has a General MIDI software instrument library, available through Web MIDI (navigator.requestMIDIAccess).');
+    expect(rule).not.toMatch(/\bnew \w|\bconst |=>|;\s|0x|\bsend\b|Tone/);
     expect(rule).not.toMatch(/\b(?:don't|never|do not)\b/i);
   });
 
@@ -130,8 +130,8 @@ describe('prompt rules', () => {
     expect(promptRules('make it louder\nconst ctx = new AudioContext();', true)).not.toContain(TONE_RULE);
   });
 
-  it('no longer teaches Web MIDI (programs that use it still run)', () => {
-    expect(promptRules()).not.toMatch(/Web MIDI|requestMIDIAccess|output\.send/);
+  it('no longer teaches Tone (programs that use it still run)', () => {
+    expect(promptRules()).not.toMatch(/Tone|toDestination|triggerAttackRelease/);
   });
 });
 
@@ -154,10 +154,11 @@ describe('a Tone program is sound', () => {
     expect(pastProgramResult({ id: 'm', turnId: 't', role: 'assistant', canonicalContent: 'A chord.', rawCode: song, timestamp: 0 })).toContain('played sound');
   });
 
-  it('asks for Tone, and for connecting a Tone synth, in the outcome check', async () => {
+  it('asks for Web MIDI in the outcome check, and for connecting a Tone synth when the program uses Tone', async () => {
     const silent = { soundUseCount: () => 0, hasVisualContent: () => false };
-    expect(await outcome('Play a C major chord', silent)).toContain('Tone');
-    expect(await outcome('Make a beep', silent)).not.toContain('Tone');
+    expect(await outcome('Play a C major chord', silent)).toContain('Web MIDI (navigator.requestMIDIAccess()');
+    expect(await outcome('Play a C major chord', silent)).not.toContain('Tone');
+    expect(await outcome('Make a beep', silent)).not.toContain('Web MIDI');
     const quiet = { soundUseCount: () => 1, hasVisualContent: () => false, soundHeardCount: () => 0, soundSilentCount: () => 1 };
     expect(await outcome('Play a C major chord', quiet, song)).toContain('.toDestination()');
   });

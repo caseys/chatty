@@ -90,7 +90,7 @@ const MARK_END = '// <<< ERROR';
 const MARKER_LINE = /^\s*\/\/\s*(?:>>>|<<<)\s*ERROR\b.*$/;
 /** An instruction line the model copied back from the request */
 const INSTRUCTION_LINE =
-  /^\s*(?:(?:Reply with|First write|Then write|Second write)\b.*(?:Cause|corrected|program)|(?:Marked line|Corrected line):?\s*$)/i;
+  /^\s*(?:(?:Reply with|First write|Then write|Second write)\b.*(?:Cause|corrected|program)|(?:Marked line|Corrected (?:line|lines|function|program)):?\s*$)/i;
 
 /**
  * The fix request. With `block` (a second try, after a fix that changed nothing), the whole
@@ -138,6 +138,8 @@ export function fixRequest(
       '```js',
       lines.join('\n'),
       '```',
+      // The reply starts right after the label, so it is the code and not the program copied back
+      block.why === 'syntax' ? 'Corrected lines:' : 'Corrected function:',
     ].join('\n');
   }
   if (at && markAt) {
@@ -156,8 +158,8 @@ export function fixRequest(
     '```js',
     lines.join('\n'),
     '```',
-    // The reply starts right after the label, so it is the line and not talk
-    ...(at ? ['Marked line:', failing, 'Corrected line:'] : []),
+    // The reply starts right after the label, so it is the line (or program) and not talk
+    ...(at ? ['Marked line:', failing, 'Corrected line:'] : ['Corrected program:']),
   ].join('\n');
 }
 
@@ -213,7 +215,7 @@ function keepCodeLines(text: string): string[] {
     text
       .split('\n')
       // "Corrected line: foo();" copied the label the request ended with
-      .map((l) => l.replace(/^\s*Corrected line:[ \t]*/i, ''))
+      .map((l) => l.replace(/^\s*Corrected (?:line|lines|function|program):[ \t]*/i, ''))
       // Code written as inline markdown (`foo();`) would run as a string that does nothing
       .map((l) => l.replace(/^(\s*)`([^`]+)`\s*$/, '$1$2'))
       // …nor the "// Cause:" line, which explains the fix and isn't part of it

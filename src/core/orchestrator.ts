@@ -49,6 +49,7 @@ import { addNewToClasses, escapeScriptBackticks, missingReadFacts, shareDeclarat
 import { applyAssignmentFixes, moveToContext, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { isAppleMobile, LOCAL_CHAT_MODELS } from './settings.ts';
+import { redeclaredCut } from './repeat-guard.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 
 /** "Error at line 7: x is not defined" (the line when the browser reported it) */
@@ -195,14 +196,14 @@ const MUSIC_WORDS = String.raw`music|songs?|sing(?:s|ing)?|beats?|groove|drums?|
 const SOUND_WORDS = String.raw`\b(?:${MUSIC_WORDS}|sound|beeps?|audio)\b|requestMIDIAccess|AudioContext`;
 /** (a bare "play" also asks for games and videos: it chooses the sound rules, but isn't a sound on its own) */
 const SOUND_REQUEST = new RegExp(String.raw`\bplay(?:s|ing)?\b|${SOUND_WORDS}`, 'i');
-/** Music, which Tone plays: instruments, a song, a melody, chords, a beat, drums, a tempo, a key (or a program already written with Web MIDI or Tone) */
+/** Music, which Web MIDI plays: instruments, a song, a melody, chords, a beat, drums, a tempo, a key (or a program already written with Web MIDI or Tone) */
 const MUSIC_REQUEST = new RegExp(String.raw`\b(?:${MUSIC_WORDS})\b|requestMIDIAccess`, 'i');
 const TONE_PROGRAM = /\bTone\s*\./;
 /** Sound effects, which Web Audio plays: a beep, a chime, an alarm, a click (or a program already written with Web Audio) */
 const EFFECT_REQUEST = new RegExp(String.raw`\b(?:beeps?|tones?|chimes?|alarms?|dings?|buzz(?:es|ed|ing|er)?|clicks?|sirens?|sound effects?)\b|AudioContext`, 'i');
 
 /**
- * Which sound rules a request needs: Tone for music, Web Audio for sound effects, both when it
+ * Which sound rules a request needs: Web MIDI for music, Web Audio for sound effects, both when it
  * names both or names neither ("play a sound"), none when it has nothing to do with sound
  */
 function soundKinds(request: string): { music: boolean; effects: boolean } {
@@ -276,14 +277,15 @@ const FACTS_REQUEST = { test: (request: string) => FACTS_WORDS.test(request) && 
  */
 const PROMPT_RULES: ReadonlyArray<{ text: string; when?: { test(request: string): boolean } }> = [
   { text: '- ONLY return executable JavaScript: a simple, elegant program that does what was asked (draw, build, play, compute, look up) with minimal code and complete functionality.' },
-  { text: '- All messages to the user go through speak(text). Calculate all results using JavaScript logic and put them in its template string.' },
+  { text: '- A complete program builds what it shows or plays, keeps what changes in variables, and connects every control, timer and animation loop it needs.' },
+  { text: '- All messages to the user go through speak(text). Calculate all results using JavaScript logic and put them in the speak() text with a template string.' },
   { text: '- What you add to document.body appears in a card on screen.', when: VISUAL_REQUEST },
   { text: '- Use HTML and CSS for interfaces: buttons, forms, tables, dashboards and widgets.', when: INTERFACE_REQUEST },
   { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations. For motion, keep each thing\'s position and speed in variables, and move and redraw it in one requestAnimationFrame loop.', when: DRAWING_REQUEST },
   { text: '- For 3D, THREE (three.js) is ready to use: render with a THREE.WebGLRenderer, whose canvas you add to document.body.', when: THREE_D_REQUEST },
   { text: '- <svg> works for diagrams and icons.', when: DIAGRAM_REQUEST },
   {
-    text: '- For music, Tone (Tone.js) is ready to use. Instruments are synths, each connected with .toDestination(): Tone.PolySynth for chords and melodies, Tone.PluckSynth for plucked strings, and for drums Tone.MembraneSynth (kick), Tone.NoiseSynth (snare) and Tone.MetalSynth (hi-hat). Play a note with synth.triggerAttackRelease(note, duration, time), using note names like "C4" and lengths like "8n" (an eighth note) or "1m" (a measure), and the time that a Tone.Loop or Tone.Part callback receives (a NoiseSynth takes only duration and time). Set the tempo with Tone.Transport.bpm.value. To repeat, put the notes in a Tone.Loop or Tone.Part, call .start(0) on it, then call Tone.Transport.start().',
+    text: '- For music, this browser has a General MIDI software instrument library, available through Web MIDI (navigator.requestMIDIAccess).',
     when: { test: (request: string) => soundKinds(request).music },
   },
   {
@@ -297,6 +299,7 @@ const PROMPT_RULES: ReadonlyArray<{ text: string; when?: { test(request: string)
 export function promptRules(request = '', filter = false): string {
   const rules = PROMPT_RULES.filter((rule) => !filter || !rule.when || rule.when.test(request));
   return [
+    'Context:',
     "You are an assistant that acts by writing JavaScript: your reply runs as one program in the user's browser.",
     'Rules:',
     ...rules.map((rule) => rule.text),
@@ -1781,10 +1784,17 @@ export class ConversationOrchestrator {
             rawAccumulatedTokens += chunk;
             if (rawAccumulatedTokens.length - repeatCheckedAt >= 40) {
               repeatCheckedAt = rawAccumulatedTokens.length;
-              const cut = repetitionCutIndex(rawAccumulatedTokens);
+              let cut = repetitionCutIndex(rawAccumulatedTokens);
+              let why = 'the reply started repeating itself';
+              // Or going round in circles with variations: a name declared a third time in one scope
+              const again = cut < 0 ? redeclaredCut(rawAccumulatedTokens) : null;
+              if (again) {
+                cut = again.index;
+                why = `the reply started declaring ${again.name} a third time`;
+              }
               if (cut >= 0) {
                 stoppedRepeating = true;
-                appendRunLog('retry', 'the reply started repeating itself: generation stopped there (no retry)');
+                appendRunLog('retry', `${why}: generation stopped there (no retry)`);
                 rawAccumulatedTokens = rawAccumulatedTokens.slice(0, cut);
                 if (streamMode === 'prose' && !quietReply) {
                   assistantMsg.canonicalContent = rawAccumulatedTokens;
@@ -3057,10 +3067,12 @@ export class ConversationOrchestrator {
     // MIDI that never started a note is silent for that reason: the audio context has nothing to do with it
     const midi = this.javascriptRuntime.midiSummary?.();
     const noNoteStarted = !!midi && midi.sent > 0 && midi.noteOns === 0;
+    // Web MIDI asked for, and nothing sent to the output: the audio context has nothing to do with that either
+    const nothingSent = /\brequestMIDIAccess\b/.test(code) && !!midi && midi.sent === 0;
     // Silent with the audio running: the step the program didn't take, when its page says which
     // (Tone.Transport never started, a source never connected), in place of the generic advice
     // (also when the speakers weren't measured: what the program made says what is missing, heard or not)
-    const stepMissing = wantsSound && asked() && !heard() && !noNoteStarted ? missingStepsError(setupNow()) : null;
+    const stepMissing = wantsSound && asked() && !heard() && !noNoteStarted && !nothingSent ? missingStepsError(setupNow()) : null;
     // An app to press or type in, with nothing on the page to press or type in
     const noControls = wantsVisual && ((MAKES_USED_THING.test(request) && !soundWaits) || NAMES_A_CONTROL.test(request)) && !DRAWING_REQUEST.test(request) && shown() && drawn() && !!this.javascriptRuntime.controlCount && this.javascriptRuntime.controlCount() === 0;
     // Something the user is to tap, click, type in or move, with no handler for any of it anywhere in the program
@@ -3076,12 +3088,14 @@ export class ConversationOrchestrator {
     const missing = [
       wantsSound && !asked()
         ? soundKinds(request).music
-          ? 'The program played nothing: notes play through Tone synths (Tone.PolySynth, connected with .toDestination(), played with triggerAttackRelease(note, duration, time)) or Web Audio oscillators.'
+          ? 'The program played nothing: notes play through Web MIDI (navigator.requestMIDIAccess() gives an output, and output.send() starts and ends notes on it) or Web Audio oscillators.'
           : 'The program played nothing: sounds play through Web Audio oscillators, each connected to the audio context\'s destination.'
         : wantsSound && (silent() || !!stepMissing)
           ? noNoteStarted
             ? `No note was started: every MIDI message was something else${midi.others.length ? ` (${midi.others.join('; ')})` : ''}. A note starts with output.send([0x90 + channel, note, velocity]) where channel is 0 to 15 and velocity 1 to 127, and ends with 0x80 + channel.`
-            : stepMissing ??
+            : nothingSent
+              ? 'The program asked for Web MIDI but sent no message to an output: the access has outputs (a Map: [...access.outputs.values()][0]), and a note starts with output.send([0x90 + channel, note, velocity]) and ends with output.send([0x80 + channel, note, 0]).'
+              : stepMissing ??
               (/\bTone\s*\./.test(code)
                 ? "The program's sound never reached the speakers: connect each Tone synth to the output with .toDestination(), and play notes with triggerAttackRelease(note, duration, time)."
                 : "The program's sound never reached the speakers: connect each sound to the audio context's destination (node.connect(audioContext.destination)).")
@@ -3612,9 +3626,10 @@ export class ConversationOrchestrator {
     const tail = this.phonePipeline
       ? []
       : [
+          'Output:',
           isAppleMobile()
-            ? 'Reply with the shortest complete JavaScript program for the request, then one speak() sentence telling the user what it does.'
-            : 'Reply with one simple, complete JavaScript program for the request, then one speak() sentence telling the user what it does.',
+            ? 'Reply with the shortest complete JavaScript program for the request in a ```javascript block, ending with one speak() sentence that tells the user what it does.'
+            : 'Reply with one simple, complete JavaScript program for the request in a ```javascript block, ending with one speak() sentence that tells the user what it does.',
         ];
     return { head, tail };
   }
