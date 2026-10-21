@@ -228,3 +228,50 @@ describe('a bare number given as a style value', () => {
     expect(d.style.lineHeight).toBe('1.5');
   });
 });
+
+describe('a bare number in CSS text gets px, whichever way the CSS is written', () => {
+  let win: Win;
+  afterEach(() => win?.close());
+  const runCode = async (code: string): Promise<{ w: any; posted: any[] }> => {
+    const loaded = loadRunner();
+    win = loaded.win;
+    win.postMessage({ type: 'execute', id: 'c', code }, '*');
+    await wait(40);
+    return { w: win as any, posted: loaded.posted };
+  };
+
+  it('style.setProperty(name, number), as the property does', async () => {
+    const { w, posted } = await runCode(`const d = document.createElement('div');\nd.style.setProperty('left', 50);\nd.style.setProperty('width', '100');\nd.style.setProperty('z-index', 10);\nd.style.setProperty('opacity', 0.5);\nwindow.__d = d;`);
+    expect(w.__d.style.left).toBe('50px');
+    expect(w.__d.style.width).toBe('100px');
+    expect(w.__d.style.zIndex).toBe('10');
+    expect(w.__d.style.opacity).toBe('0.5');
+    expect(posted.filter((m) => m.type === 'imagined').map((m) => m.text)).toEqual(['style.left = 50 (a number) → 50px', 'style.width = 100 (a number) → 100px']);
+  });
+
+  it('CSS text: style.cssText, the style setter, and setAttribute("style", …)', async () => {
+    const { w } = await runCode(
+      `const a = document.createElement('div');\na.style.cssText = 'left: 50; width: 100; opacity: 0.5; top: 0';\nconst b = document.createElement('div');\nb.style = 'top: 20; height: 3em';\nconst c = document.createElement('div');\nc.setAttribute('style', 'height: 30; left: 5px; line-height: 1.5');\nwindow.__a = a; window.__b = b; window.__c = c;`
+    );
+    expect([w.__a.style.left, w.__a.style.width, w.__a.style.opacity, w.__a.style.top]).toEqual(['50px', '100px', '0.5', '0px']);
+    expect([w.__b.style.top, w.__b.style.height]).toEqual(['20px', '3em']);
+    expect(w.__c.getAttribute('style')).toBe('height: 30px; left: 5px; line-height: 1.5');
+  });
+
+  it('style attributes in markup set through innerHTML, outerHTML and insertAdjacentHTML', async () => {
+    const { w } = await runCode(
+      `const host = document.createElement('div');\ndocument.body.appendChild(host);\nhost.innerHTML = "<div id='one' style='width: 100; height: 50'></div>";\nhost.insertAdjacentHTML('beforeend', '<div id="two" style="left: 7; z-index: 3"></div>');\nhost.firstChild.outerHTML = '<div id="three" style="top: 9"></div>';\nwindow.__host = host;`
+    );
+    const styles = [...w.__host.children].map((el: HTMLElement) => el.getAttribute('style'));
+    expect(styles).toEqual(['top: 9px', 'left: 7px; z-index: 3']);
+  });
+
+  it('the text of a <style> element, and rules in a sheet, leaving line-height, z-index, 0, units and calc() alone', async () => {
+    const { w } = await runCode(
+      `const s = document.createElement('style');\ns.textContent = '.a { width: 100; line-height: 1.5; z-index: 10; margin: 0; padding: 5px; height: calc(100); font-size: 18 }';\ndocument.head.appendChild(s);\nconst t = document.createElement('div');\nt.innerHTML = '<style>.b { left: 12; opacity: 0.5 }</style><p style="line-height: 2">x</p>';\nwindow.__s = s; window.__t = t;`
+    );
+    expect(w.__s.textContent).toBe('.a { width: 100px; line-height: 1.5; z-index: 10; margin: 0; padding: 5px; height: calc(100); font-size: 18px }');
+    expect(w.__t.querySelector('style').textContent).toBe('.b { left: 12px; opacity: 0.5 }');
+    expect(w.__t.querySelector('p').getAttribute('style')).toBe('line-height: 2');
+  });
+});

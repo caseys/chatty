@@ -407,8 +407,6 @@ export function restoreDeclarations(original: string, fixed: string): { code: st
   } catch {
     return { code: fixed, restored: [] };
   }
-  const declared = new Set<string>();
-  const used = new Set<string>();
   const names = (pattern: N | null | undefined, into: Set<string>) => {
     if (!pattern) return;
     if (pattern.type === 'Identifier') into.add(pattern.name as string);
@@ -417,36 +415,104 @@ export function restoreDeclarations(original: string, fixed: string): { code: st
     else if (pattern.type === 'RestElement') names(pattern.argument as N, into);
     else if (pattern.type === 'AssignmentPattern') names(pattern.left as N, into);
   };
-  const visit = (node: N, parent: N | null) => {
-    if (node.type === 'VariableDeclarator') names(node.id as N, declared);
-    if ((node.type === 'FunctionDeclaration' || node.type === 'ClassDeclaration') && node.id) names(node.id as N, declared);
-    if (/Function/.test(node.type)) for (const p of (node.params as N[]) ?? []) names(p, declared);
-    if (node.type === 'CatchClause' && node.param) names(node.param as N, declared);
-    if (node.type === 'Identifier') {
-      const isProperty =
-        (parent?.type === 'MemberExpression' && parent.property === node && !parent.computed) ||
-        (parent?.type === 'Property' && parent.key === node && !parent.computed && !parent.shorthand);
-      if (!isProperty) used.add(node.name as string);
-    }
-    for (const value of Object.values(node)) {
-      if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && visit(child as N, node);
-      else if (value && typeof value === 'object' && typeof (value as N).type === 'string') visit(value as N, node);
-    }
+  // The names a tree declares, and the names it uses (not as a property name)
+  const scan = (tree: N) => {
+    const declared = new Set<string>();
+    const used = new Set<string>();
+    const visit = (node: N, parent: N | null) => {
+      if (node.type === 'VariableDeclarator') names(node.id as N, declared);
+      if ((node.type === 'FunctionDeclaration' || node.type === 'ClassDeclaration') && node.id) names(node.id as N, declared);
+      if (/Function/.test(node.type)) for (const p of (node.params as N[]) ?? []) names(p, declared);
+      if (node.type === 'CatchClause' && node.param) names(node.param as N, declared);
+      if (node.type === 'Identifier') {
+        const isProperty =
+          (parent?.type === 'MemberExpression' && parent.property === node && !parent.computed) ||
+          (parent?.type === 'Property' && parent.key === node && !parent.computed && !parent.shorthand);
+        if (!isProperty) used.add(node.name as string);
+      }
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && visit(child as N, node);
+        else if (value && typeof value === 'object' && typeof (value as N).type === 'string') visit(value as N, node);
+      }
+    };
+    visit(tree, null);
+    return { declared, used };
   };
-  visit(after, null);
-  const missing = [...used].filter((n) => !declared.has(n));
-  const restored: string[] = [];
-  const parts: string[] = [];
-  for (const statement of before.body as N[]) {
+  const reply = scan(after);
+  const statements = (before.body as N[]).map((statement) => {
     const own = new Set<string>();
     if (statement.type === 'VariableDeclaration') for (const d of statement.declarations as N[]) names(d.id as N, own);
     if ((statement.type === 'FunctionDeclaration' || statement.type === 'ClassDeclaration') && statement.id) names(statement.id as N, own);
-    const needed = [...own].filter((n) => missing.includes(n));
-    if (needed.length === 0) continue;
-    restored.push(...needed);
+    // What the statement itself reads of the program (a declaration reading another: const beat = tempo / 12)
+    const reads = scan(statement);
+    return { statement, own, reads: [...reads.used].filter((n) => !reads.declared.has(n)) };
+  });
+  // The declarations that come back are the ones the reply needs, and then the ones those need, and so on
+  const declared = new Set(reply.declared);
+  let missing = [...reply.used].filter((n) => !declared.has(n));
+  const chosen = new Set<N>();
+  for (let round = 0; round < 8 && missing.length > 0; round++) {
+    let grew = false;
+    for (const { statement, own, reads } of statements) {
+      if (chosen.has(statement) || ![...own].some((n) => missing.includes(n))) continue;
+      chosen.add(statement);
+      own.forEach((n) => declared.add(n));
+      for (const read of reads) if (!declared.has(read) && !missing.includes(read)) missing.push(read);
+      grew = true;
+    }
+    missing = missing.filter((n) => !declared.has(n));
+    if (!grew) break;
+  }
+  const restored: string[] = [];
+  const parts: string[] = [];
+  for (const { statement, own } of statements) {
+    if (!chosen.has(statement)) continue;
+    restored.push(...own);
     parts.push(original.slice(statement.start, statement.end));
   }
   return restored.length ? { code: `${parts.join('\n')}\n${fixed}`, restored } : { code: fixed, restored };
+}
+
+/**
+ * Whether a program is only text: statements that are strings or template literals with nothing in them to run (a
+ * reply that was prose with its code in backticks parses as one template literal). Nothing to restore lines into.
+ */
+export function isBareText(code: string): boolean {
+  try {
+    const program = parse(code, STRICT) as unknown as { body: Array<{ type: string; expression?: { type: string; expressions?: unknown[] } }> };
+    return program.body.length > 0 && program.body.every((statement) => statement.type === 'ExpressionStatement' && (statement.expression?.type === 'Literal' || (statement.expression?.type === 'TemplateLiteral' && (statement.expression.expressions ?? []).length === 0)));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The top-level statement an error comes from when it carries no line of the program's (it was thrown inside a
+ * library, whose own frames hold the stack): the shortest start of the program that already fails the same way.
+ * `fails` runs a start of the program (a test run) and says whether it throws that error; a failing start stays
+ * failing when it grows, so the statement is found by halving. At most six runs for sixty-four statements. Null
+ * when the whole program does not fail, or has no statements.
+ */
+export async function failingStatement(code: string, fails: (start: string) => Promise<boolean>): Promise<{ line: number; text: string } | null> {
+  let body: Array<{ start: number; end: number; loc: { start: { line: number } } }>;
+  try {
+    body = (parse(code, { ...STRICT, locations: true }) as unknown as { body: typeof body }).body;
+  } catch {
+    return null;
+  }
+  if (body.length === 0 || body.length > 64) return null;
+  const upTo = (k: number) => code.slice(0, body[k - 1].end);
+  if (body.length > 1 && !(await fails(code))) return null;
+  let low = 1;
+  let high = body.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (await fails(upTo(middle))) high = middle;
+    else low = middle + 1;
+  }
+  const statement = body[low - 1];
+  const text = code.slice(statement.start, statement.end).split('\n')[0].trim();
+  return { line: statement.loc.start.line, text: text.length > 90 ? `${text.slice(0, 87)}...` : text };
 }
 
 /**
@@ -542,6 +608,8 @@ export function restoreDeleted(original: string, fixed: string, region: { start:
  * (restoreDeclarations).
  */
 export function restoreWhole(original: string, fixed: string, errorLine: number | undefined): { code: string; restored: string[]; lines: number } {
+  // A reply that is prose (its code in backticks is one template string) is not a program to put lines back into
+  if (isBareText(fixed)) return { code: fixed, restored: [], lines: 0 };
   const deleted = restoreDeleted(original, fixed, errorRegion(original, errorLine));
   const declared = restoreDeclarations(original, deleted?.code ?? fixed);
   return { code: declared.code, restored: declared.restored, lines: deleted?.restored ?? 0 };

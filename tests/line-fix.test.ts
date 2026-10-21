@@ -291,3 +291,81 @@ describe('a whole-program reply with several code blocks', () => {
     expect(applyFixReply(failed, reply, 2)).toBe(applyFixReply(failed, reply.split('The complete program:')[0], 2));
   });
 });
+
+describe('what a whole-program fix gets back is closed over what it reads', () => {
+  // The live Twinkle program from the iPhone run (try 4 put back beat, note and duration, not the tempo that beat reads)
+  const program = [
+    'const synth = new Tone.PolySynth();',
+    'const melody = new Tone.Melody();',
+    'const tempo = 60;',
+    'const beat = tempo / 12;',
+    'const note = "C4";',
+    'const duration = 0.5;',
+    'synth.triggerAttackRelease(note, duration);',
+  ].join('\n');
+
+  it('puts back a declaration a restored one reads, in the program’s order', async () => {
+    const { restoreDeclarations } = await import('../src/core/line-fix.ts');
+    const reply = 'speak("Ready.");\nsynth.triggerAttackRelease(note, beat);';
+    const kept = restoreDeclarations(program, reply);
+    expect(kept.restored).toEqual(['synth', 'tempo', 'beat', 'note']);
+    expect(kept.code).toBe(['const synth = new Tone.PolySynth();', 'const tempo = 60;', 'const beat = tempo / 12;', 'const note = "C4";', reply].join('\n'));
+    // Several steps: a declaration that reads one that reads another
+    const chain = 'const a = 1;\nconst b = a + 1;\nconst c = b + 1;\nconst d = c + 1;';
+    expect(restoreDeclarations(chain, 'speak(String(d));').code).toBe(`${chain}\nspeak(String(d));`);
+  });
+
+  it('keeps nothing it does not need, and leaves a reply that declares what it reads alone', async () => {
+    const { restoreDeclarations } = await import('../src/core/line-fix.ts');
+    const reply = 'const tempo = 80;\nconst beat = tempo / 12;\nspeak(String(beat));';
+    expect(restoreDeclarations(program, reply)).toEqual({ code: reply, restored: [] });
+    expect(restoreDeclarations('const x = 1;\nconst unused = 2;', 'speak(String(x));').restored).toEqual(['x']);
+  });
+
+  it('does not put lines back into a reply that is prose with its code in backticks (one template string)', async () => {
+    const { restoreWhole, isBareText } = await import('../src/core/line-fix.ts');
+    const prose = '`The problem is that synth is not connected. Fix: <synth> synth.toDestination(); </synth>`;';
+    expect(isBareText(prose)).toBe(true);
+    expect(isBareText('"just text";')).toBe(true);
+    expect(isBareText(`${prose}\nspeak("x");`)).toBe(false);
+    expect(isBareText('const x = `a ${1}`;')).toBe(false);
+    expect(isBareText('`a ${x}`;')).toBe(false);
+    expect(restoreWhole(program, prose, 2)).toEqual({ code: prose, restored: [], lines: 0 });
+  });
+});
+
+describe('the statement an error with no line came from', () => {
+  // The live PolySynth program: Tone threw inside itself, so its stack held no line of the program
+  const program = [
+    'var note = "C4"; var duration = 100; var time = 0;',
+    'var synth = new Tone.PolySynth(note, duration, time);',
+    'synth.toDestination();',
+    'synth.triggerAttackRelease(note, 500, 1);',
+  ].join('\n');
+
+  it('finds it by running starts of the program, a few runs for many statements', async () => {
+    const { failingStatement } = await import('../src/core/line-fix.ts');
+    let runs = 0;
+    const found = await failingStatement(program, async (start) => {
+      runs++;
+      return start.includes('new Tone.PolySynth');
+    });
+    expect(found).toEqual({ line: 2, text: 'var synth = new Tone.PolySynth(note, duration, time);' });
+    expect(runs).toBeLessThanOrEqual(4);
+    const long = Array.from({ length: 40 }, (_, i) => `const v${i} = ${i};`).concat('boom();', 'const after = 1;').join('\n');
+    runs = 0;
+    expect(await failingStatement(long, async (start) => {
+      runs++;
+      return start.includes('boom()');
+    })).toEqual({ line: 41, text: 'boom();' });
+    expect(runs).toBeLessThanOrEqual(7);
+  });
+
+  it('says nothing when the program does not fail the same way, cannot be read, or has nothing in it', async () => {
+    const { failingStatement } = await import('../src/core/line-fix.ts');
+    expect(await failingStatement(program, async () => false)).toBeNull();
+    expect(await failingStatement('const x = (;', async () => true)).toBeNull();
+    expect(await failingStatement('// nothing', async () => true)).toBeNull();
+    expect(await failingStatement('speak("one");', async () => true)).toEqual({ line: 1, text: 'speak("one");' });
+  });
+});

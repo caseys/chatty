@@ -2589,7 +2589,7 @@ export class JavascriptRuntime {
       return node;
     }
     window.__chattyRememberSource = __chattyRememberSource;
-    const __chattyMade = { things: [], by: new Map(), transportStarted: false, scheduled: 0, played: new Set(), audios: new Set(), library: [] };
+    const __chattyMade = { things: [], by: new Map(), transportStarted: false, scheduled: 0, played: new Set(), audios: new Set(), library: [], lengthNoted: false };
     function __chattyResetMade() {
       __chattyMade.things = [];
       __chattyMade.by = new Map();
@@ -2598,6 +2598,15 @@ export class JavascriptRuntime {
       __chattyMade.played = new Set();
       __chattyMade.audios = new Set();
       __chattyMade.library = [];
+      __chattyMade.lengthNoted = false;
+    }
+    // A note length written as a plain number is seconds to Tone, and a model writes it in milliseconds (500, 50): from 100
+    // up it is milliseconds, from 10 to 99 it is tens of milliseconds, and under 10 it stays seconds. Text ("8n", "1m") and
+    // Tone's time objects are never touched, and a list of lengths is read one by one.
+    function __chattyNoteLength(value) {
+      if (Array.isArray(value)) return value.map(__chattyNoteLength);
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 10) return value;
+      return value >= 100 ? value / 1000 : value / 100;
     }
     function __chattyReaches(thing, seen) {
       if (thing.opaque) return true;
@@ -2630,6 +2639,21 @@ export class JavascriptRuntime {
             if (typeof trigger === 'function') {
               obj[key] = function (...args) {
                 thing.notes++;
+                // The length of a note: the second argument, the first of a NoiseSynth (it has no pitch); the class in use says
+                if (key === 'triggerAttackRelease') {
+                  try {
+                    const at = window.Tone && typeof window.Tone.NoiseSynth === 'function' && obj instanceof window.Tone.NoiseSynth ? 0 : 1;
+                    const seconds = __chattyNoteLength(args[at]);
+                    if (seconds !== args[at] && !(Array.isArray(seconds) && Array.isArray(args[at]) && seconds.every((v, i) => v === args[at][i]))) {
+                      if (!__chattyMade.lengthNoted) {
+                        __chattyMade.lengthNoted = true;
+                        imagined(JSON.stringify(args[at]) + ' as a note length → ' + JSON.stringify(seconds) + ' s (read as ms)');
+                      }
+                      args = args.slice();
+                      args[at] = seconds;
+                    }
+                  } catch {}
+                }
                 // The time of a note is seconds on Tone's own clock (Tone.now() is the present): a number below it
                 // (a time of 0) is already past, and the note plays and ends at once, unheard
                 try {
@@ -3492,6 +3516,31 @@ export class JavascriptRuntime {
       }
       return text + 'px';
     };
+    // The same for a length that comes as CSS text (style.setProperty, cssText, a style attribute, a <style> sheet): a
+    // declaration whose value is one bare number, on a property the browser says takes a length and not a bare number
+    const camelCss = (name) => String(name).replace(/-([a-z])/g, (m, c) => c.toUpperCase());
+    const noteUnit = (name, value) => {
+      const key = camelCss(name);
+      if (pxNoted.has(key)) return;
+      pxNoted.add(key);
+      imagined('style.' + key + ' = ' + value + ' (a number) → ' + value + 'px');
+    };
+    const pxInCss = (text) => {
+      if (typeof text !== 'string' || !/:\\s*-?\\d/.test(text)) return text;
+      return text.replace(/([A-Za-z][A-Za-z-]*)(\\s*:\\s*)(-?\\d+(?:\\.\\d+)?)(\\s*(?:!important\\s*)?(?=;|\\}|$))/g, (whole, prop, colon, number, tail) => {
+        if (Number(number) === 0 || !needsUnit(camelCss(prop), number)) return whole;
+        noteUnit(prop, number);
+        return prop + colon + number + 'px' + tail;
+      });
+    };
+    const asLengthOfCss = (name, value) => (typeof name === 'string' ? asLength(camelCss(name), value) : value);
+    // Markup: the style attributes and <style> sheets in it
+    const pxInHtml = (html) => {
+      if (typeof html !== 'string' || !/style/i.test(html)) return html;
+      return html
+        .replace(/(<style\\b[^>]*>)([\\s\\S]*?)(<\\/style>)/gi, (whole, open, css, close) => open + pxInCss(css) + close)
+        .replace(/(\\bstyle\\s*=\\s*)(["'])([\\s\\S]*?)\\2/gi, (whole, name, quote, css) => name + quote + pxInCss(css) + quote);
+    };
     // Browsers keep each style property on the style object itself (Chrome) or on its prototype,
     // so an element's style is handed out through a proxy that adds the px
     const styled = new WeakMap();
@@ -3501,7 +3550,9 @@ export class JavascriptRuntime {
       Object.defineProperty(Type.prototype, 'style', {
         configurable: true,
         enumerable: desc.enumerable,
-        set: desc.set,
+        set(value) {
+          return desc.set.call(this, typeof value === 'string' ? pxInCss(value) : value);
+        },
         get() {
           const real = desc.get.call(this);
           if (!real) return real;
@@ -3510,10 +3561,14 @@ export class JavascriptRuntime {
             proxy = new Proxy(real, {
               get(target, prop) {
                 const value = Reflect.get(target, prop, target);
+                // (style.setProperty('left', 50) gets its px like style.left = 50)
+                if (prop === 'setProperty' && typeof value === 'function') return (name, v, priority) => value.call(target, name, asLengthOfCss(name, v), priority);
                 return typeof value === 'function' ? value.bind(target) : value;
               },
               set(target, prop, value) {
                 let given = typeof prop === 'string' ? asLength(prop, value) : value;
+                // (style.cssText = "left: 50; width: 100")
+                if (prop === 'cssText' && typeof given === 'string') given = pxInCss(given);
                 // (the properties are the style object's own in Chrome: the prototype's watchers don't see them)
                 if (checking && typeof prop === 'string') given = checkStyleValue(prop, given);
                 return Reflect.set(target, prop, given, target);
@@ -3524,6 +3579,32 @@ export class JavascriptRuntime {
           return proxy;
         },
       });
+    }
+
+    // The other ways a program writes CSS: setAttribute('style', …), the markup a program sets (innerHTML, outerHTML,
+    // insertAdjacentHTML), the text of a <style> element, and rules inserted into a sheet
+    {
+      const wrapSetter = (proto, key, transform) => {
+        const d = proto && Object.getOwnPropertyDescriptor(proto, key);
+        if (!d || !d.set || !d.configurable) return;
+        Object.defineProperty(proto, key, { ...d, set(value) { return d.set.call(this, transform(this, value)); } });
+      };
+      const isSheet = (el) => !!el && el.tagName === 'STYLE';
+      wrapSetter(Element.prototype, 'innerHTML', (el, v) => (isSheet(el) ? pxInCss(v) : pxInHtml(v)));
+      wrapSetter(Element.prototype, 'outerHTML', (el, v) => pxInHtml(v));
+      wrapSetter(Node.prototype, 'textContent', (el, v) => (isSheet(el) ? pxInCss(v) : v));
+      wrapSetter(HTMLElement.prototype, 'innerText', (el, v) => (isSheet(el) ? pxInCss(v) : v));
+      const wrapMethod = (proto, key, transform) => {
+        const fn = proto && proto[key];
+        if (typeof fn !== 'function') return;
+        const wrapped = function (...args) { return fn.apply(this, transform(this, args)); };
+        // (the watchers read how many arguments the method takes)
+        Object.defineProperty(wrapped, 'length', { value: fn.length });
+        proto[key] = wrapped;
+      };
+      wrapMethod(Element.prototype, 'insertAdjacentHTML', (el, args) => [args[0], pxInHtml(args[1]), ...args.slice(2)]);
+      wrapMethod(Element.prototype, 'setAttribute', (el, args) => (String(args[0]).toLowerCase() === 'style' ? [args[0], pxInCss(String(args[1])), ...args.slice(2)] : args));
+      if (window.CSSStyleSheet) wrapMethod(CSSStyleSheet.prototype, 'insertRule', (sheet, args) => [pxInCss(args[0]), ...args.slice(1)]);
     }
 
     // Every browser interface a program draws, builds or plays with: elements and nodes, canvas

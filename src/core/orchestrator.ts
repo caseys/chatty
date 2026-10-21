@@ -43,12 +43,12 @@ import { setForRecentRequests } from './recent-requests.ts';
 import { appendRunLog } from './run-log.ts';
 import { memberBlank, fillMember, blankChoices, blankRequest, choiceRequest, declareMissing, fillBlank, findBlank, type Blank } from './blank-fix.ts';
 import { madeAsWrongClass, memberList, withLibraryClassNames, type RealMember } from './method-hints.ts';
-import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest, restoreWhole } from './line-fix.ts';
+import { applyFixReply, brokenLines, enclosingFunction, failingStatement, FIX_SYSTEM_PROMPT, fixRequest, isBareText, restoreWhole } from './line-fix.ts';
 import { missingStepsError, sameShortfallNote } from './sound-setup.ts';
-import { addNewToClasses, escapeScriptBackticks, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree, quoteToneTimes, unusedDrawingValues } from './error-hints.ts';
+import { addNewToClasses, escapeScriptBackticks, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, looksThrown, provideThree, quoteToneTimes, unusedDrawingValues } from './error-hints.ts';
 import { applyAssignmentFixes, moveToContext, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
-import { LOCAL_CHAT_MODELS } from './settings.ts';
+import { isAppleMobile, LOCAL_CHAT_MODELS } from './settings.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 
 /** "Error at line 7: x is not defined" (the line when the browser reported it) */
@@ -232,6 +232,8 @@ export const MAKES_USED_THING = new RegExp(
 const DRAW_REQUEST = /\b(?:draw|paint|sketch|illustrate)\b(?!(?:\s+\w+){0,2}\s+(?:card|cards|number|numbers|name|names|winner|lot|lots|straw|conclusion|breath|blood|attention|raffle)\b)/i;
 /** A request for something the user does to it: tap, click, press, type in, drag, move by mouse or keys */
 const ASKS_FOR_INPUT = /\b(?:tap(?:s|ping)?|click(?:s|ing)?|pressing|swipe|drag(?:ging)?|typ(?:e|ing) (?:in|into)|arrow keys|keyboard|mouse or touch|(?:with|by|using) (?:the |your )?mouse)\b/i;
+/** A request that says which control the user uses to do it, and what the user does with it ("when I tap a button", "type in the box") */
+const NAMES_A_CONTROL = new RegExp(`(?=.*${ASKS_FOR_INPUT.source})(?=.*\\b(?:buttons?|inputs?|sliders?|text ?box|checkbox(?:es)?|dropdown)\\b)`, 'i');
 /** What asks for something that changes by itself on screen */
 const MOTION_REQUEST = /\b(?:animat\w*|bounc\w*|mov(?:ing|es)|spinn?(?:ing)?|rotating|orbit\w*|pulsing|blinking|flashing|falling|floating|flying|scrolling|count ?down|ticking)\b/i;
 /** A program driven by the pointer or keys: what moves is up to the user */
@@ -336,7 +338,15 @@ export function dropCopiedExample(code: string): { code: string; dropped: boolea
     const spoken = line.match(/^\s*speak\((["'`])(.*)\1\);?\s*$/)?.[2];
     if (spoken === undefined) return false;
     const said = flatText(spoken);
-    return !!said && EXAMPLE_SPOKEN.some((text) => flatText(text) === said || (` ${flatText(text)} `.includes(` ${said} `) && said.split(' ').length >= flatText(text).split(' ').length * 0.6));
+    return !!said && EXAMPLE_SPOKEN.some((text) => flatText(text) === said || (` ${flatText(text)} `.includes(` ${said} `) && said.split(' ').length >= flatText(text).split(' ').length * 0.6) || closeVariant(said, flatText(text)));
+  };
+  // The same words in another order or with a few changed ("Let me know what you'd like me to make!" for "Hi! What
+  // would you like me to make?"): most of the example's words are in it, and no more than three of its own are other words
+  const closeVariant = (said: string, example: string) => {
+    const mine = new Set(said.split(' '));
+    const theirs = new Set(example.split(' '));
+    const shared = [...theirs].filter((word) => mine.has(word)).length;
+    return shared >= 4 && shared / theirs.size >= 0.6 && mine.size - shared <= 3;
   };
   const kept = lines.filter((line) => !copied(line));
   if (kept.length === lines.length || kept.join('').trim() === '') return { code, dropped: false };
@@ -600,7 +610,8 @@ async function unusableFix(
   const program = stripComments(code).trim();
   // (a question's answer is talk alone, when the reply it replaces had no program to lose either)
   const answers = isQuestion(request) && !asksForOutcome(request) && isTalkOnly(stripComments(original).trim()) && !saysQuestionBack(program, request);
-  if (!program || (isTalkOnly(program) && !answers) || (programDraws(original) && !programDraws(program)) || dropped) return 'lost';
+  // (a reply that is prose with its code in backticks parses as one template string: not a program)
+  if (!program || (isTalkOnly(program) && !answers) || (programDraws(original) && !programDraws(program)) || dropped || (isBareText(program) && !answers)) return 'lost';
   // It took out everything of a kind the request needs (all the sound of a song): see CAPABILITIES
   if (droppedCapabilities(request, original, code).length > 0) return 'lost';
   if (stripComments(fixedProgram).replace(/\s+/g, '') === stripComments(original).replace(/\s+/g, '')) return 'unchanged';
@@ -1142,6 +1153,8 @@ type RunRecord = {
   originalTurnId?: string;
   /** Errors of the programs before this one for the same request, oldest first */
   errorHistory?: FixError[];
+  /** Where a thrown error with no line of the program's came from, found by test runs (see locateFailure) */
+  located?: { text: string } | 'tried';
 };
 
 export class ConversationOrchestrator {
@@ -2554,10 +2567,24 @@ export class ConversationOrchestrator {
     }
     // A line past the program's end came from somewhere else (the sandbox's own code): no line
     if (run.errorLine && run.errorLine > run.code.split('\n').length) run.errorLine = undefined;
+    // An error thrown inside a library has no line of the program's: the statement that made it is found by test runs
+    // of the program's starts (once for each program), so the line-based repairs and the marker have a line
+    if (!run.errorLine && !run.located && looksThrown(run.error) && typeof this.javascriptRuntime.trialRun === 'function' && !brokenLines(run.code)) {
+      run.located = 'tried';
+      run.fixRequested = true;
+      void this.locateFailure(run).then(() => {
+        if (this.lastRun !== run) return;
+        run.fixRequested = false;
+        this.maybeAutoFix(turnId);
+      });
+      return;
+    }
     // A sure slip (a method's wrong case, a typo of a declared name, an element id one slip
     // from an id on the page) is corrected and run again without the model, even in a fix's
     // program; anything else goes to the model with the facts it was missing (error-hints.ts)
-    const hint = errorHint(run.code, run.error, run.errorLine, this.pageFacts());
+    const found = errorHint(run.code, run.error, run.errorLine, this.pageFacts());
+    const where = run.located && run.located !== 'tried' ? run.located.text : undefined;
+    const hint = where && !found?.correction ? { ...found, text: [where, found?.text].filter(Boolean).join(' ') } : found;
     if (hint?.correction && hint.correction.code !== run.code && (run.corrections ?? 0) < 3) {
       run.fixRequested = true;
       void this.correctByRule(run, hint.correction);
@@ -2577,6 +2604,30 @@ export class ConversationOrchestrator {
       return;
     }
     this.nextTry(run, attempt, undefined, hint?.text);
+  }
+
+  /**
+   * The statement a thrown error with no line of the program's came from (it happened inside a library): test runs of
+   * the program's starts find the shortest one that already fails the same way. Sets the run's error line, and says
+   * what failed where. Nothing changes when no start fails alike (a timer, a click, a run that depends on time).
+   */
+  private async locateFailure(run: NonNullable<typeof this.lastRun>): Promise<void> {
+    const error = run.error;
+    if (!error) return;
+    try {
+      await settleOnIos(AFTER_HEAVY_MS);
+      const found = await failingStatement(run.code, async (start) => {
+        if (this.lastRun !== run || this.scheduler.getActiveTurnId() || this.gaveUp.has(this.requestKey(run))) throw new Error('moved');
+        const result = await this.trial(start);
+        return !!result.error && result.error === error;
+      });
+      if (!found) return;
+      run.errorLine = found.line;
+      run.located = { text: `\`${found.text}\` at line ${found.line} failed inside the library (${error}).` };
+      appendRunLog('retry', `the error carried no line of the program's: the program up to line ${found.line} already fails the same way (\`${found.text}\`)`);
+    } catch {
+      // moved on, or the runs could not say
+    }
   }
 
   /** The hint text with the facts of the reads a test run of the program saw that the objects don't have (once for each program) */
@@ -3011,7 +3062,7 @@ export class ConversationOrchestrator {
     // (also when the speakers weren't measured: what the program made says what is missing, heard or not)
     const stepMissing = wantsSound && asked() && !heard() && !noNoteStarted ? missingStepsError(setupNow()) : null;
     // An app to press or type in, with nothing on the page to press or type in
-    const noControls = wantsVisual && MAKES_USED_THING.test(request) && !DRAWING_REQUEST.test(request) && !soundWaits && shown() && drawn() && !!this.javascriptRuntime.controlCount && this.javascriptRuntime.controlCount() === 0;
+    const noControls = wantsVisual && ((MAKES_USED_THING.test(request) && !soundWaits) || NAMES_A_CONTROL.test(request)) && !DRAWING_REQUEST.test(request) && shown() && drawn() && !!this.javascriptRuntime.controlCount && this.javascriptRuntime.controlCount() === 0;
     // Something the user is to tap, click, type in or move, with no handler for any of it anywhere in the program
     // (controls that do nothing, a board that can't be tapped): the page can say there are controls, the parser
     // that nothing listens
@@ -3555,10 +3606,15 @@ export class ConversationOrchestrator {
       ? [`${this.phonePipeline.chatSystemPrompt} Current date and time: ${new Date().toLocaleString()}.`]
       : [rules];
 
-    // The format, restated after everything else
+    // The format, restated after everything else. iPhone and iPad (Safari) ask for the shortest
+    // program: a long reply takes long there, and it's where small models start repeating themselves
     const tail = this.phonePipeline
       ? []
-      : ['Reply with one simple, complete JavaScript program for the request, then one speak() sentence telling the user what it does.'];
+      : [
+          isAppleMobile()
+            ? 'Reply with the shortest complete JavaScript program for the request, then one speak() sentence telling the user what it does.'
+            : 'Reply with one simple, complete JavaScript program for the request, then one speak() sentence telling the user what it does.',
+        ];
     return { head, tail };
   }
 

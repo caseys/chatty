@@ -709,3 +709,21 @@ describe('Tone note values written without quotes', () => {
     expect(quoteToneTimes('Tone.start();\nconst x = 1.5n;')).toBeNull();
   });
 });
+
+describe('the example’s question in other words', async () => {
+  const { dropCopiedExample } = await import('../src/core/orchestrator.ts');
+  const program = 'const synth = new Tone.PolySynth();\nsynth.triggerAttackRelease("C4", "8n");\n';
+
+  it('takes out the greeting’s close variants, as Qwen3 0.6B wrote one for Twinkle Twinkle', () => {
+    for (const said of ["Let me know what you'd like me to make!", 'What do you want me to make?', 'Tell me what you would like me to make.', 'Welcome! I can do anything your browser can do.']) {
+      expect(dropCopiedExample(`${program}speak(${JSON.stringify(said)});`).dropped, said).toBe(true);
+    }
+  });
+
+  it('leaves sentences of its own, short likenesses, and a reply that is only the greeting', () => {
+    for (const said of ['Playing Twinkle Twinkle Little Star.', 'What would you like?', 'Let me know when to stop.', 'I made a piano for you to play.']) {
+      expect(dropCopiedExample(`${program}speak(${JSON.stringify(said)});`).dropped, said).toBe(false);
+    }
+    expect(dropCopiedExample('speak("Let me know what you\'d like me to make!");').dropped).toBe(false);
+  });
+});

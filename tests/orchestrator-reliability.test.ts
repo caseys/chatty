@@ -452,8 +452,9 @@ describe('the outcome check on something to tap or use that nothing reacts to', 
 
   it('also for an instruction that starts with a verb the check did not list (the die Qwen3 0.6B answered with the request as text)', async () => {
     const echo = 'document.body.innerHTML = `Roll a six-sided die when I tap a button`;';
-    expect(await outcome('Roll a six-sided die when I tap a button', page(0), echo)).toContain(message);
-    expect(await outcome('Roll a six-sided die when I tap a button', page(0), `${echo}\ndocument.body.addEventListener("click", () => {});`)).toBeNull();
+    expect(await outcome('Roll a six-sided die when I tap a button', page(0), echo)).toContain('The page has nothing to press');
+    expect(await outcome('Roll a six-sided die when I tap a button', page(1), echo)).toContain(message);
+    expect(await outcome('Roll a six-sided die when I tap a button', page(1), `${echo}\ndocument.body.addEventListener("click", () => {});`)).toBeNull();
     // (an instruction that names no tapping is not a request for a screen; a question about tapping is a question)
     expect(await outcome('Roll a six-sided die', page(0), echo)).toBeNull();
     expect(await outcome('Why do I tap a button to roll a die?', page(0), echo)).toBeNull();
@@ -567,4 +568,18 @@ describe('the outcome check on a drawing that is only words', () => {
       expect(await outcome(request, drawing(false), words), request).toBeNull();
     }
   });
+});
+
+describe('the outcome check on a request that names the button to tap, and the page has none', () => {
+  // The real program from Qwen2.5 0.5B's die: text, a function, and a click handler on an element the page never had
+  const die = 'document.body.innerHTML = `Roll a six-sided die when I tap a button`;\nfunction rollDice() {}\ndocument.getElementById("nextRoll").addEventListener("click", rollDice);';
+  const page = (controls: number) => ({ soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => true, controlCount: () => controls });
+
+  it('says the page has nothing to press, and is content with a button there', async () => {
+    expect(await outcome('Roll a six-sided die when I tap a button', page(0), die)).toContain('The page has nothing to press or type in');
+    expect(await outcome('Roll a six-sided die when I tap a button', page(1), die)).toBeNull();
+    // (a request that names no control, or no tapping, is not held to it)
+    expect(await outcome('Roll a six-sided die when I tap', page(0), die)).toBeNull();
+    expect(await outcome('Show a button', page(0), die)).toBeNull();
+  }, 30000);
 });

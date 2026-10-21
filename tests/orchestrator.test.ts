@@ -1267,6 +1267,16 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         'standard'
       );
       expect(built.systemPrompt).toContain('All messages to the user go through speak(text)');
+
+      // iPhone and iPad (Safari) ask for the shortest program; everything else keeps the usual wording
+      const tail = () => (orchestrator as any).staticPromptParts().tail.join('\n');
+      expect(tail()).toContain('one simple, complete JavaScript program');
+      vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', maxTouchPoints: 5 });
+      try {
+        expect(tail()).toContain('the shortest complete JavaScript program');
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
 
     it('runs interactive widgets and canvas games in iframe mode', async () => {

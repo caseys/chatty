@@ -489,3 +489,50 @@ describe('notes given a time that has already gone by', () => {
     win.close();
   });
 });
+
+describe('note lengths written as plain numbers', () => {
+  // The real program from Qwen2.5 0.5B: lengths of 100 and 500, which Tone reads as seconds
+  const lengths = (win: any): unknown[][] => win.__lengths;
+  function withRecorder(win: any): void {
+    fakeTone(win);
+    win.__lengths = [];
+    const record = function (this: unknown, ...args: unknown[]) {
+      win.__lengths.push(args);
+    };
+    win.Tone.Synth.prototype.triggerAttackRelease = record;
+    class NoiseSynth extends win.Tone.Synth {}
+    NoiseSynth.prototype.triggerAttackRelease = record;
+    win.Tone.NoiseSynth = NoiseSynth;
+  }
+
+  it('reads 100 or more as milliseconds, 10 to 99 as tens of milliseconds, and leaves smaller numbers and text as they are', async () => {
+    const { win, posted } = loadRunner(withRecorder);
+    await run(win, posted, [
+      'const s = new Tone.Synth().toDestination();',
+      's.triggerAttackRelease("C4", 500, 1);',
+      's.triggerAttackRelease("C4", 50);',
+      's.triggerAttackRelease("C4", 0.5);',
+      's.triggerAttackRelease("C4", 2);',
+      's.triggerAttackRelease("C4", "8n");',
+      's.triggerAttackRelease("C4", "1m", 3);',
+    ].join('\n'));
+    expect(lengths(win)).toEqual([['C4', 0.5, 1], ['C4', 0.5], ['C4', 0.5], ['C4', 2], ['C4', '8n'], ['C4', '1m', 3]]);
+    win.close();
+  });
+
+  it('covers a length held in a name, a list of lengths, and the first argument of a noise synth, and says so once', async () => {
+    const { win, posted } = loadRunner(withRecorder);
+    await run(win, posted, [
+      'var duration = 100;',
+      'const s = new Tone.Synth().toDestination();',
+      's.triggerAttackRelease("C4", duration);',
+      's.triggerAttackRelease(["C4", "E4"], [500, "8n", 40]);',
+      'const n = new Tone.NoiseSynth().toDestination();',
+      'n.triggerAttackRelease(500, 1);',
+      'n.triggerAttackRelease("8n");',
+    ].join('\n'));
+    expect(lengths(win)).toEqual([['C4', 0.1], [['C4', 'E4'], [0.5, '8n', 0.4]], [0.5, 1], ['8n']]);
+    expect(posted.filter((m) => m.type === 'imagined').map((m) => m.text)).toEqual(['100 as a note length → 0.1 s (read as ms)']);
+    win.close();
+  });
+});
