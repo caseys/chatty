@@ -13,7 +13,7 @@ import { isAppleMobile, SUPPORTED_CHAT_MODELS } from './core/settings.ts';
 import { AFTER_LOAD_MS, settle } from './core/settle.ts';
 import { decodeProgramHash, encodeProgramHash } from './share-link.ts';
 import type { ConversationMessage, StoredConversation } from './types/index.ts';
-import type { RunStatus } from './core/orchestrator.ts';
+import { GAVE_UP_STATUS, type RunStatus } from './core/orchestrator.ts';
 import { createToolSummaryElement, parseStreamingToolCall, stripToolCallMarkup } from './tools/tool-formatter.ts';
 
 type LoadKind = 'llm' | 'tts' | 'stt';
@@ -212,6 +212,7 @@ export class MinimalVoiceApp {
       },
       onRunStatus: (_turnId, status) => {
         this.setRunStatus(status);
+        this.showProgramState(status);
       },
       onProgramSound: (sounding) => {
         this.programSounding = sounding;
@@ -1540,7 +1541,28 @@ export class MinimalVoiceApp {
     }
   }
 
+  /**
+   * The card while a program has failed: hidden when it showed nothing (there is nothing to see),
+   * otherwise faded and pulsing while a fix is coming, and cleared once every fix has failed. New
+   * results bring it back.
+   */
+  private showProgramState(status: RunStatus | null): void {
+    const layer = this.screenVisualLayer;
+    if (!layer) return;
+    // Every fix failed: the card is cleared and hidden, for a fresh start
+    if (status?.kind === 'error' && status.text.endsWith(GAVE_UP_STATUS)) {
+      this.resetVisualScreen();
+      return;
+    }
+    const failed = status?.kind === 'error';
+    const fixing = failed && /\((?:asking the model to fix it|trying fixes for )/.test(status.text);
+    layer.classList.toggle('program-hidden', failed && status.text.includes('showed nothing'));
+    layer.classList.toggle('program-fixing', fixing);
+    layer.classList.toggle('program-failed', failed && !fixing);
+  }
+
   private resetVisualScreen(): void {
+    this.screenVisualLayer?.classList.remove('program-hidden', 'program-fixing', 'program-failed');
     this.programSounding = false;
     this.programRunning = false;
     this.showScreenContent(false);

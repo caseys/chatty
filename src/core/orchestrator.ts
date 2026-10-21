@@ -446,6 +446,9 @@ export function prefersLineFix(modelId: string): boolean {
   return !!model && !model.phone && model.sizeBytes >= LINE_FIX_MIN_BYTES;
 }
 
+/** The run status once every fix try has failed (the page clears the card on it) */
+export const GAVE_UP_STATUS = `(gave up after ${MAX_FIX_TRIES} tries)`;
+
 /** What Chatty says when the last fix attempt failed too */
 function gaveUpText(error: string): string {
   const short = error.length > 80 ? `${error.slice(0, 77)}…` : error;
@@ -1605,6 +1608,7 @@ export class ConversationOrchestrator {
                 // The last fix failed too: say so, and what the user can do
                 this.gaveUp.add(fixedTurnId ?? turnId);
                 spokenText = gaveUpText(execResult.error);
+                this.events.onRunStatus?.(turnId, { kind: 'error', text: `${errorText(execResult.error, execResult.errorLine)} ${GAVE_UP_STATUS}` });
               } else if (execResult.error && !this.autoFixErrors) {
                 // (When a fix follows, its reply is the answer)
                 spokenText = 'Something went wrong while running that.';
@@ -1998,6 +2002,7 @@ export class ConversationOrchestrator {
   /** Chatty's closing message when the last fix attempt failed, outside any chat turn */
   private sayGaveUp(turnId: string, error: string): void {
     const text = gaveUpText(error);
+    this.events.onRunStatus?.(turnId, { kind: 'error', text: `${errorText(error)} ${GAVE_UP_STATUS}` });
     if (this.lastRun?.turnId === turnId) this.markGaveUp(this.lastRun);
     else this.gaveUp.add(turnId);
     const msg: ConversationMessage = {

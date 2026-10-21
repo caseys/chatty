@@ -3074,3 +3074,25 @@ body {
     animation: none !important;
   }
 }
+
+/* A failed program's card: hidden when it showed nothing; faded, pulsing between 5% and 35% while
+   a fix is coming (only then: no loop stays on screen), and faded once none is */
+#screen-visual-layer.program-hidden {
+  visibility: hidden;
+}
+#screen-visual-layer.program-fixing {
+  animation: program-fixing-pulse 1.4s ease-in-out infinite alternate;
+}
+#screen-visual-layer.program-failed {
+  opacity: 0.35;
+}
+@keyframes program-fixing-pulse {
+  from { opacity: 0.05; }
+  to { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #screen-visual-layer.program-fixing {
+    animation: none;
+    opacity: 0.2;
+  }
+}
