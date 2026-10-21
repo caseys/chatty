@@ -31,6 +31,57 @@ describe('a name declared again in the same block', () => {
   });
 });
 
+describe('a declaration that repeats a name the block already has', () => {
+  it('sets a parameter, a catch parameter or a function instead of declaring it again', () => {
+    const code = [
+      'function play(channel, note, time) {',
+      '  const note = note * 0.8;',
+      '  const time = time * 0.5;',
+      '  return note + time;',
+      '}',
+      'const notes = [{ time: 1 }];',
+      'notes.forEach(note => {',
+      '  const note = note.time;',
+      '});',
+      'try { x(); } catch (e) { const e = 2; }',
+      'function f() {}',
+      'const f = 3;',
+    ].join('\n');
+    const once = declareOnce(code)!;
+    expect(once.names.sort()).toEqual(['e', 'f', 'note', 'time']);
+    expect(once.code).toContain('  note = note * 0.8;\n  time = time * 0.5;');
+    expect(once.code).toContain('notes.forEach(note => {\n  note = note.time;');
+    expect(once.code).toContain('catch (e) { e = 2; }');
+    expect(once.code).toContain('function f() {}\nf = 3;');
+    expect(parses(once.code)).toBe(true);
+  });
+
+  it('leaves what JavaScript allows: a var repeated, a name in an inner block', () => {
+    expect(declareOnce('var v = 1;\nvar v = 2;')).toBeNull();
+    expect(declareOnce('function g(n) {\n  { const n = 2; return n; }\n}')).toBeNull();
+    // A var after a let does conflict
+    expect(declareOnce('let w = 1;\nvar w = 2;')!.code).toBe('let w = 1;\nw = 2;');
+  });
+});
+
+describe('a reply cut off and declaring names twice', () => {
+  it('is repaired and closed, the one repair not blocking the other', () => {
+    const reply = '```javascript\nconst tempo = 120;\nfunction play(note) {\n  const note = note * 0.8;\n  return note;\n}\nconst tempo = 120;\nconst loop = () => {\n  setTimeout(() => {\n    [1, 2].forEach(note => {\n      const note = note + 1;';
+    const prepared = inspectExecutableCode(reply);
+    expect(prepared.redeclared?.sort()).toEqual(['note', 'tempo']);
+    expect(prepared.cutOff).toBeTruthy();
+    expect(parses(prepared.code)).toBe(true);
+  });
+});
+
+describe('a const with no value', () => {
+  it('is a let', () => {
+    const once = declareOnce('const score;\nscore = 3;\nspeak(`${score}`);')!;
+    expect(once.code).toBe('let score;\nscore = 3;\nspeak(`${score}`);');
+    expect(parses(once.code)).toBe(true);
+  });
+});
+
 describe('a reply that writes its program out twice', () => {
   it('runs one copy: the fuller one', () => {
     const program = 'const bpm = 120;\nconst beat = 60000 / bpm;\nfunction play() {\n  out.send([0x90, 60, 100]);\n}\nplay();';

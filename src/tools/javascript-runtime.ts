@@ -1680,7 +1680,11 @@ export class JavascriptRuntime {
     execOptions?: ExecutionContextOptions,
     modeOverride?: JavascriptExecutionMode
   ): Promise<JavascriptExecutionResult> {
-    const trimmedCode = (await letReassignedConsts(await makeAwaitingFunctionsAsync(code))).trim();
+    const awaited = await makeAwaitingFunctionsAsync(code);
+    const unconst = await letReassignedConsts(awaited);
+    // (logged like every repair: a const the program changes later is a let)
+    if (unconst !== awaited) this.onRunLog?.('imagined', 'a const the program changes later → let: corrected before running');
+    const trimmedCode = unconst.trim();
     // The code as it runs (after the sandbox's repairs)
     this.onRunLog?.('program', trimmedCode);
     const options = execOptions ?? this.defaultOptions;

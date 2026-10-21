@@ -1592,9 +1592,12 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
  * Before a program runs: a name declared again with const or let in the same block (`const
  * velocity = 100;` three times, or a program written out twice) stops the whole program before
  * it starts. The first declaration becomes let and each later one a plain assignment, so every
- * line still sets the value where it did. Every such name at once (the error names only the
- * first); only single-name declarations; kept only when the result parses. Null when there is
- * nothing to do.
+ * line still sets the value where it did. The same for a const or let that repeats a name the
+ * block already has from elsewhere: a parameter of its function (`function play(note) { const
+ * note = note * 0.8 }` becomes `note = note * 0.8`, what it meant), a catch's parameter, a
+ * function declared in the block, or an earlier var (and a var after a let or const). Every such
+ * name at once (the error names only the first); only single-name declarations; kept only when
+ * the result parses. Null when there is nothing to do.
  */
 export function declareOnce(code: string): { code: string; names: string[] } | null {
   if (tryParse(code)) return null;
@@ -1607,12 +1610,34 @@ export function declareOnce(code: string): { code: string; names: string[] } | n
   const edits: Array<{ start: number; end: number; text: string }> = [];
   const names = new Set<string>();
   const madeLet = new Set<AnyNode>();
+  // The names a block has before its own statements: its function's parameters, or its catch's
+  const given = new Map<AnyNode, string[]>();
+  walk(ast, (node) => {
+    if (/Function/.test(node.type) && (node.body as AnyNode)?.type === 'BlockStatement') {
+      given.set(node.body as AnyNode, (node.params as AnyNode[]).flatMap((p) => boundNames(p)));
+    }
+    if (node.type === 'CatchClause' && node.param && node.body) given.set(node.body as AnyNode, boundNames(node.param as AnyNode));
+  });
+  const elsewhere = (kind: string) => ({ kind }) as unknown as AnyNode;
   walk(ast, (node) => {
     if (node.type !== 'Program' && node.type !== 'BlockStatement' && node.type !== 'StaticBlock') return;
     const first = new Map<string, AnyNode>();
+    for (const name of given.get(node) ?? []) first.set(name, elsewhere('param'));
+    // (a function declaration counts from the top of its block: it is hoisted)
     for (const statement of node.body as AnyNode[]) {
-      if (statement.type !== 'VariableDeclaration' || (statement.kind !== 'const' && statement.kind !== 'let')) continue;
+      if (statement.type === 'FunctionDeclaration' && (statement.id as AnyNode | null)?.name && !first.has((statement.id as AnyNode).name as string)) {
+        first.set((statement.id as AnyNode).name as string, elsewhere('function'));
+      }
+    }
+    for (const statement of node.body as AnyNode[]) {
+      if (statement.type !== 'VariableDeclaration') continue;
       const declarators = statement.declarations as AnyNode[];
+      // A const with no value (`const x;`) can't stand: it is a let, set later
+      if (statement.kind === 'const' && declarators.some((d) => !d.init) && !madeLet.has(statement)) {
+        madeLet.add(statement);
+        names.add(declarators.flatMap((d) => boundNames(d.id as AnyNode)).join(', '));
+        edits.push({ start: statement.start, end: statement.start + 'const'.length, text: 'let' });
+      }
       const id = declarators[0]?.id as AnyNode | undefined;
       if (declarators.length !== 1 || id?.type !== 'Identifier') continue;
       const name = id.name as string;
@@ -1621,6 +1646,8 @@ export function declareOnce(code: string): { code: string; names: string[] } | n
         first.set(name, statement);
         continue;
       }
+      // A var may repeat a var, a parameter or a function: only a let or const before it conflicts
+      if (statement.kind === 'var' && earlier.kind !== 'let' && earlier.kind !== 'const') continue;
       names.add(name);
       // The later one sets the value (or, without one, goes)
       const init = declarators[0].init as AnyNode | null;
@@ -1634,7 +1661,9 @@ export function declareOnce(code: string): { code: string; names: string[] } | n
   if (edits.length === 0) return null;
   let out = code;
   for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + e.text + out.slice(e.end);
-  return tryParse(out) ? { code: out, names: [...names] } : null;
+  // A reply also cut off before its end parses only once closed (closeCutOff, which runs after
+  // this and needs the names sorted out first to close it)
+  return tryParse(out) || closeCutOff(out) ? { code: out, names: [...names] } : null;
 }
 
 /**
