@@ -239,10 +239,12 @@ body {
   gap: 14px;
 }
 
+/* Squircle corners on containers where supported; buttons and form controls keep round corners */
 #audio-visualizer {
   background: var(--bg-elevated);
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: 18px;
+  corner-shape: squircle;
 }
 
 .partial-banner {
@@ -299,7 +301,8 @@ body {
   padding: 28px;
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-radius: 14px;
+  border-radius: 22px;
+  corner-shape: squircle;
 }
 
 .empty-mascot-img {
@@ -349,7 +352,8 @@ body {
 .msg-card {
   max-width: 82%;
   padding: 12px 16px;
-  border-radius: 14px;
+  border-radius: 22px;
+  corner-shape: squircle;
   border: 1px solid var(--border-color);
   background: var(--bg-surface);
   display: flex;
@@ -440,7 +444,8 @@ body {
   margin-bottom: 8px;
   background: var(--card-bg);
   border: 1px solid rgba(56, 189, 248, 0.25);
-  border-radius: 8px;
+  border-radius: 16px;
+  corner-shape: squircle;
   font-family: var(--font-mono, monospace);
   font-size: 12px;
   max-width: 100%;
@@ -555,7 +560,8 @@ body {
 .card {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: 20px;
+  corner-shape: squircle;
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -614,7 +620,8 @@ body {
   color: var(--text-secondary);
   background: var(--bg-elevated);
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: 16px;
+  corner-shape: squircle;
 }
 
 .memory-inline-form {
@@ -647,7 +654,8 @@ body {
   justify-content: space-between;
   gap: 8px;
   padding: 6px 10px;
-  border-radius: 8px;
+  border-radius: 16px;
+  corner-shape: squircle;
   background: var(--bg-elevated);
   font-size: 12px;
 }
@@ -660,7 +668,8 @@ body {
 
 .metric-box {
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: 16px;
+  corner-shape: squircle;
   background: var(--bg-elevated);
   display: flex;
   flex-direction: column;
@@ -688,7 +697,8 @@ body {
   flex-direction: column;
   gap: 2px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: 16px;
+  corner-shape: squircle;
   background: var(--bg-elevated);
   font-size: 12px;
 }
@@ -784,7 +794,8 @@ body {
   margin: auto;
   width: min(680px, 92vw);
   max-height: 85vh;
-  border-radius: 14px;
+  border-radius: 22px;
+  corner-shape: squircle;
   border: 1px solid var(--border-color);
   background: var(--bg-surface);
   color: var(--text-primary);
@@ -810,7 +821,8 @@ body {
 
 .storage-bar-wrap {
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: 16px;
+  corner-shape: squircle;
   background: var(--bg-elevated);
   margin-bottom: 14px;
   font-size: 12px;
@@ -828,7 +840,8 @@ body {
   align-items: center;
   gap: 12px;
   padding: 12px;
-  border-radius: 10px;
+  border-radius: 18px;
+  corner-shape: squircle;
   border: 1px solid var(--border-color);
   background: var(--bg-elevated);
 }
@@ -1277,7 +1290,8 @@ body {
   border: 1px solid var(--line-strong);
   background: var(--overlay-bg);
   color: var(--text-primary);
-  border-radius: 20px;
+  border-radius: 28px;
+  corner-shape: squircle;
   padding: 0;
   max-width: 460px;
   width: min(460px, calc(100vw - 32px));
@@ -1659,7 +1673,8 @@ body {
   position: relative;
   display: flex;
   align-items: center;
-  border-radius: 12px;
+  border-radius: 20px;
+  corner-shape: squircle;
   background: var(--fill-subtle);
   border: 1px solid var(--line);
   transition: transform 0.1s ease;
@@ -1761,7 +1776,8 @@ body {
   min-width: 150px;
   background: var(--overlay-bg);
   border: 1px solid var(--line-strong);
-  border-radius: 10px;
+  border-radius: 18px;
+  corner-shape: squircle;
   padding: 4px;
   display: flex;
   flex-direction: column;
@@ -1823,7 +1839,8 @@ body {
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 22px;
+  corner-shape: squircle;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.2);
 }
 
@@ -1852,7 +1869,8 @@ body {
 .chat-bubble {
   max-width: 85%;
   padding: 8px 12px;
-  border-radius: 14px;
+  border-radius: 22px;
+  corner-shape: squircle;
   font-size: 14.5px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -1955,7 +1973,8 @@ body {
   margin: 0 12px 10px;
   padding: 10px 12px;
   border: 1px dashed var(--line-strong);
-  border-radius: 12px;
+  border-radius: 20px;
+  corner-shape: squircle;
   color: var(--text-secondary);
 }
 
@@ -2202,7 +2221,8 @@ body {
   flex-direction: column;
   gap: 5px;
   padding: 8px 14px 9px;
-  border-radius: 12px;
+  border-radius: 20px;
+  corner-shape: squircle;
   background: var(--panel-bg-strong);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
@@ -2421,7 +2441,8 @@ body {
 .settings-safari-warning {
   margin: 0;
   padding: 10px 12px;
-  border-radius: 10px;
+  border-radius: 18px;
+  corner-shape: squircle;
   background: rgba(245, 158, 11, 0.12);
   border: 1px solid rgba(245, 158, 11, 0.4);
   color: light-dark(#92400e, #fcd34d);
@@ -2927,13 +2948,15 @@ body {
 
 .js-iframe-container > div::before {
   inset: -2px;
-  border-radius: 6px;
+  border-radius: 14px;
+  corner-shape: squircle;
   background: linear-gradient(135deg, #38bdf8, #6366f1, #a855f7, #ec4899);
 }
 
 .js-iframe-container > div::after {
   inset: -2px;
-  border-radius: 6px;
+  border-radius: 14px;
+  corner-shape: squircle;
   box-shadow: 0 0 40px 2px light-dark(rgba(99, 102, 241, 0.3), rgba(99, 102, 241, 0.45));
 }
 
