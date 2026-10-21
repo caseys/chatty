@@ -141,3 +141,48 @@ describe('value checks on browser calls', () => {
     win.close();
   });
 });
+
+describe('console.log and the speech check', () => {
+  const said = (posted: any[]) => posted.filter((m) => m.type === 'speak').map((m) => m.text);
+  const failed = (posted: any[]) => posted.find((m) => m.type === 'program_error' || (m.type === 'result' && m.error));
+
+  it('speaks console.log only for a program that has no speak() of its own', async () => {
+    const quiet = loadRunner(false);
+    quiet.win.postMessage({ type: 'execute', id: 'l1', code: 'console.log("Total: 12");' }, '*');
+    await wait(30);
+    expect(said(quiet.posted)).toEqual(['Total: 12']);
+    quiet.win.close();
+    const talker = loadRunner(false);
+    talker.win.postMessage({ type: 'execute', id: 'l2', code: 'speak("Here it is.");\nconsole.log("debug", 3);' }, '*');
+    await wait(30);
+    expect(said(talker.posted)).toEqual(['Here it is.']);
+    talker.win.close();
+  });
+
+  it('does not read out a log in a loop over and over', async () => {
+    const { win, posted } = loadRunner(false);
+    win.postMessage({ type: 'execute', id: 'l3', code: 'for (let i = 0; i < 20; i++) console.log("hit");\nfor (let i = 0; i < 20; i++) console.log("frame " + i);' }, '*');
+    await wait(30);
+    expect(said(posted)).toEqual(['hit', 'frame 0', 'frame 1']);
+    win.close();
+  });
+
+  it('leaves NaN and Infinity alone when they are what was asked about', async () => {
+    const asked = loadRunner(false);
+    asked.win.postMessage({ type: 'execute', id: 'n1', code: 'speak(`0 / 0 is ${0 / 0}`);', valuesExpected: true }, '*');
+    await wait(30);
+    expect(failed(asked.posted)).toBeUndefined();
+    asked.win.close();
+    const own = loadRunner(false);
+    own.win.postMessage({ type: 'execute', id: 'n2', code: 'const note = "Dividing by zero gives Infinity";\nspeak("1 / 0 = " + 1 / 0);' }, '*');
+    await wait(30);
+    expect(failed(own.posted)).toBeUndefined();
+    own.win.close();
+    // Not asked about: still a bug
+    const bug = loadRunner(false);
+    bug.win.postMessage({ type: 'execute', id: 'n3', code: 'let total;\nspeak("Your total is " + total);' }, '*');
+    await wait(30);
+    expect(failed(bug.posted)).toBeDefined();
+    bug.win.close();
+  });
+});

@@ -70,6 +70,8 @@ export type RunLogKind = 'program' | 'speak' | 'clear' | 'imagined' | 'console' 
 
 export interface ExecutionContextOptions {
   onSpeak?: (text: string) => void;
+  /** What the user asked for (the sandbox's speech check leaves NaN, Infinity and undefined alone when they are what was asked about) */
+  request?: string;
   audioContextAccessor?: () => Promise<AudioContext | null> | AudioContext | null;
   rootElement?: HTMLElement | null;
 }
@@ -232,6 +234,9 @@ const trialHost = (token: string) => `(() => {
   };
 })()`;
 
+/** A request about NaN, Infinity or undefined, or dividing by zero: those are its answer, not a bug */
+const VALUES_ASKED_ABOUT = /\b(?:NaN|infinity|infinite|undefined|divid\w* by (?:zero|0))\b|\/\s*0\b/i;
+
 /** How long a program runs without an error before it can be downloaded */
 const DOWNLOAD_AFTER_MS = 2500;
 
@@ -251,7 +256,23 @@ function parsesAsJs(code: string): boolean {
 
 /** An ```html block as code: its markup goes on screen, then its inline scripts run. */
 function htmlToCode(html: string): string {
-  const scripts = Array.from(html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi), (m) => m[1]);
+  // Each <script> in order: inline code runs as is, one with a src is loaded first (awaited, so
+  // the code after it finds what it defines: Chart, d3, Tone), and one that isn't JavaScript
+  // (a shader, JSON, a template) stays in the markup for the code to read
+  const scripts: string[] = [];
+  const kept: string[] = [];
+  for (const m of html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/gi)) {
+    const attrs = m[1];
+    const type = /\btype\s*=\s*["']?([^"'\s>]+)/i.exec(attrs)?.[1].toLowerCase() ?? '';
+    if (type && !/^(?:module|text\/javascript|application\/javascript|text\/ecmascript|application\/ecmascript)$/.test(type)) {
+      kept.push(m[0]);
+      continue;
+    }
+    const src = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1];
+    // three.js comes with Chatty (see withThree): no need to fetch it
+    if (src && !/\bthree(?:\.module)?(?:\.min)?\.js\b/i.test(src)) scripts.push(loadScriptCode(src));
+    if (m[2].trim()) scripts.push(m[2]);
+  }
   // JavaScript lines written outside the <script> (small models put a speak() after it) run too,
   // instead of showing on screen as text
   const strayCode: string[] = [];
@@ -266,11 +287,18 @@ function htmlToCode(html: string): string {
     })
     .join('\n')
     .trim();
+  const page = [markup, ...kept].filter(Boolean).join('\n');
   return [
-    markup ? `document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(markup)});` : '',
+    page ? `document.body.insertAdjacentHTML("beforeend", ${JSON.stringify(page)});` : '',
     ...scripts,
     ...strayCode,
   ].join('\n');
+}
+
+/** Code that loads a page's <script src>, and waits for it (a script that can't load says which) */
+function loadScriptCode(src: string): string {
+  const url = JSON.stringify(src);
+  return `await new Promise((resolve, reject) => { const script = document.createElement("script"); script.src = ${url}; script.onload = resolve; script.onerror = () => reject(new Error("The script " + ${url} + " couldn't load")); document.head.appendChild(script); });`;
 }
 
 /**
@@ -1882,17 +1910,37 @@ export class JavascriptRuntime {
     let currentExecId = null;
     const pendingAsyncCalls = new Map();
 
+    // The speech check follows the value checks' window (CHECK_MS), and is off when NaN,
+    // Infinity or undefined is the program's subject (see the execute handler)
+    let speakChecked = true;
     window.speak = (text) => {
       const s = typeof text === 'object' ? JSON.stringify(text) : String(text ?? '');
-      if (typeof noteRejected === 'function' && badValue(s)) noteRejected('speak(' + shown(s.slice(0, 60)) + ') says ' + (s.match(/NaN|undefined|Infinity/) || [''])[0] + ': almost surely a bug');
+      if (speakChecked && typeof noteRejected === 'function' && badValue(s)) noteRejected('speak(' + shown(s.slice(0, 60)) + ') says ' + (s.match(/NaN|undefined|Infinity/) || [''])[0] + ': almost surely a bug');
       __chattyHost.postMessage({ type: 'speak', id: currentExecId, text: s }, '*');
     };
 
-    // alert() and console.log() are the browser's ways to tell the user something: both are
-    // speak() here (alert() is blocked in the sandbox anyway, which has no modals)
+    // alert() and console.log() are the browser's ways to tell the user something: alert() is
+    // speak() here (it is blocked in the sandbox anyway, which has no modals), and so is
+    // console.log() for a program with no speak() of its own (its only way to tell the user). A
+    // program that speaks logs for itself: to the run log only. And a log in a loop isn't read out
+    // over and over: the same text again within 2 seconds, or a fourth in one second, stays in the log
     window.alert = (message) => window.speak(message === undefined ? '' : message);
     const logText = (args) => args.map((a) => (typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a))).join(' ');
-    console.log = (...args) => window.speak(logText(args));
+    let logSpeaks = true;
+    let lastLog = '';
+    let lastLogAt = 0;
+    let logTimes = [];
+    console.log = (...args) => {
+      if (!logSpeaks) return;
+      const text = logText(args);
+      const now = performance.now();
+      logTimes = logTimes.filter((t) => now - t < 1000);
+      if ((text === lastLog && now - lastLogAt < 2000) || logTimes.length >= 3) return;
+      lastLog = text;
+      lastLogAt = now;
+      logTimes.push(now);
+      window.speak(text);
+    };
 
     window.playNotes = (notes, tempo) => {
       return new Promise((resolve) => {
@@ -2002,9 +2050,21 @@ export class JavascriptRuntime {
     // During the trial's smoke pass the sample input ('test', an empty display) can make a correct
     // program show NaN: only thrown errors count then
     let smoking = false;
+    // A library the page loaded (<script src>: Chart.js, d3) calls the browser its own way, which
+    // can look like a bug (Chart.js measures undefined text): only the program's own calls count.
+    // The caller is the first frame outside this page's own code (about:srcdoc, or wherever the
+    // page itself is)
+    const pageAddress = String(location.href).split('#')[0];
+    function fromLibrary(err) {
+      const frames = String((err && err.stack) || '').split('\\n').filter((f) => /:\\d+:\\d+\\)?\\s*$/.test(f) && !f.includes(pageAddress));
+      const first = frames[0] || '';
+      return !/chatty-program\\.js/.test(first) && /https?:\\/\\//.test(first);
+    }
     function noteRejected(message) {
       if (rejected || rejectedReported || smoking) return;
-      const line = errorLine(new Error(), true);
+      const err = new Error();
+      if (fromLibrary(err)) return;
+      const line = errorLine(err, true);
       if (runningProgram) {
         rejected = { message, line };
       } else {
@@ -2626,10 +2686,15 @@ export class JavascriptRuntime {
       if (data.type !== 'execute') return;
       const { id, code } = data;
       currentExecId = id;
+      // console.log() speaks only for a program that doesn't speak itself (see logSpeaks)
+      logSpeaks = !/\\bspeak\\s*\\(/.test(code);
+      lastLog = '';
+      logTimes = [];
       // The value checks run for this program's first seconds (see CHECK_MS)
       checking = true;
+      speakChecked = !data.valuesExpected && !/(['"\`])[^'"\`\\n]*\\b(?:NaN|Infinity)\\b/.test(code);
       realClearTimeout(checkTimer);
-      if (!__chattyTrial) checkTimer = realSetTimeout(() => { checking = false; }, CHECK_MS);
+      if (!__chattyTrial) checkTimer = realSetTimeout(() => { checking = false; speakChecked = false; }, CHECK_MS);
       // What kind of element each looked-up id is used as (element-kinds.ts)
       idKinds = data.idKinds || {};
       // The names the music rule tells programs to declare (bpm, beat, start, out): a program
@@ -3078,7 +3143,7 @@ export class JavascriptRuntime {
       this.pendingRuns.set(reqId, { options, spokenTexts, timer, finish: settle });
       this.trackDownload(code);
       void withThree(code, iframe.contentWindow).then(() =>
-        iframe.contentWindow?.postMessage({ type: 'execute', id: reqId, code, idKinds: elementKinds(code) }, '*')
+        iframe.contentWindow?.postMessage({ type: 'execute', id: reqId, code, idKinds: elementKinds(code), valuesExpected: VALUES_ASKED_ABOUT.test(options?.request ?? '') }, '*')
       );
     });
   }

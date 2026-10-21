@@ -284,6 +284,10 @@ function codeView(text: string): string {
 /** Requests to make or do something: a reply that only talks hasn't done it */
 const ACTION_REQUEST =
   /\b(?:play|draw|make|build|create|animate|code|program|design|generate|paint|sketch|render|chart|plot|graph|count ?down|timer|stopwatch|calculator|converter|simulate|game|app)\b/i;
+/** A program that waits for the user: handlers for the events a key, a tap, a click or an input fires */
+const LISTENS_FOR_USER =
+  /\baddEventListener\s*\(\s*['"`](?:click|dblclick|mousedown|mouseup|pointerdown|pointerup|touchstart|touchend|keydown|keyup|keypress|input|change|submit)['"`]|\bon(?:click|dblclick|mousedown|mouseup|pointerdown|pointerup|touchstart|touchend|keydown|keyup|keypress|input|change|submit)\s*=/i;
+
 /**
  * What the outcome check is for: a request to make or show something, not a question or a phrase
  * that names one ("who won the game", "speed of sound", "nearest star"), which a spoken answer
@@ -1418,9 +1422,11 @@ export class ConversationOrchestrator {
             executableCode = renameMembers(executableCode, slips.map((issue) => ({ object: issue.object, from: issue.member, to: issue.slip! })));
             for (const issue of slips) appendRunLog('imagined', `${issue.object}.${issue.member} → ${issue.object}.${issue.slip}: corrected before running`);
           }
-          const notThere: Array<{ line: number; error: string }> = unknown
+          // (soft: a member this browser lacks may be one a newer browser has, ctx.filter on
+          // Safari: on a run that works it is noted, not made the error)
+          const notThere: Array<{ line: number; error: string; soft?: boolean }> = unknown
             .filter((issue) => !issue.slip)
-            .map((issue) => ({ line: issue.line, error: unknownMemberError(issue) }));
+            .map((issue) => ({ line: issue.line, error: unknownMemberError(issue), soft: true }));
           if (!inspected.isProse) {
             // Writes to read-only properties and invalid style values (property-check.ts): a sure
             // answer is corrected, the rest reported after the run
@@ -1574,6 +1580,7 @@ export class ConversationOrchestrator {
               silent: this.javascriptRuntime.soundSilentCount?.() ?? 0,
             };
             const execResult = await this.javascriptRuntime.execute(executableCode, undefined, {
+              request: codeTask,
               onSpeak: (phrase) => {
                 if (saidBefore(phrase)) return;
                 // The same sentence twice in one run (said before and inside its code) is said once
@@ -1602,11 +1609,14 @@ export class ConversationOrchestrator {
             if (execResult.error && execResult.errorLine === undefined) {
               execResult.errorLine = await syntaxErrorLine(executableCode);
             }
-            // It ran, but uses a member its object doesn't have: that is its error (it did nothing)
-            if (!execResult.error && notThere.length > 0) {
-              execResult.error = notThere[0].error;
-              execResult.errorLine = notThere[0].line;
-              appendRunLog('error', `line ${notThere[0].line}: ${execResult.error}`);
+            // It ran, but wrote what its object can't take (a read-only property, a style value
+            // the browser rejects): that is its error (it did nothing)
+            const hardNotThere = notThere.filter((issue) => !issue.soft);
+            const softNotThere = notThere.filter((issue) => issue.soft);
+            if (!execResult.error && hardNotThere.length > 0) {
+              execResult.error = hardNotThere[0].error;
+              execResult.errorLine = hardNotThere[0].line;
+              appendRunLog('error', `line ${hardNotThere[0].line}: ${execResult.error}`);
             }
             // It ran, but did nothing the request asked for: no sound at all for a sound request,
             // nothing on screen for a drawing or an app. What the sandbox saw, not a guess from the
@@ -1620,10 +1630,18 @@ export class ConversationOrchestrator {
             const asksUser = isTalkOnly(executableCode) && /\?\s*["'`]\s*\)/.test(executableCode);
             if (asksUser) appendRunLog('retry', 'the reply asks the user a question: waiting for the answer');
             if (!execResult.error && !asksUser) {
-              const missing = await this.missingOutcome(codeTask, soundMark);
-              if (missing) {
+              const missing = await this.missingOutcome(codeTask, soundMark, executableCode);
+              // A member its object doesn't have, in a program that did nothing asked for: the
+              // likely reason, and the error to fix. In one that did, only a note
+              if (missing && softNotThere.length > 0) {
+                execResult.error = softNotThere[0].error;
+                execResult.errorLine = softNotThere[0].line;
+                appendRunLog('error', `line ${softNotThere[0].line}: ${execResult.error}`);
+              } else if (missing) {
                 execResult.error = missing;
                 appendRunLog('error', missing);
+              } else {
+                for (const issue of softNotThere) appendRunLog('retry', `line ${issue.line}: ${issue.error} (the program worked: left as it is)`);
               }
             }
             // Failed here, after the sandbox saw no error: nothing to download
@@ -2159,14 +2177,18 @@ export class ConversationOrchestrator {
    * next attempt. Stops at once when the user starts a new turn.
    */
   /** What a sound or visual request's program never did, after a short wait, or null */
-  private async missingOutcome(request: string, soundMark: { uses: number; heard: number; silent: number }): Promise<string | null> {
+  private async missingOutcome(request: string, soundMark: { uses: number; heard: number; silent: number }, code = ''): Promise<string | null> {
     if (!asksForOutcome(request)) return null;
+    // Sound that waits for the user (an instrument played by keys or taps, a Play button) can't be
+    // heard before they press something: it isn't missing yet
+    const soundWaits = LISTENS_FOR_USER.test(code);
     // A request that names something to see as well still gets its visual check; a bare "play"
     // (a game, a video) is not a sound on its own then
     const namesVisual = VISUAL_THING.test(request);
     // (a runtime that can't tell, as in tests, is taken at its word)
     // A bare "play" (a game, a video) chooses the sound rule but asks for no sound by itself
-    const wantsSound = SOUND_WORDS_REQUEST.test(request) && !!this.javascriptRuntime.soundUseCount;
+    const wantsSound = SOUND_WORDS_REQUEST.test(request) && !!this.javascriptRuntime.soundUseCount && !soundWaits;
+    if (soundWaits && SOUND_WORDS_REQUEST.test(request)) appendRunLog('retry', 'outcome check: the sound waits for the user (a key, a tap, a button): not checked');
     const wantsVisual = namesVisual && !!this.javascriptRuntime.hasVisualContent;
     if (!wantsSound && !wantsVisual) return null;
     // Sound asked for, then measured at the speakers (two seconds): heard, or silent with the audio

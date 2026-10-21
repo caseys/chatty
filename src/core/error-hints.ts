@@ -1015,6 +1015,13 @@ export function fixKeySlips(code: string): { code: string; fixed: Array<{ object
         ((parent?.type === 'VariableDeclarator' && key === 'id') || key === 'params' || (/Function/.test(parent?.type ?? '') && key === 'id'))
     );
     if (bindings.length !== 1) continue;
+    // Its own methods add to it (init() { this.balls = […] }): its keys aren't all in the literal
+    let addsToItself = false;
+    walk(decl.init, (node) => {
+      const target = node.type === 'AssignmentExpression' ? (node.left as AnyNode) : node.type === 'UpdateExpression' ? (node.argument as AnyNode) : null;
+      if (target?.type === 'MemberExpression' && (target.object as AnyNode).type === 'ThisExpression') addsToItself = true;
+    });
+    if (addsToItself) continue;
     const reads: Array<{ member: any; wanted: string }> = []; // eslint-disable-line @typescript-eslint/no-explicit-any
     let safe = true;
     for (const { node, parent, key } of nodes) {
@@ -1061,22 +1068,48 @@ export function fixKeySlips(code: string): { code: string; fixed: Array<{ object
  * motion goes on.
  */
 export function loopOneFrameAnimations(code: string): { code: string; looped: string[]; atLines: number[] } {
-  const ast = tryParse(code);
-  if (!ast) return { code, looped: [], atLines: [] };
+  const tree = analyse(code);
+  if (!tree) return { code, looped: [], atLines: [] };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const functions = new Map<string, any>();
-  walk(ast, (node) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const n = node as any;
-    if (n.type === 'FunctionDeclaration' && n.id) functions.set(n.id.name, n);
-    if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && /^(?:Arrow)?FunctionExpression$/.test(n.init?.type ?? '') && n.init.body.type === 'BlockStatement') functions.set(n.id.name, n.init);
-  });
+  for (const n of tree.nodes as AnyNode[]) {
+    if (n.type === 'FunctionDeclaration' && n.id) functions.set((n.id as AnyNode).name as string, n);
+    if (n.type === 'VariableDeclarator' && (n.id as AnyNode).type === 'Identifier' && /^(?:Arrow)?FunctionExpression$/.test((n.init as AnyNode | null)?.type ?? '') && ((n.init as AnyNode).body as AnyNode).type === 'BlockStatement') functions.set((n.id as AnyNode).name as string, n.init);
+  }
+  // requestAnimationFrame, setTimeout, setInterval, called bare or on window (window.requestAnimationFrame)
+  const calledName = (callee: AnyNode): string | null =>
+    callee.type === 'Identifier' ? (callee.name as string) : callee.type === 'MemberExpression' && !callee.computed ? (((callee.property as AnyNode).name as string) ?? null) : null;
+  const SCHEDULERS = /^(?:requestAnimationFrame|setTimeout|setInterval)$/;
+  // A function a handler runs (a click, a key: a Step button asking for one frame per press)
+  const inHandler = (node: AnyNode): boolean => {
+    for (let at = tree.parent.get(node); at; at = tree.parent.get(at)) {
+      if (!/Function/.test(at.type)) continue;
+      const up = tree.parent.get(at);
+      if (up?.type === 'CallExpression' && calledName(up.callee as AnyNode) === 'addEventListener' && (up.arguments as AnyNode[]).includes(at)) return true;
+      if (up?.type === 'AssignmentExpression' && up.right === at && (up.left as AnyNode).type === 'MemberExpression' && /^on[a-z]+$/.test(String(((up.left as AnyNode).property as AnyNode)?.name ?? ''))) return true;
+    }
+    return false;
+  };
   const requested = new Set<string>();
-  walk(ast, (node) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const n = node as any;
-    if (n.type === 'CallExpression' && n.callee.type === 'Identifier' && n.callee.name === 'requestAnimationFrame' && n.arguments[0]?.type === 'Identifier') requested.add(n.arguments[0].name);
-  });
+  for (const n of tree.nodes as AnyNode[]) {
+    if (n.type === 'CallExpression' && calledName(n.callee as AnyNode) === 'requestAnimationFrame' && (n.arguments as AnyNode[])[0]?.type === 'Identifier' && !inHandler(n)) {
+      requested.add((n.arguments as AnyNode[])[0].name as string);
+    }
+  }
+  /** Whether a function asks for its next step itself, or through a function it calls (scheduleNext()) */
+  const scheduling = (fn: AnyNode, seen = new Set<AnyNode>()): boolean => {
+    if (seen.has(fn)) return false;
+    seen.add(fn);
+    let found = false;
+    walk(fn.body as AnyNode, (node) => {
+      if (found || node.type !== 'CallExpression') return;
+      const name = calledName(node.callee as AnyNode);
+      if (!name) return;
+      if (SCHEDULERS.test(name)) found = true;
+      else if ((node.callee as AnyNode).type === 'Identifier' && functions.has(name) && scheduling(functions.get(name), seen)) found = true;
+    });
+    return found;
+  };
   const edits: Array<{ at: number; text: string; name: string }> = [];
   for (const name of requested) {
     const fn = functions.get(name);
@@ -1094,8 +1127,8 @@ export function loopOneFrameAnimations(code: string): { code: string; looped: st
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
       if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier') own.add(n.id.name);
-      if (n.type === 'CallExpression' && n.callee.type === 'Identifier' && /^(?:requestAnimationFrame|setTimeout|setInterval)$/.test(n.callee.name)) schedules = true;
     });
+    if (scheduling(fn)) schedules = true;
     walk(fn.body, (node) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const n = node as any;
@@ -1179,16 +1212,26 @@ export function fixAudioNodeProperties(code: string): { code: string; fixed: str
     const n = node as any;
     if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && isNewAudioContext(n.init)) contexts.add(n.id.name);
   });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const onContext = (n: any) => n.type === 'MemberExpression' && !n.computed && (isNewAudioContext(n.object) || (n.object.type === 'Identifier' && contexts.has(n.object.name)));
+  // A property the program sets on the context itself (ctx.analyser = ctx.createAnalyser()) is
+  // its own: every read of it is that node, not a new one
+  const assigned = new Set<string>();
+  walk(ast, (node) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    if (n.type === 'AssignmentExpression' && onContext(n.left)) assigned.add(n.left.property.name);
+  });
   const edits: Array<{ start: number; end: number; text: string }> = [];
   const fixed: string[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const visit = (n: any, parent: any, key: string) => {
     if (!n || typeof n.type !== 'string') return;
-    if (n.type === 'MemberExpression' && !n.computed && (isNewAudioContext(n.object) || (n.object.type === 'Identifier' && contexts.has(n.object.name)))) {
+    if (onContext(n)) {
       const prop: string = n.property.name;
       const maker = `create${prop[0].toUpperCase()}${prop.slice(1)}`;
       const written = parent?.type === 'AssignmentExpression' && key === 'left';
-      if (!written && !(proto && prop in proto) && makers.includes(maker)) {
+      if (!written && !assigned.has(prop) && !(proto && prop in proto) && makers.includes(maker)) {
         const called = parent?.type === 'CallExpression' && key === 'callee';
         edits.push({ start: n.property.start, end: n.property.end, text: called ? maker : `${maker}()` });
         fixed.push(`${prop} → ${maker}()`);

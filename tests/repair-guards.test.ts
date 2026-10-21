@@ -367,6 +367,16 @@ describe('an animation that runs one frame', async () => {
     expect(loopOneFrameAnimations('let x = 0;\nfunction tick() {\n  x += 1;\n  requestAnimationFrame(tick);\n}\nrequestAnimationFrame(tick);').looped).toEqual([]);
     expect(loopOneFrameAnimations('function paint() {\n  const y = 2;\n  ctx.fillRect(0, y, 5, 5);\n}\nrequestAnimationFrame(paint);').looped).toEqual([]);
   });
+  it('sees a loop that asks through window, under a pause check, or through a helper', () => {
+    const paused = 'let paused = false, x = 0;\nfunction loop() { x += 2; draw(); if (!paused) window.requestAnimationFrame(loop); }\nrequestAnimationFrame(loop);';
+    expect(loopOneFrameAnimations(paused).looped).toEqual([]);
+    const helper = 'let x = 0;\nfunction next() { requestAnimationFrame(loop); }\nfunction loop() { x += 1; draw(); next(); }\nrequestAnimationFrame(loop);';
+    expect(loopOneFrameAnimations(helper).looped).toEqual([]);
+  });
+  it('leaves a frame a button asks for (a Step button)', () => {
+    expect(loopOneFrameAnimations('let generation = 0;\nfunction step() { generation++; draw(); }\nbtn.onclick = () => requestAnimationFrame(step);').looped).toEqual([]);
+    expect(loopOneFrameAnimations("let n = 0;\nfunction step() { n++; }\nbtn.addEventListener('click', () => requestAnimationFrame(step));").looped).toEqual([]);
+  });
 });
 
 describe('from the beach sunset log', async () => {
@@ -413,5 +423,23 @@ describe('from the blues loop log', async () => {
     const choices = blankChoices(code, blank, { ids: [] });
     expect(choices).not.toContain('midi');
     expect(choices).toContain('level');
+  });
+});
+
+describe('repairs that leave capable code alone', async () => {
+  const { fixKeySlips, fixAudioNodeProperties } = await import('../src/core/error-hints.ts');
+  it('does not rename a key an object adds to itself in its own methods', () => {
+    expect(fixKeySlips('const game = { ball: { x: 0 }, init() { this.balls = []; } };\ngame.init();\nspeak(String(game.balls.length));').fixed).toEqual([]);
+    expect(fixKeySlips('const sounds = { drums: 1 };\nspeak(String(sounds.drum));').fixed).toEqual([{ object: 'sounds', from: 'drum', to: 'drums' }]);
+  });
+  it('does not replace an audio node the program keeps on its context', () => {
+    const had = (globalThis as { AudioContext?: unknown }).AudioContext;
+    (globalThis as { AudioContext?: unknown }).AudioContext = class { createAnalyser() {} createGain() {} };
+    try {
+      expect(fixAudioNodeProperties('const ctx = new AudioContext();\nctx.analyser = ctx.createAnalyser();\nconst a = ctx.analyser;').fixed).toEqual([]);
+      expect(fixAudioNodeProperties('const ctx = new AudioContext();\nconst g = ctx.gain;').fixed).toEqual(['gain → createGain()']);
+    } finally {
+      (globalThis as { AudioContext?: unknown }).AudioContext = had;
+    }
   });
 });

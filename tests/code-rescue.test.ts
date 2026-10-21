@@ -28,6 +28,25 @@ describe('running code the model wrapped or forgot to call', () => {
     expect(out.code).toContain('ctx.fillRect(0, 0, 10, 10);');
   });
 
+  it('loads a page\'s <script src> first, in order, and keeps a shader or JSON block as markup', () => {
+    const out = inspectExecutableCode(
+      '```html\n<canvas id="c"></canvas>\n<script type="x-shader/x-vertex" id="vs">void main() { gl_Position = vec4(0.0); }</script>\n<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>\n<script>new Chart(document.getElementById("c"), {});</script>\n```'
+    );
+    const load = out.code.indexOf('script.src = "https://cdn.jsdelivr.net/npm/chart.js@4.4.1"');
+    expect(load).toBeGreaterThan(-1);
+    expect(out.code.indexOf('await new Promise')).toBeLessThan(out.code.indexOf('new Chart('));
+    expect(out.code.indexOf('new Chart(')).toBeGreaterThan(load);
+    // The shader stays on the page, for the code to read (and isn't run as JavaScript)
+    expect(out.code).toContain('<script type=\\"x-shader/x-vertex\\" id=\\"vs\\">void main()');
+    expect(out.code).not.toMatch(/^void main/m);
+  });
+
+  it('does not fetch three.js, which comes with Chatty', () => {
+    const out = inspectExecutableCode('```html\n<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>\n<script>const scene = new THREE.Scene();</script>\n```');
+    expect(out.code).not.toContain('script.src');
+    expect(out.code).toContain('new THREE.Scene()');
+  });
+
   it('runs a speak() written after the closing </script> instead of showing it', () => {
     const out = inspectExecutableCode('<canvas id="c"></canvas>\n<script>\nconst a = 1;\n</script>\n\nspeak("Here it is.");');
     expect(out.code).toBe('document.body.insertAdjacentHTML("beforeend", "<canvas id=\\"c\\"></canvas>");\n\nconst a = 1;\n\nspeak("Here it is.");');

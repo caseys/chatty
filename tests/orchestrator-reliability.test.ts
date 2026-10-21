@@ -6,8 +6,8 @@ import { StateMachineCoordinator } from '../src/core/state-machine.ts';
 import { pastProgramResult } from '../src/core/history-format.ts';
 import type { ConversationMessage } from '../src/types/index.ts';
 
-const outcome = (request: string, runtime: object) =>
-  (ConversationOrchestrator.prototype as any).missingOutcome.call({ javascriptRuntime: runtime }, request, { uses: 0, heard: 0, silent: 0 }) as Promise<string | null>;
+const outcome = (request: string, runtime: object, code = '') =>
+  (ConversationOrchestrator.prototype as any).missingOutcome.call({ javascriptRuntime: runtime }, request, { uses: 0, heard: 0, silent: 0 }, code) as Promise<string | null>;
 const nothing = { soundUseCount: () => 0, hasVisualContent: () => false };
 const sees = { soundUseCount: () => 0, hasVisualContent: () => true };
 
@@ -37,6 +37,16 @@ describe('the outcome check', () => {
   it('still fires for a request asked politely, or one with numbers in it', async () => {
     expect(await outcome('Can you draw a cat?', nothing)).toContain('showed nothing');
     expect(await outcome('Draw a 3x3 grid', nothing)).toContain('showed nothing');
+  });
+
+  it('does not count sound that waits for the user as missing (an instrument, a Play button)', async () => {
+    const silentInstrument = { soundUseCount: () => 1, hasVisualContent: () => true, soundHeardCount: () => 0, soundSilentCount: () => 1 };
+    const piano = "const ac = new AudioContext();\ndocument.addEventListener('keydown', (e) => { const o = ac.createOscillator(); o.connect(ac.destination); o.start(); });";
+    expect(await outcome('Make a piano I can play with my keyboard', silentInstrument, piano)).toBeNull();
+    const lazy = "let ac;\nbutton.onclick = () => { if (!ac) ac = new AudioContext(); };";
+    expect(await outcome('Make a drum machine', { soundUseCount: () => 0, hasVisualContent: () => true }, lazy)).toBeNull();
+    // Without anything to press, silence is still missing sound
+    expect(await outcome('Play a G major chord', silentInstrument, 'const ac = new AudioContext();')).toContain('never reached the speakers');
   });
 
   it('takes "a minor" for music only in a musical phrase', () => {
