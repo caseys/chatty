@@ -768,7 +768,7 @@ describe('more than one fix attempt', () => {
     const orchestrator = orchestratorFor(llm, {
       autoFixErrors: true,
       javascriptRuntime: runtime,
-      events: { onMessageCreated: (m) => m.fixNotice && notices.push(m.fixNotice) },
+      events: { onMessageCreated: (m) => m.fixNotice && m.fixNotice !== 'Generating…' && notices.push(m.fixNotice) },
     });
     await orchestrator.submitUserInput('Draw it');
     await vi.waitFor(() => expect(executed.length).toBe(6), { timeout: 20000 });
@@ -851,7 +851,7 @@ describe('a fix reply that is unusable starts the next try at once', () => {
     const orchestrator = orchestratorFor(llm, {
       autoFixErrors: true,
       javascriptRuntime: runtime,
-      events: { onMessageCreated: (m) => void (m.fixNotice && notices.push(m.fixNotice)) },
+      events: { onMessageCreated: (m) => void (m.fixNotice && m.fixNotice !== 'Generating…' && notices.push(m.fixNotice)) },
     });
     await orchestrator.submitUserInput('Draw it');
     await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
@@ -959,7 +959,7 @@ describe('the order of a request\'s fix questions', () => {
     const orchestrator = orchestratorFor(llm, {
       autoFixErrors: true,
       javascriptRuntime: runtime,
-      events: { onMessageCreated: (m) => void (m.fixNotice && notices.push(m.fixNotice)) },
+      events: { onMessageCreated: (m) => void (m.fixNotice && m.fixNotice !== 'Generating…' && notices.push(m.fixNotice)) },
     });
     await orchestrator.submitUserInput('Draw it');
     await vi.waitFor(() => expect(executed.length).toBe(6), { timeout: 20000 });
@@ -1050,7 +1050,7 @@ describe('the blank stage', () => {
     const orchestrator = orchestratorFor(llm, {
       autoFixErrors: true,
       javascriptRuntime: runtime,
-      events: { onMessageCreated: (m) => m.fixNotice && notices.push(m.fixNotice) },
+      events: { onMessageCreated: (m) => m.fixNotice && m.fixNotice !== 'Generating…' && notices.push(m.fixNotice) },
     });
     await orchestrator.submitUserInput('Add up my cart');
     await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
@@ -1135,7 +1135,7 @@ describe('the blank stage', () => {
     const orchestrator = orchestratorFor(llm, {
       autoFixErrors: true,
       javascriptRuntime: runtime,
-      events: { onMessageCreated: (m) => m.fixNotice && notices.push(m.fixNotice) },
+      events: { onMessageCreated: (m) => m.fixNotice && m.fixNotice !== 'Generating…' && notices.push(m.fixNotice) },
     });
     await orchestrator.submitUserInput('Show the score count');
     await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 15000 });
@@ -1199,7 +1199,7 @@ describe('the blank stage', () => {
     const orchestrator = orchestratorFor(llm, {
       autoFixErrors: true,
       javascriptRuntime: runtime,
-      events: { onMessageCreated: (m) => m.fixNotice && notices.push(m.fixNotice) },
+      events: { onMessageCreated: (m) => m.fixNotice && m.fixNotice !== 'Generating…' && notices.push(m.fixNotice) },
     });
     await orchestrator.submitUserInput('Add up my cart');
     await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 10000 });
@@ -1417,4 +1417,19 @@ describe('a fix reply of only comments', () => {
     await new Promise((r) => setTimeout(r, 1500));
     expect(executed.some((code) => /^\s*\/\/ Solution/.test(code))).toBe(false);
   }, 20000);
+});
+
+describe('notes on a run', () => {
+  it('says Generating… once when a reply turns out to be a program, and Generation complete. when it says nothing', async () => {
+    const llm = new QueueLlm(['const c = document.createElement("canvas");\ndocument.body.appendChild(c);']);
+    const { runtime } = fakeRuntime([{ hasVisualOutput: true }]);
+    const notes: string[] = [];
+    const orchestrator = orchestratorFor(llm, { javascriptRuntime: runtime, events: { onMessageCreated: (m) => void (m.fixNotice && notes.push(m.fixNotice)) } });
+    await orchestrator.submitUserInput('Draw a canvas');
+    await vi.waitFor(() => expect(orchestrator.scheduler.getActiveTurnId()).toBeNull());
+    expect(notes).toEqual(['Generating…']);
+    const reply = orchestrator.memoryStore.getMessages().filter((m) => m.role === 'assistant').at(-1)!;
+    expect(reply.canonicalContent).toBe('Generation complete.');
+    expect(reply.fromProgram).toBe(false);
+  });
 });

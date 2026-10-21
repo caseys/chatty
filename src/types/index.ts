@@ -176,7 +176,7 @@ export interface ConversationMessage {
   /**
    * Set on a reply whose chat text is what a running program said (speak(), console.log(), alert())
    * when the program did more than talk. `false` on such a reply whose text is Chatty's own
-   * fallback ("I've rendered that on your screen."). Left unset for the model's own chat replies.
+   * fallback ("Generation complete."). Left unset for the model's own chat replies.
    */
   fromProgram?: boolean;
   /** A fix turn's reply whose program worked: it stands for this turn's broken program in later prompts */

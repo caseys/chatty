@@ -917,6 +917,11 @@ export class MinimalVoiceApp {
   private addFixNotice(msg: ConversationMessage): void {
     if (this.bubbles.has(msg.id) || !msg.fixNotice) return;
     const note = this.createSystemNote(msg.fixNotice);
+    // Run notes (Generating…, Fixing …) are Output too
+    const source = document.createElement('div');
+    source.className = 'bubble-source';
+    source.textContent = 'Output';
+    note.prepend(source);
     this.chatLogEl?.appendChild(note);
     this.bubbles.set(msg.id, note);
     this.scrollChatToBottom();
@@ -945,7 +950,8 @@ export class MinimalVoiceApp {
   private renderAssistantMessage(msg: ConversationMessage): void {
     const bubble = this.bubbles.get(msg.id) ?? this.bubbleForTurn(msg.turnId);
     this.bubbles.set(msg.id, bubble);
-    this.renderAssistantOutput(bubble, msg.canonicalContent, msg.toolCall, false, msg.fromProgram);
+    // Anything a run produced (its words, or Chatty's note on it) is Output; the model's own chat isn't tagged
+    this.renderAssistantOutput(bubble, msg.canonicalContent, msg.toolCall, false, msg.fromProgram !== undefined);
   }
 
   /**

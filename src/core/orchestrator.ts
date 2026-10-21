@@ -1161,9 +1161,11 @@ export class ConversationOrchestrator {
             // shows there too while it comes (a slow fix would look stalled otherwise); the program
             // comes back if the fix isn't used
             this.events.onRawOutput?.(turnId, codeView(currentFull));
-            // In speech mode, a reply that turns out to be a program (more than talk) says so once
+            // A reply that turns out to be a program (more than talk) says so once: a note in the
+            // chat, and aloud in speech mode
             if (!announcedCoding && !options?.autoFix && (CODING_LINE.test(currentFull) || STREAM_MARKUP.test(currentFull))) {
               announcedCoding = true;
+              this.addFixNote('Generating…', turnId);
               void this.speakOutOfTurn('Generating.');
             }
 
@@ -1669,8 +1671,9 @@ export class ConversationOrchestrator {
               } else if (execResult.error && !this.autoFixErrors) {
                 // (When a fix follows, its reply is the answer)
                 spokenText = 'Something went wrong while running that.';
-              } else if (execResult.hasVisualOutput) {
-                spokenText = "I've rendered that on your screen.";
+              } else if (!execResult.error) {
+                // It ran and said nothing (no speak(), console.log() or closing comment)
+                spokenText = 'Generation complete.';
               }
 
               if (spokenText) {
