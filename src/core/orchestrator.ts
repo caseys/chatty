@@ -2079,12 +2079,13 @@ export class ConversationOrchestrator {
       const trial = await this.trial(probe);
       if (moved()) return;
       // 3: ran through the blank without an error; 2: an error further on; 1: another error, no
-      // longer about the blank, or no error but the blank never ran
+      // longer about the blank, or no error but the blank never ran. An error without a line (a
+      // value the page rejected) can't be placed after the blank: no progress
       const level = !trial.error
         ? trial.reached === false && probe !== filled
           ? 1
           : 3
-        : namesCandidate(trial.error, expr)
+        : namesCandidate(trial.error, expr) || trial.errorLine === undefined
           ? 0
           : trial.error !== error && trial.errorLine !== undefined && trial.errorLine > (run.errorLine ?? blank.line)
             ? 2

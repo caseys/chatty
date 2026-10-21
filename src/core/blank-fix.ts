@@ -452,6 +452,14 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
           const declaration = tree.parent.get(declarator);
           if (declaration?.type === 'VariableDeclaration' && declaration.kind !== 'var') continue;
         }
+        // A number (a loop counter, `let n = 0`) has no `.color`: where the blank's member isn't a
+        // Number method, a name that holds a number doesn't fit
+        if (member && !(member in Number.prototype) && declarator?.type === 'VariableDeclarator') {
+          const init = declarator.init;
+          const declaration = tree.parent.get(declarator);
+          const counter = declaration && tree.parent.get(declaration)?.type === 'ForStatement' && tree.key.get(declaration) === 'init';
+          if (counter || (init?.type === 'Literal' && typeof init.value === 'number')) continue;
+        }
         // Declared by a function or class declaration (its name), not one of its parameters
         const callable = (owner?.type === 'FunctionDeclaration' || owner?.type === 'ClassDeclaration') && owner.id === binding;
         if (callable !== (role === 'constructor' || role === 'callee')) continue;

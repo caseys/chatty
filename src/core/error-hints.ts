@@ -118,7 +118,9 @@ function caseSlip(missing: string, names: string[]): string | null {
 
 /** The one name a missing one is surely a slip of, or null */
 function slipOf(missing: string, names: string[]): string | null {
-  const unique = [...new Set(names)].filter((name) => name !== missing);
+  // A plural and its singular (balls, ball) are a list and one of its items, not a slip
+  const plural = (a: string, b: string) => a.toLowerCase() === `${b.toLowerCase()}s` || a.toLowerCase() === `${b.toLowerCase()}es`;
+  const unique = [...new Set(names)].filter((name) => name !== missing && !plural(missing, name) && !plural(name, missing));
   const sameCase = caseSlip(missing, unique);
   if (sameCase) return sameCase;
   if (missing.length < 4) return null;
