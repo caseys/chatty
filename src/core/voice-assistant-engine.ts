@@ -126,6 +126,25 @@ function writeLoadStage(label: string): void {
     // Storage unavailable
   }
 }
+/**
+ * The step of a WebLLM load its progress report is at, briefly, for the breadcrumb a crash leaves
+ * ("building shaders 40/80"), or null for a report that names no step. The last weight piece
+ * read means the weights are on the GPU and the model's working memory is being set aside next
+ * (WebLLM reports nothing between that and the shaders).
+ */
+export function loadStepText(report: string): string | null {
+  const count = (re: RegExp) => report.match(re)?.slice(1, 3).map(Number) ?? null;
+  const fetched = count(/Fetching param cache\[(\d+)\/(\d+)\]/);
+  if (fetched) return `downloading weights ${fetched[0]}/${fetched[1]}`;
+  const loaded = count(/Loading model from cache\[(\d+)\/(\d+)\]/);
+  if (loaded) return loaded[0] >= loaded[1] ? 'setting up working memory, after the weights' : `loading weights ${loaded[0]}/${loaded[1]}`;
+  const shaders = count(/Loading GPU shader modules\[(\d+)\/(\d+)\]/);
+  if (shaders) return `building shaders ${shaders[0]}/${shaders[1]}`;
+  if (/^Start to fetch params/i.test(report)) return 'starting on the weights';
+  if (/^Finish loading/i.test(report)) return 'finishing the load';
+  return null;
+}
+
 function takeLoadStage(): string | null {
   try {
     const stage = localStorage.getItem(LOAD_STAGE_KEY);
@@ -652,8 +671,18 @@ export class VoiceAssistantEngine {
         const modelName = this.getLlmDisplayName();
         writeLlmLoadMarker(this.chatModelId);
         if (!this.phoneModels) writeLoadStage(modelName);
+        // Each step of the load is written down as it starts, so a crash on the next visit says
+        // which one (see loadStepText)
+        let lastStep = '';
+        const noteStep = (step: string) => {
+          if (this.phoneModels || step === lastStep) return;
+          lastStep = step;
+          writeLoadStage(`${modelName} (${step})`);
+        };
         return provider
           .initialize((loaded, total, current?: { label: string; loaded: number; total: number }) => {
+            const step = loadStepText((provider as { loadStage?: string }).loadStage ?? '');
+            if (step) noteStep(step);
             const pct = total > 0 ? Math.min(100, Math.round((loaded * 100) / total)) : 0;
             const mb = (loaded / (1024 * 1024)).toFixed(0);
             const totalMb = (total / (1024 * 1024)).toFixed(0);
@@ -665,7 +694,9 @@ export class VoiceAssistantEngine {
             clearLlmLoadMarker();
             if (ticket !== this.llmLoadTicket) return;
             clearLoadFailure();
+            noteStep('warming up the model');
             return this.warmUpChat(provider).then(() => {
+              noteStep('getting the sandbox ready');
               if (ticket !== this.llmLoadTicket) return;
               this.stateCoordinator.setModelState('llm', 'ready');
               this.greetWithoutSpeech();
@@ -1603,13 +1634,17 @@ export class VoiceAssistantEngine {
 
   /** Builds the sandbox iframe while idle, so the first program doesn't build it right after a reply */
   private prepareSandboxWhenIdle(): void {
-    const run = () => {
-      try {
-        this.jsRuntime.prepare();
-      } catch (err) {
-        console.warn('Sandbox pre-build failed (ignored):', err);
-      }
-    };
+    // Recorded while its page loads, so a crash then is named on the next visit (the load's own
+    // breadcrumb is cleared by now)
+    const run = () =>
+      void withActivity('getting the sandbox ready', async () => {
+        try {
+          this.jsRuntime.prepare();
+        } catch (err) {
+          console.warn('Sandbox pre-build failed (ignored):', err);
+        }
+        await settle(1500);
+      });
     const ric = (globalThis as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
     if (typeof ric === 'function') ric(run, { timeout: 2000 });
     else setTimeout(run, AFTER_HEAVY_MS);

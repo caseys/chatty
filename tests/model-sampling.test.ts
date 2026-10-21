@@ -97,3 +97,17 @@ describe('one bar for a WebLLM load', async () => {
     expect(loadFraction('Start to fetch params', 0, false)).toBeNull();
   });
 });
+
+describe('the step a model load is at, for the crash breadcrumb', async () => {
+  const { loadStepText } = await import('../src/core/voice-assistant-engine.ts');
+  it('names each step of a WebLLM load briefly', () => {
+    expect(loadStepText('Fetching param cache[3/11]: 96MB fetched. 27% completed, 4 secs elapsed.')).toBe('downloading weights 3/11');
+    expect(loadStepText('Loading model from cache[7/11]: 220MB loaded. 63% completed, 2 secs elapsed.')).toBe('loading weights 7/11');
+    // The last weight piece read: the working memory is set aside next, before any shader report
+    expect(loadStepText('Loading model from cache[11/11]: 352MB loaded. 100% completed, 3 secs elapsed.')).toBe('setting up working memory, after the weights');
+    expect(loadStepText('Loading GPU shader modules[40/80]: 50% completed, 6 secs elapsed.')).toBe('building shaders 40/80');
+    expect(loadStepText('Finish loading on Apple GPU')).toBe('finishing the load');
+    expect(loadStepText('Start to fetch params')).toBe('starting on the weights');
+    expect(loadStepText('')).toBeNull();
+  });
+});
