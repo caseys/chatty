@@ -190,3 +190,40 @@ describe('Tone: something connected into a sound source', () => {
     expect(errorHint(code, error, 4)?.text ?? '').not.toContain('no inputs: nothing');
   });
 });
+
+describe('a canvas element and its context, as the live beach program wrote them', () => {
+  // The fill that was right: the 2D context of a canvas the program made and added
+  const context = 'const ctx = document.body.appendChild(document.createElement("canvas")).getContext("2d");\nctx.scale(1, 1);\nctx.fillStyle = skyColor;\nctx.fillRect(0, 0, 100, 100);';
+
+  it('types a chain by its outermost result: a context, not the canvas inside it', async () => {
+    const { objectType } = await import('../src/core/method-hints.ts');
+    expect(objectType(context, 'ctx')).toBe('CanvasRenderingContext2D');
+    expect(objectType('const c = document.body.appendChild(document.createElement("canvas"));', 'c')).toBe('element:canvas');
+    expect(objectType('const c = document.createElement("canvas");', 'c')).toBe('element:canvas');
+    expect(objectType('const c = document.createElement("canvas").getContext("2d");', 'c')).toBe('CanvasRenderingContext2D');
+    expect(objectType('const d = document.createElement("div").getBoundingClientRect();', 'd')).toBeNull();
+  });
+
+  it('does not move ctx.scale, ctx.fillStyle, ctx.fillRect through getContext when ctx already is the context', async () => {
+    const { moveToContext } = await import('../src/core/property-check.ts');
+    expect(moveToContext(context).moved).toEqual([]);
+    // (a real canvas element given drawing calls is still moved)
+    expect(moveToContext('const canvas = document.createElement("canvas");\ncanvas.fillRect(0, 0, 9, 9);').moved).toEqual([{ object: 'canvas', members: ['fillRect'] }]);
+  });
+
+  it('never says a type has no getContext() and lists getContext() among its methods', () => {
+    // The wrong type read from the code (a context taken for the canvas): no fact at all
+    const hint = errorHint('const ctx = document.createElement("canvas");\nctx.getContext("2d");', 'ctx.getContext is not a function', 2, { ids: [], scope: globalThis as unknown as Record<string, unknown> });
+    expect(hint?.text ?? '').not.toContain('it has no getContext()');
+    expect(memberListText('canvas', 'element:canvas', 'getContext', 'call', globalThis as unknown as Record<string, unknown>)).toBeNull();
+  });
+
+  it('lists a canvas element’s own members and the single closest inherited one, not the DOM’s plumbing', () => {
+    const text = memberListText('canvas', 'element:canvas', 'paint', 'call', globalThis as unknown as Record<string, unknown>);
+    expect(text).toContain('getContext()');
+    expect(text).toContain('toDataURL()');
+    expect(text).toContain('toBlob()');
+    expect(text).toContain('width');
+    for (const noise of ['getAttributeNames', 'getAttributeNS', 'getAnimations', 'getClientRects', 'getElementsByTagNameNS', 'translate', 'lang', 'cuebackground']) expect(text, noise).not.toContain(noise);
+  });
+});

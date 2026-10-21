@@ -320,3 +320,32 @@ describe('a color name one slip away', () => {
     }
   });
 });
+
+describe('a ; written inside a color', () => {
+  // The real line from Qwen2.5 0.5B's beach program: copied from CSS, so the browser ignores the color
+  const CSS = {
+    supports: (property: string, value: string) => {
+      if (value === 'inherit') return property === 'color' || property === 'background-color';
+      return /^(?:rgba?\([\d., ]+\)|red|#[0-9a-f]{6})$/.test(value);
+    },
+  };
+  class FakeCtx {}
+  const scope = { CSS, document: { createElement: () => ({ style: {} }) }, CanvasRenderingContext2D: FakeCtx } as unknown as Record<string, unknown>;
+  const ctx = (body: string) => `const ctx = document.createElement('canvas').getContext('2d');\n${body}`;
+
+  it('takes the ; out of a canvas color, a style color, and keeps the quote it was written with', () => {
+    const code = ctx("ctx.fillStyle = 'rgba(255, 255, 255, 0.8);';");
+    const [issue] = unusableAssignments(code, scope);
+    expect(issue.fix?.text).toBe("'rgba(255, 255, 255, 0.8)'");
+    expect(applyAssignmentFixes(code, [issue])).toContain("ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';");
+    const [style] = unusableAssignments("const el = document.createElement('div');\nel.style.color = \"red; \";", scope);
+    expect(style.fix?.text).toBe('"red"');
+  });
+
+  it('leaves valid colors alone, a value that is not a color without it, and a ; in other text', () => {
+    expect(unusableAssignments(ctx("ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';"), scope)).toEqual([]);
+    expect(unusableAssignments(ctx("ctx.fillStyle = '#87ceeb';"), scope)).toEqual([]);
+    expect(unusableAssignments(ctx("ctx.fillStyle = 'notacolor;';"), scope).filter((i) => i.fix?.text.includes('notacolor'))).toEqual([]);
+    expect(unusableAssignments(ctx("ctx.font = '12px serif;';"), scope)).toEqual([]);
+  });
+});

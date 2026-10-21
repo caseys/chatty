@@ -11,7 +11,21 @@ import { closestNames, editDistance, flatName, NAME_VERBS, nameWords, sureMatch 
 
 /** The object and the method a "not a function" error names, or null */
 export function missingMethod(error: string): { object: string; method: string } | null {
-  const match = error.match(/([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.([A-Za-z_$][\w$]*) is not a function/);
+  // Chrome: "a.b.m is not a function"; Safari: "undefined is not a function (evaluating 'a.b.m(...)')"
+  const match =
+    error.match(/([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.([A-Za-z_$][\w$]*) is not a function/) ??
+    error.match(/(?:undefined|null) is not a function \(evaluating '([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.([A-Za-z_$][\w$]*)\(/);
+  return match ? { object: match[1], method: match[2] } : null;
+}
+
+/**
+ * The object and the member a "not a constructor" error names (`new Tone.Melody()`), or null. Chrome:
+ * "Tone.Melody is not a constructor"; Safari: "undefined is not a constructor (evaluating 'new Tone.Melody()')".
+ */
+export function missingConstructor(error: string): { object: string; method: string } | null {
+  const path = '([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\.([A-Za-z_$][\\w$]*)';
+  const match =
+    error.match(new RegExp(`${path} is not a constructor`)) ?? error.match(new RegExp(`(?:undefined|null) is not a constructor \\(evaluating 'new ${path}\\(`));
   return match ? { object: match[1], method: match[2] } : null;
 }
 
@@ -109,12 +123,23 @@ function typeMadeBy(expression: string, code = ''): string | null {
   if (made.type === 'NewExpression' && made.callee?.type === 'MemberExpression' && !made.callee.computed && made.callee.object?.type === 'Identifier' && /^(?:Tone|THREE)$/.test(made.callee.object.name ?? '')) {
     return `${made.callee.object.name}.${made.callee.property?.name}`;
   }
-  const tag = expression.match(/createElement\(\s*['"]([\w-]+)['"]/)?.[1];
+  // The type of a chain is its outermost result: appendChild gives back what it was handed, getContext a context
+  // (`document.body.appendChild(document.createElement("canvas")).getContext("2d")` is a 2D context, not a canvas)
+  const outer = top as unknown as Loose & { arguments?: Array<{ start: number; end: number }> };
+  const outerName =
+    outer.type === 'CallExpression' ? (outer.callee?.type === 'MemberExpression' && !outer.callee.computed ? outer.callee.property?.name : outer.callee?.type === 'Identifier' ? outer.callee.name : undefined) : undefined;
+  if (outerName === 'appendChild' && outer.arguments?.[0]) return typeMadeBy(expression.slice(outer.arguments[0].start, outer.arguments[0].end), code);
+  const tag = outerName === 'createElement' ? expression.match(/createElement\(\s*['"]([\w-]+)['"]/)?.[1] : undefined;
   if (tag) return `element:${tag.toLowerCase()}`;
   const node = audioNodeMadeBy(expression, code);
   if (node) return node;
   for (const [made, type] of MADE_BY) if (made.test(expression)) return type;
   return null;
+}
+
+/** The type of what an expression makes (a context from getContext, an element from createElement, a list, a text), or null */
+export function typeOfExpression(expression: string, code = ''): string | null {
+  return typeMadeBy(expression, code);
 }
 
 /**
@@ -437,9 +462,10 @@ export function valueOfPath(code: string, path: string, scope: Record<string, un
 }
 
 /** How near a real member's name is to the missing one: shared words weigh most, then a name inside the other, then a few edits (0: unrelated) */
-export function relatedness(missing: string, name: string): number {
+export function relatedness(missing: string, name: string, withoutVerbs = false): number {
   const mine = nameWords(missing);
-  const shared = nameWords(name).filter((w) => w.length > 2 && mine.includes(w)).length;
+  // (withoutVerbs: get, set, create… begin the names of most members, so sharing only that is no relation)
+  const shared = nameWords(name).filter((w) => w.length > 2 && mine.includes(w) && !(withoutVerbs && (NAME_VERBS as readonly string[]).includes(w))).length;
   const a = flatName(missing);
   const b = flatName(name);
   const near = b.length >= 3 && (a.includes(b) || b.includes(a)) ? 2 : editDistance(a, b) <= Math.max(2, Math.floor(a.length / 3)) ? 1 : 0;
@@ -535,6 +561,13 @@ function inlineMethodHint(code: string, error: string, errorLine: number | undef
 /** Help for a "not a function" error: the candidates, and a correction when it's a slip */
 export function methodHint(code: string, error: string, scope?: Record<string, unknown>, errorLine?: number): MethodHint | null {
   const missing = missingMethod(error);
+  // A class the object doesn't have, made with new (Tone.Melody): what the object really has, as for a method
+  const constructing = missing ? null : missingConstructor(error);
+  if (constructing) {
+    const type = objectType(code, constructing.object);
+    if (type?.startsWith('@') && new RegExp(`(?:const|let|var|function|class)\\s+${constructing.object.split('.')[0].replace(/\$/g, '\\$')}\\b`).test(code)) return null;
+    return realObjectHint(code, constructing, scope, 'new');
+  }
   if (!missing) return inlineMethodHint(code, error, errorLine, scope);
   let type = objectType(code, missing.object);
   // A well-known name (Tone, Math, document) that the program declares for itself is its own
@@ -544,6 +577,8 @@ export function methodHint(code: string, error: string, scope?: Record<string, u
   if (!type) return realObjectHint(code, missing, scope);
   const names = methodNames(type, scope);
   if (names.length === 0) return null;
+  // The type has the method the error says is missing: the type read from the code is wrong (the value was made another way)
+  if (names.includes(missing.method)) return null;
   const typeName = typeLabel(type, missing.object);
   // A drawing method called on the canvas instead of its 2D context: the context is one call away
   if ((type === 'HTMLCanvasElement' || type === 'element:canvas') && CONTEXT_2D_METHODS.has(missing.method)) {
@@ -732,10 +767,17 @@ export function memberList(type: string, missing: string, scope: Record<string, 
     }
   });
   const related = (name: string) => relatedness(missing, name);
+  // An element of the page: the DOM's levels above the class (HTMLElement, Element, Node) hold hundreds of names, so the
+  // element's own are listed, and of the inherited ones only the single closest to the wrong name
+  const dom = type.startsWith('element:') || /^(?:HTML|SVG)\w*Element$/.test(type);
+  const closestInherited = dom
+    ? [...methods.filter((m) => m.level > 0), ...accessors.filter((a) => a.level > 0)].map((m) => ({ name: m.name, score: relatedness(missing, m.name, true) })).filter((m) => m.score >= 1).sort((a, b) => b.score - a.score)[0]?.name
+    : undefined;
   // The methods: closest to the wrong name (from any level), then the class's own, then inherited; plumbing only when close
   const popular = POPULAR[type] ?? [];
   const popularity = (name: string) => (popular.includes(name) ? popular.indexOf(name) : popular.length);
   const wanted = methods
+    .filter((m) => !dom || m.level === 0 || m.name === closestInherited)
     .filter((m) => !m.plumbing || related(m.name) >= 1)
     .map((m, order) => ({ ...m, order, score: related(m.name) }))
     .sort((a, b) => b.score - a.score || a.level - b.level || popularity(a.name) - popularity(b.name) || a.order - b.order);
@@ -750,8 +792,8 @@ export function memberList(type: string, missing: string, scope: Record<string, 
   for (const a of accessors.filter((a) => a.level === 0)) addSetting(a.name);
   for (const key of defaults) addSetting(key);
   for (const a of accessors.filter((a) => a.level > 0 && !a.plumbing && defaults.includes(a.name))) addSetting(a.name);
-  // (for a class with no getDefaults: the accessors of its own non-plumbing levels)
-  if (defaults.length === 0) for (const a of accessors.filter((a) => !a.plumbing)) addSetting(a.name);
+  // (for a class with no getDefaults: the accessors of its own non-plumbing levels; an element's inherited ones only as the closest)
+  if (defaults.length === 0) for (const a of accessors.filter((a) => !a.plumbing && (!dom || a.level === 0 || a.name === closestInherited))) addSetting(a.name);
   const bad = flatName(missing);
   const settingsOrdered = [...settings].sort((a, b) => (flatName(b.name) !== bad ? relatedness(missing, b.name) : 0) - (flatName(a.name) !== bad ? relatedness(missing, a.name) : 0));
   if (names.length === 0 && settingsOrdered.length === 0) return null;
@@ -790,6 +832,8 @@ export function memberListText(object: string, type: string, missing: string, us
   if (type.startsWith('@')) return null;
   const list = memberList(type, missing, scope);
   if (!list) return null;
+  // A list that holds the very name said to be missing is wrong about the type: no fact is better than a contradiction
+  if (list.methods.includes(missing) || list.settings.some((s) => s.name === missing)) return null;
   const methods = list.methods.length ? ` Its methods: ${list.methods.map((m) => `${m}()`).join(', ')}${list.more ? ', …' : ''}.` : '';
   const settings = list.settings.length ? ` Its settings: ${list.settings.map((s) => (s.readOnly ? `${s.name} (read-only)` : s.name)).join(', ')}.` : '';
   return `${object} is ${typeLabel(type, object)}; it has no ${missing}${use === 'read' ? '' : '()'}.${methods}${settings}`;
@@ -862,7 +906,7 @@ export function classesWithMethod(type: string, method: string, scope?: Record<s
 }
 
 /** "x.m is not a function" for an object found by walking the page (Tone.Transport.foo): what it has, or the sure slip */
-function realObjectHint(code: string, missing: { object: string; method: string }, scope?: Record<string, unknown>): MethodHint | null {
+function realObjectHint(code: string, missing: { object: string; method: string }, scope?: Record<string, unknown>, use: 'call' | 'new' = 'call'): MethodHint | null {
   if (!scope) return null;
   // A helper of Chatty's that is a function (speak): what it is
   const helper = helperListText(code, missing.object, missing.method, scope);
@@ -871,7 +915,7 @@ function realObjectHint(code: string, missing: { object: string; method: string 
   if (!real) return null;
   // The member is there, but a value and no function (Tone.Transport.bpm is a Tone.Param): what it
   // is and what it has, so the call can become one of those
-  if (real.members.some((m) => m.name === missing.method && m.kind === 'property')) {
+  if (use === 'call' && real.members.some((m) => m.name === missing.method && m.kind === 'property')) {
     const value = valueOfPath(code, `${missing.object}.${missing.method}`, scope);
     const label = libraryClassName(value, scope);
     const own = membersOfValue(value);
@@ -881,12 +925,13 @@ function realObjectHint(code: string, missing: { object: string; method: string 
       .map((m) => (m.kind === 'property' ? `.${m.name}` : `.${m.name}()`));
     if (label && shown.length) return { text: `${missing.object}.${missing.method} is ${/^[AEIOU]/.test(label.replace(/^[A-Za-z]+\./, '')) ? 'an' : 'a'} ${label}, not a function; it has ${shown.join(', ')}.` };
   }
-  const callable = real.members.filter((m) => m.kind !== 'property').map((m) => m.name);
+  if (use === 'new' && real.members.some((m) => m.name === missing.method)) return null;
+  const callable = real.members.filter((m) => (use === 'new' ? m.kind === 'class' : m.kind !== 'property')).map((m) => m.name);
   const fix = sureMatch(missing.method, callable, { reshaped: true, used: usedMembers(code) });
-  const facts = memberFacts(missing.object, missing.method, real.members, real.namespace, 'call');
+  const facts = memberFacts(missing.object, missing.method, real.members, real.namespace, use);
   const closest = closestNames(missing.method, callable, 3);
   return {
-    text: facts || `${missing.object} has no ${missing.method}()${closest.length ? `. It has ${closest.map((n) => `${missing.object}.${n}()`).join(', ')}: use the one you meant.` : '.'}`,
+    text: facts || `${missing.object} has no ${missing.method}()${closest.length ? `. It has ${closest.map((n) => `${use === 'new' ? 'new ' : ''}${missing.object}.${n}()`).join(', ')}: use the one you meant.` : '.'}`,
     ...(fix ? { correction: { object: missing.object, from: missing.method, to: fix } } : {}),
   };
 }

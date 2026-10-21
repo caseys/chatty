@@ -1134,8 +1134,8 @@ describe('the member blank stage', () => {
   class MembraneSynth extends Synth {}
   const Tone = { Synth, PolySynth, MembraneSynth, Transport: { start() {} } };
   // A made-up call with no sure slip in it: three classes share the word "synth"
-  const PROGRAM = 'const synth = Tone.buildSynth("C4");\nsynth.triggerAttackRelease("C4", "8n");';
-  const ERROR = { error: 'Tone.buildSynth is not a function', errorLine: 1 };
+  const PROGRAM = 'const synth = Tone.buildSynthNow("C4");\nsynth.triggerAttackRelease("C4", "8n");';
+  const ERROR = { error: 'Tone.buildSynthNow is not a function', errorLine: 1 };
 
   it('scores the real members, tests the likeliest, and runs the one that passes, made with new', async () => {
     const llm = new ScoringLlm([PROGRAM], [0.1, 0.8, 0.1]);
@@ -1149,22 +1149,22 @@ describe('the member blank stage', () => {
     expect(llm.scored.length).toBe(1);
     expect(llm.scored[0].labels).toEqual(['A', 'B', 'C']);
     const asked = llm.scored[0].options.messages[0].content;
-    expect(asked).toContain('Tone has no buildSynth(). These members of Tone are available:');
+    expect(asked).toContain('Tone has no buildSynthNow(). These members of Tone are available:');
     expect(asked).toContain('B. PolySynth');
-    expect(asked).toContain('Reply with the letter of the member that belongs in place of `buildSynth`.');
+    expect(asked).toContain('Reply with the letter of the member that belongs in place of `buildSynthNow`.');
     expect(llm.turns.map((t) => t.fixShape)).toEqual([undefined]);
     expect(trialled.length).toBe(1);
     const mine = runLogText().slice(runLogText().indexOf('Make a synth'));
-    expect(mine).toContain('trying the real members for the blank `buildSynth` (Tone has no buildSynth())');
-    expect(mine).toContain('buildSynth → PolySynth: corrected by a test run');
+    expect(mine).toContain('trying the real members for the blank `buildSynthNow` (Tone has no buildSynthNow())');
+    expect(mine).toContain('buildSynthNow → PolySynth: corrected by a test run');
   }, 30000);
 
   it('does not apply a pick whose use the test run never reached (a Loop callback under a Transport that never advances)', async () => {
     // The reviewer's case: the failing use sits in a callback; the quiet trial runs clean without calling it
-    const program = 'const synth = Tone.PolySynth;\nconst loop = new Tone.Loop((time) => {\n  Tone.buildSynth("C4").triggerAttackRelease("C4", "8n", time);\n}, "4n");\nloop.start(0);';
-    const llm = new ScoringLlm([program, '// Cause: no such member\nTone.buildSynth("C4").triggerAttackRelease("C4", "8n", time);'], [0.1, 0.8, 0.1]);
+    const program = 'const synth = Tone.PolySynth;\nconst loop = new Tone.Loop((time) => {\n  Tone.buildSynthNow("C4").triggerAttackRelease("C4", "8n", time);\n}, "4n");\nloop.start(0);';
+    const llm = new ScoringLlm([program, '// Cause: no such member\nTone.buildSynthNow("C4").triggerAttackRelease("C4", "8n", time);'], [0.1, 0.8, 0.1]);
     const marked: string[] = [];
-    const { executed, runtime } = fakeRuntime([{ error: 'Tone.buildSynth is not a function', errorLine: 3 }, {}], {
+    const { executed, runtime } = fakeRuntime([{ error: 'Tone.buildSynthNow is not a function', errorLine: 3 }, {}], {
       trials: (code) => {
         marked.push(code);
         return /__chattyReached/.test(code) ? { error: null, reached: false } : { error: null };

@@ -360,11 +360,21 @@ describe("Fable's smaller repairs", async () => {
 
   it('takes out a call to a method a browser type lacks, when nothing uses its result', () => {
     const code = 'const gl = document.createElement("canvas").getContext("webgl");\ngl.shaderType(1);\nspeak("Ready.");';
-    const hint = errorHint(code, 'gl.shaderType is not a function', 2)!;
+    // (the browser's own types: the context a canvas gives back for "webgl" and "2d")
+    class WebGLRenderingContext {
+      createShader() {}
+      getParameter() {}
+    }
+    class CanvasRenderingContext2D {
+      fillRect() {}
+      arc() {}
+    }
+    const page = { ids: [], scope: { WebGLRenderingContext, CanvasRenderingContext2D } as unknown as Record<string, unknown> };
+    const hint = errorHint(code, 'gl.shaderType is not a function', 2, page)!;
     expect(hint.correction!.code).not.toContain('shaderType');
     // A name that says it does something stays with the model
     const draw = 'const ctx = document.createElement("canvas").getContext("2d");\nctx.fillCircle(5, 5, 3);';
-    expect(errorHint(draw, 'ctx.fillCircle is not a function', 2)?.correction).toBeUndefined();
+    expect(errorHint(draw, 'ctx.fillCircle is not a function', 2, page)?.correction).toBeUndefined();
   });
 });
 
@@ -624,5 +634,78 @@ describe('a line of markup between two code blocks', () => {
     expect(told.markupBlocks).toBeUndefined();
     const plain = inspectExecutableCode(reply.replace('<canvas id="canvas"></canvas>', 'Now the picture.'));
     expect(plain.markupBlocks).toBeUndefined();
+  });
+});
+
+describe('a frame loop that does no work, next to the drawing nothing calls', () => {
+  // The real program from Qwen3 0.6B's "Animate 10 colored balls bouncing around the screen": start() only asks for the next frame
+  const balls = [
+    'const canvas = document.body.appendChild(document.createElement("canvas"));',
+    'const ctx = canvas.getContext("2d");',
+    'const balls = [{ x: 100, y: 100, radius: 20, speed: 0.5, color: "red" }];',
+    'function animate() {',
+    '  ctx.clearRect(0, 0, canvas.width, canvas.height);',
+    '  balls.forEach(ball => { ball.x -= ball.speed; ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2); ctx.fill(); });',
+    '}',
+    'function start() {',
+    '  if (canvas && canvas.width && canvas.height) {',
+    '    requestAnimationFrame(start);',
+    '  }',
+    '}',
+    'start();',
+  ].join('\n');
+
+  it('runs the drawing first in the loop, on the same line, so each frame draws', async () => {
+    const { callFromFrameLoop } = await import('../src/core/error-hints.ts');
+    const fixed = callFromFrameLoop(balls)!;
+    expect(fixed.called).toBe('animate');
+    expect(fixed.loop).toBe('start');
+    expect(fixed.code).toContain('function start() { animate();\n  if (canvas');
+    expect(fixed.code.split('\n').length).toBe(balls.split('\n').length);
+  });
+
+  it('is part of preparing the reply, and does not add a second call at the end', async () => {
+    const { inspectExecutableCode } = await import('../src/tools/javascript-runtime.ts');
+    const prepared = inspectExecutableCode('```javascript\n' + balls.replace('\nstart();', '') + '\n```');
+    expect(prepared.framed).toEqual(['animate() → start()']);
+    expect(prepared.code).toContain('function start() { animate();');
+    expect(prepared.code.match(/animate\(\);/g)?.length).toBe(1);
+    expect(prepared.code.trim().endsWith('await start();')).toBe(true);
+  });
+
+  it('leaves a loop that draws, a drawing something calls, two loops, two drawings, and a handler string alone', async () => {
+    const { callFromFrameLoop } = await import('../src/core/error-hints.ts');
+    const working = 'function animate() {\n  ctx.clearRect(0, 0, 9, 9);\n  requestAnimationFrame(animate);\n}\nanimate();';
+    expect(callFromFrameLoop(working)).toBeNull();
+    expect(callFromFrameLoop(balls.replace('start();', 'start(); animate();'))).toBeNull();
+    expect(callFromFrameLoop(balls + '\nfunction loop() { requestAnimationFrame(loop); }')).toBeNull();
+    expect(callFromFrameLoop(balls.replace('function start()', 'function drawOther() { ctx.fillRect(0, 0, 5, 5); }\nfunction start()'))).toBeNull();
+    expect(callFromFrameLoop(balls.replace('start();', 'start(); button.setAttribute("onclick", "animate()");'))).toBeNull();
+    // (a function that sets up, with no drawing call, is not the drawing)
+    expect(callFromFrameLoop(balls.replace('ctx.clearRect(0, 0, canvas.width, canvas.height);', 'speed = 1;').replace('ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2); ctx.fill();', 'ball.y += 1;'))).toBeNull();
+  });
+});
+
+describe('Tone note values written without quotes', () => {
+  it('quotes 8n (a BigInt), 1m, 4t and 8n. (syntax errors) in a program that uses Tone, the real line from Qwen3 0.6B included', async () => {
+    const { quoteToneTimes } = await import('../src/core/error-hints.ts');
+    const real = 'const synth = new Tone.PolySynth();\nconst note = Tone.Note("C4", 8n);\nconst duration = 0.5;';
+    expect(quoteToneTimes(real)).toEqual({ code: real.replace('8n', '"8n"'), quoted: ['8n'] });
+    const times = quoteToneTimes('synth.triggerAttackRelease("C4", 4n.);\nTone.Transport.schedule(f, 1m);\nloop.interval = 8t;\nsynth.triggerAttackRelease("E4", 16n);');
+    expect(times?.code).toBe('synth.triggerAttackRelease("C4", "4n.");\nTone.Transport.schedule(f, "1m");\nloop.interval = "8t";\nsynth.triggerAttackRelease("E4", "16n");');
+    expect(times?.quoted).toEqual(['4n.', '1m', '8t', '16n']);
+    // (inside a template's ${ } too)
+    expect(quoteToneTimes('Tone.start();\nspeak(`next in ${ 2m }`);')?.code).toBe('Tone.start();\nspeak(`next in ${ "2m" }`);');
+  });
+
+  it('leaves a real BigInt, a program without Tone, strings, comments, and times already quoted alone', async () => {
+    const { quoteToneTimes } = await import('../src/core/error-hints.ts');
+    expect(quoteToneTimes('const big = 10n ** 20n;\nspeak(String(big));')).toBeNull();
+    // (not a note value, in a program that uses Tone)
+    expect(quoteToneTimes('Tone.start();\nconst big = 10n ** 20n;\nconst n = 3n;')).toBeNull();
+    // (no Tone: 8n is a number then)
+    expect(quoteToneTimes('const eight = 8n;\nconst m = 1;')).toBeNull();
+    expect(quoteToneTimes('Tone.start();\n// 8n is an eighth note\nspeak("play 4n and 1m");\nsynth.triggerAttackRelease("C4", "8n");\nconst s = `a 2n b`;')).toBeNull();
+    expect(quoteToneTimes('Tone.start();\nconst x = 1.5n;')).toBeNull();
   });
 });

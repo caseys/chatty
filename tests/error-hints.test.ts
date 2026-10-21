@@ -325,7 +325,7 @@ describe('a stray character ending a line', () => {
     const code = 'speak("What is 15% of 84?");  \nspeak("15% of 84 is 12.6.");)';
     expect(dropStrayCharacter(code)).toEqual({ code: 'speak("What is 15% of 84?");  \nspeak("15% of 84 is 12.6.");', line: 2, removed: ')' });
     // After the error too: the same correction, named by the character
-    expect(errorHint(code, "Unexpected token ')'", 2)?.correction?.note).toBe('a stray ) at the end of line 2 → removed');
+    expect(errorHint(code, "Unexpected token ')'", 2)?.correction?.note).toBe('a stray ) on line 2 → removed');
     expect(dropStrayCharacter('speak("a");\nspeak("b"));\n'.replace('("b"));', '("b");]'))).toMatchObject({ line: 2, removed: ']' });
   });
 
@@ -341,7 +341,11 @@ describe('a stray character ending a line', () => {
     expect(dropStrayCharacter('function go() {\n  speak("x");\n}\n}')).toBeNull();
     // A bracket after something that is not a complete statement, in the middle of a line, or one whose removal still leaves a broken program
     expect(dropStrayCharacter('speak("a"\n)\n')).toBeNull();
-    expect(dropStrayCharacter('speak("a"));\nspeak("b");')).toBeNull();
+    // (a closer alone mid-line may be a missing opener elsewhere; one typed twice is the same text whichever goes)
+    expect(dropStrayCharacter('const total = a + b) * c;\nspeak("b");')).toBeNull();
+    expect(dropStrayCharacter('speak("a"));\nspeak("b");')?.code).toBe('speak("a");\nspeak("b");');
+    // The real line from Qwen3 0.6B's balls: ) typed twice inside an index
+    expect(dropStrayCharacter('const ballColor = ["red", "blue"];\nconst color = ballColor[Math.floor(Math.random() * 5))];')).toMatchObject({ line: 2, removed: ')', code: 'const ballColor = ["red", "blue"];\nconst color = ballColor[Math.floor(Math.random() * 5)];' });
     expect(dropStrayCharacter('const a = {\n  b: 1,\n};\nif (a.b) {\n  speak("x");\n}}\nfunction f( {\n')).toBeNull();
   });
 });
@@ -831,6 +835,17 @@ describe('a factory the object does not have, given the class to make', () => {
     }
   });
 
+  it('makes the class named in the method (Tone.createPolySynth), unless a class is handed over, and keeps all the arguments', () => {
+    // The real lines from Qwen3 0.6B's Twinkle Twinkle program
+    const code = 'const synth = Tone.createPolySynth();\nconst pluck = Tone.makePluckSynth({ volume: -6 });\nsynth.toDestination();';
+    expect(errorHint(code, 'Tone.createPolySynth is not a function', 1, page)?.correction?.code).toBe('const synth = new Tone.PolySynth();\nconst pluck = Tone.makePluckSynth({ volume: -6 });\nsynth.toDestination();');
+    expect(errorHint('const p = Tone.makePluckSynth({ volume: -6 });', 'Tone.makePluckSynth is not a function', 1, page)?.correction?.code).toBe('const p = new Tone.PluckSynth({ volume: -6 });');
+    // (a class in the arguments is the one meant; a name that is no class of the object is not a factory)
+    expect(errorHint('const s = Tone.createPluckSynth(Tone.PolySynth);', 'Tone.createPluckSynth is not a function', 1, page)?.correction?.code).toBe('const s = new Tone.PolySynth();');
+    expect(errorHint('const s = Tone.createMelody();', 'Tone.createMelody is not a function', 1, page)?.correction).toBeUndefined();
+    expect(errorHint('const s = Tone.createtransport();', 'Tone.createtransport is not a function', 1, page)?.correction).toBeUndefined();
+  });
+
   it('leaves a call with no class in it, one the page does not know, and a program’s own Tone, alone', () => {
     // Another call of it that names no class: unclear what the rest mean
     expect(errorHint('const a = Tone.create(Tone.PolySynth);\nconst b = Tone.create(42);', error, 1, page)?.correction).toBeUndefined();
@@ -937,5 +952,197 @@ describe('Tone: a word where a pitch or a time goes', () => {
     expect(errorHint(code, 'Error: Invalid argument(s) to setValueAtTime: null, 0.5', undefined, { ids: [], scope: {} })?.text).toBeUndefined();
     expect(errorHint(code, 'Error: Invalid argument(s) to setValueAtTime: 440, "0.5"', undefined, { ids: [], scope: {} })?.text).toBeUndefined();
     expect(errorHint(code, 'Invalid argument(s) to setValueAtTime: {oops', undefined, { ids: [], scope: {} })?.text).toBeUndefined();
+  });
+});
+
+describe('a member the library does not have, in Safari’s words as in Chrome’s', () => {
+  class Synth {}
+  class PolySynth extends Synth {}
+  class MembraneSynth extends Synth {}
+  class Part {}
+  class Loop {}
+  const Tone = { Synth, PolySynth, MembraneSynth, Part, Loop, Transport: { start() {} }, now: () => 0 };
+  const page = { ids: [], scope: { Tone } as unknown as Record<string, unknown> };
+  // The real line from Qwen3 0.6B's Twinkle Twinkle program, and what each browser says of it
+  const code = 'const synth = new Tone.PolySynth();\nconst melody = new Tone.Melody();\nmelody.start();';
+  const forms = [
+    'Tone.Melody is not a constructor',
+    "undefined is not a constructor (evaluating 'new Tone.Melody()')",
+    "TypeError: undefined is not a constructor (evaluating 'new Tone.Melody(\"C4\")')",
+  ];
+
+  it('says what the library has, for a class made with new', () => {
+    for (const error of forms) {
+      const text = errorHint(code, error, 2, page)?.text;
+      expect(text, error).toContain('Tone has no Melody()');
+      expect(text, error).toContain('Tone.Synth');
+    }
+  });
+
+  it('says what the library has, for a method called, in Safari’s form as in Chrome’s', () => {
+    for (const error of ['Tone.melody is not a function', "undefined is not a function (evaluating 'Tone.melody(...)')"]) {
+      expect(errorHint('Tone.melody("C4");', error, 1, page)?.text, error).toContain('Tone has no melody()');
+    }
+  });
+
+  it('corrects a sure slip of a class, and leaves a member that exists alone', () => {
+    expect(errorHint('const s = new Tone.PolySynthh();', "undefined is not a constructor (evaluating 'new Tone.PolySynthh()')", 1, page)?.correction?.code).toBe('const s = new Tone.PolySynth();');
+    expect(errorHint('const s = new Tone.PolySynth();', "undefined is not a constructor (evaluating 'new Tone.PolySynth()')", 1, page)?.text).toBeUndefined();
+    // (a program’s own Tone is its own)
+    expect(errorHint('const Tone = {};\nnew Tone.Melody();', 'Tone.Melody is not a constructor', 2, page)?.text ?? '').not.toContain('Tone has no Melody');
+  });
+
+  it('names the member to fill in for the blank stage in Safari’s form', async () => {
+    const { memberBlank } = await import('../src/core/blank-fix.ts');
+    for (const error of ['Tone.buildSynth is not a function', "undefined is not a function (evaluating 'Tone.buildSynth(...)')"]) {
+      const found = memberBlank('const s = Tone.buildSynth("C4");\ns.triggerAttackRelease("C4", "8n");', error, 1, page.scope);
+      expect(found?.blank.member?.object, error).toBe('Tone');
+      expect(found?.blank.text, error).toBe('buildSynth');
+    }
+    const made = memberBlank('const s = new Tone.SynthPoly("C4");', "undefined is not a constructor (evaluating 'new Tone.SynthPoly(\"C4\")')", 1, page.scope);
+    expect(made?.blank.member?.use).toBe('new');
+  });
+});
+
+describe('a declaration nothing reads, made by a member the library does not have', () => {
+  class Synth {}
+  class PolySynth extends Synth {}
+  class Loop {}
+  const Tone = { Synth, PolySynth, Loop, Transport: { start() {} }, now: () => 0 };
+  const page = { ids: [], scope: { Tone } as unknown as Record<string, unknown> };
+  // The real program from the live iPhone run: melody is made by Tone.Melody and read by nothing
+  const live = [
+    'const synth = new Tone.PolySynth();',
+    'const melody = new Tone.Melody();',
+    'const tempo = 60; const beat = tempo / 12;',
+    'synth.toDestination();',
+    'synth.triggerAttackRelease("C4", "8n");',
+  ].join('\n');
+
+  it('takes the declaration out, in Chrome’s words and Safari’s', () => {
+    for (const error of ['Tone.Melody is not a constructor', "undefined is not a constructor (evaluating 'new Tone.Melody()')"]) {
+      const hint = errorHint(live, error, 2, page);
+      expect(hint?.correction?.code, error).toBe(live.replace('const melody = new Tone.Melody();\n', ''));
+      expect(hint?.correction?.note, error).toContain('melody');
+    }
+    // (a call may be the very thing asked for: it stays, and the model hears what the library has)
+    expect(errorHint('const m = Tone.makeMelody("C4");\nspeak("hi");', 'Tone.makeMelody is not a function', 1, page)?.correction).toBeUndefined();
+    // (and a program of nothing else is not emptied)
+    expect(errorHint('const m = new Tone.Melody();', 'Tone.Melody is not a constructor', 1, page)?.correction).toBeUndefined();
+  });
+
+  it('keeps one that is read, one whose member exists, one with a call in it, and a slip that has a sure answer', () => {
+    const read = 'const melody = new Tone.Melody();\nmelody.start();';
+    expect(errorHint(read, 'Tone.Melody is not a constructor', 1, page)?.correction).toBeUndefined();
+    expect(errorHint('const l = new Tone.Loop();', 'Tone.Loop is not a constructor', 1, page)?.correction).toBeUndefined();
+    expect(errorHint('const m = new Tone.Melody(compute());', 'Tone.Melody is not a constructor', 1, page)?.correction).toBeUndefined();
+    expect(errorHint('const s = new Tone.PolySynthh();', 'Tone.PolySynthh is not a constructor', 1, page)?.correction?.code).toBe('const s = new Tone.PolySynth();');
+    // (named in a handler string: read)
+    expect(errorHint('const m = new Tone.Melody();\nbtn.setAttribute("onclick", "m.start()");', 'Tone.Melody is not a constructor', 1, page)?.correction).toBeUndefined();
+    // (a different declaration of the same name elsewhere: not unused)
+    expect(errorHint('const m = new Tone.Melody();\nfunction f(m) { return m + 1; }', 'Tone.Melody is not a constructor', 1, page)?.correction).toBeUndefined();
+  });
+});
+
+describe('Tone constructors handed arguments their parameters cannot take', () => {
+  // (stand-ins with the source Tone's classes have: the parameter names are listed where the arguments are read)
+  const optionsFromArguments = (..._args: unknown[]) => ({});
+  class Synth {
+    static getDefaults() {
+      return { oscillator: {}, envelope: {} };
+    }
+  }
+  class PolySynth {
+    constructor() {
+      optionsFromArguments(PolySynth.getDefaults(), arguments, ['voice', 'options']);
+    }
+    static getDefaults() {
+      return { voice: Synth, options: {}, volume: 0 };
+    }
+  }
+  class Loop {
+    constructor() {
+      optionsFromArguments(Loop.getDefaults(), arguments, ['callback', 'interval']);
+    }
+    static getDefaults() {
+      return { callback: () => undefined, interval: '4n', iterations: Infinity };
+    }
+  }
+  const Tone = { Synth, PolySynth, Loop };
+  const page = { ids: [], scope: { Tone } as unknown as Record<string, unknown> };
+  // The real program from Qwen2.5 0.5B on the live build, and what Tone said inside itself
+  const live = 'var note = "C4"; var duration = 100; var time = 0;\nvar synth = new Tone.PolySynth(note, duration, time);\nsynth.triggerAttackRelease(note, 500, 1);';
+  const inside = "t.voice.getDefaults is not a function. (In 't.voice.getDefaults()', 't.voice.getDefaults' is undefined)";
+
+  it('reads the parameter names from the class itself', async () => {
+    const { constructorParameters } = await import('../src/core/error-hints.ts');
+    expect(constructorParameters(PolySynth)).toEqual(['voice', 'options']);
+    expect(constructorParameters(Loop)).toEqual(['callback', 'interval']);
+    expect(constructorParameters(Synth)).toBeNull();
+    expect(constructorParameters(undefined)).toBeNull();
+  });
+
+  it('says what each parameter is, and what the program gave, for the live PolySynth and for a Loop given a string', async () => {
+    const { toneArgumentFacts } = await import('../src/core/error-hints.ts');
+    expect(toneArgumentFacts(live, page.scope)).toBe('new Tone.PolySynth(voice, options): the first argument is voice, an instrument class such as Tone.Synth; here it is a string.');
+    expect(toneArgumentFacts('const note = "C4";\nconst loop = new Tone.Loop(note, 0.5);', page.scope)).toBe('new Tone.Loop(callback, interval): the first argument is callback, a function; here it is a string.');
+    // It comes with the error's hint when there is no correction to make (the error is not one thrown inside Tone)
+    expect(errorHint(live, 'The program showed nothing: what it adds to document.body appears in the card on screen.', undefined, page)?.text).toContain('new Tone.PolySynth(voice, options)');
+  });
+
+  it('leaves out the arguments from the first that cannot fit, so the call runs without them (the error is thrown inside Tone)', () => {
+    const hint = errorHint(live, inside, undefined, page);
+    expect(hint?.correction?.code).toBe('var note = "C4"; var duration = 100; var time = 0;\nvar synth = new Tone.PolySynth();\nsynth.triggerAttackRelease(note, 500, 1);');
+    expect(hint?.correction?.note).toContain('new Tone.PolySynth(note, duration, time)');
+    // A later argument goes with the first that cannot fit; an earlier one that fits stays
+    expect(errorHint('const p = new Tone.PolySynth(Tone.Synth, "loud", 1);', 'Error: voice is not a function', undefined, page)?.correction?.code).toBe('const p = new Tone.PolySynth(Tone.Synth);');
+    // The call on the failing line only
+    expect(errorHint('const a = new Tone.PolySynth("C4");\nconst b = new Tone.PolySynth("D4");', inside, 2, page)?.correction?.code).toBe('const a = new Tone.PolySynth("C4");\nconst b = new Tone.PolySynth();');
+  });
+
+  it('leaves correct calls alone: a class and options, a callback, text for a time, no arguments, and a check on what the program did', () => {
+    for (const ok of ['new Tone.PolySynth(Tone.Synth, { volume: -8 })', 'new Tone.PolySynth()', 'new Tone.PolySynth({ volume: -8 })', 'new Tone.Loop((time) => {}, "8n")', 'new Tone.Loop(function (time) {}, 0.5)']) {
+      const code = `const x = ${ok};`;
+      const hint = errorHint(code, inside, undefined, page);
+      expect(hint?.correction?.code ?? '', ok).not.toContain('new Tone.PolySynth();');
+      expect(hint?.text ?? '', ok).not.toContain('here it is');
+    }
+    expect(errorHint(live, 'The program showed nothing: what it adds to document.body appears in the card on screen.', undefined, page)?.correction).toBeUndefined();
+    // (a callback declared as a function, and a time held in a name, fit)
+    expect(errorHint('function tick(time) {}\nconst interval = "4n";\nnew Tone.Loop(tick, interval);', inside, undefined, page)?.correction).toBeUndefined();
+    // (a program's own Tone is its own)
+    expect(errorHint('const Tone = { PolySynth: class {} };\nnew Tone.PolySynth("C4");', inside, undefined, page)?.correction).toBeUndefined();
+  });
+});
+
+describe('an element that was never made, used with the members of a value the program already has', () => {
+  class CanvasRenderingContext2D {
+    clearRect() {}
+    translate() {}
+    fillRect() {}
+  }
+  const page = { ids: [], standIns: [{ id: 'drawing-area', tag: 'div', made: 'empty' as const }], scope: { CanvasRenderingContext2D } as unknown as Record<string, unknown> };
+  // The shape of the live beach program: a context, and a drawing area that nothing created
+  const beach = [
+    'const ctx = document.body.appendChild(document.createElement("canvas")).getContext("2d");',
+    "const drawingArea = document.getElementById('drawing-area');",
+    'drawingArea.clearRect(0, 0, 300, 150);',
+    'drawingArea.translate(10, 10);',
+  ].join('\n');
+
+  it('points to the context the program has, instead of saying to create an element', () => {
+    for (const code of [beach, beach.replace(/drawingArea\./g, "document.getElementById('drawing-area').").replace("const drawingArea = document.getElementById('drawing-area');\n", '')]) {
+      const hint = errorHint(code, 'drawingArea.clearRect is not a function', 3, page);
+      expect(hint?.text).toContain('belong to a CanvasRenderingContext2D, and the program already has one: ctx');
+      expect(hint?.text).toContain('Use ctx.clearRect(');
+      expect(hint?.text).not.toContain('Create the element');
+    }
+  });
+
+  it('says to create the element when no value of that type is there, or the members are an element’s', () => {
+    const none = beach.replace(/^const ctx.*\n/, '');
+    expect(errorHint(none, 'drawingArea.clearRect is not a function', 2, page)?.text).not.toContain('already has one');
+    const element = "const area = document.getElementById('drawing-area');\narea.focus();";
+    expect(errorHint(element, 'area.focus is not a function', 2, page)?.text).toContain('Create the element');
   });
 });

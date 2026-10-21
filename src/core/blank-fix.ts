@@ -1,6 +1,6 @@
 import { parse, type Node } from 'acorn';
 import { enclosingFunction } from './line-fix.ts';
-import { memberChoices, methodNames, objectType, realMembers, type MemberUse, type RealMember } from './method-hints.ts';
+import { memberChoices, methodNames, objectType, realMembers, typeOfExpression, type MemberUse, type RealMember } from './method-hints.ts';
 import { editDistance, flatName } from './fuzzy-match.ts';
 
 /**
@@ -374,7 +374,7 @@ export function findBlank(code: string, error: string, errorLine?: number): Blan
   if (name) return undeclared(tree, code, name, line);
 
   // A missing method: "a.b.m is not a function", "(In 'a.b.m()', 'a.b.m' is undefined)"
-  const safariCallee = message.match(/\(In '.*', '(.+)' is (?:undefined|null)\)/)?.[1];
+  const safariCallee = message.match(/\(In '.*', '(.+)' is (?:undefined|null)\)/)?.[1] ?? message.match(/is not a function \(evaluating '(.+?)\((?:\.\.\.)?\)'\)/)?.[1];
   const notFunction = safariCallee ?? (/\(near '\.\.\./.test(message) ? undefined : message.match(/^(.+?) is not a function/)?.[1]);
   if (notFunction) {
     const calls = near<AnyNode>(tree, line, (n) => n.type === 'CallExpression' && matches(code, n.callee, notFunction));
@@ -448,7 +448,7 @@ export function memberBlank(code: string, error: string, errorLine?: number, sco
   const line = errorLine && errorLine >= 1 ? errorLine : undefined;
   let member: AnyNode | null = null;
   let use: MemberUse = 'call';
-  const safariCallee = message.match(/\(In '.*', '(.+)' is (?:undefined|null)\)/)?.[1];
+  const safariCallee = message.match(/\(In '.*', '(.+)' is (?:undefined|null)\)/)?.[1] ?? message.match(/is not a function \(evaluating '(.+?)\((?:\.\.\.)?\)'\)/)?.[1];
   const notFunction = safariCallee ?? (/\(near '\.\.\./.test(message) ? undefined : message.match(/^(.+?) is not a function/)?.[1]);
   const plain = (n: AnyNode | undefined): n is AnyNode => !!n && n.type === 'MemberExpression' && !n.computed && n.object.type !== 'Super';
   if (notFunction) {
@@ -574,6 +574,26 @@ function elementHas(member: string): boolean {
   const types = ['HTMLElement', 'Element', 'Node', 'EventTarget'];
   if (types.some((t) => g[t]?.prototype && member in g[t]!.prototype!)) return true;
   return methodNames('HTMLElement').includes(member);
+}
+
+/**
+ * What a name holds, from everything the program sets it to (its declaration and each plain assignment): the one type
+ * they all make (a text, a number, a list, a 2D context), or null when any is unclear
+ */
+export function bindingTypeOf(code: string, tree: Tree, name: string): string | null {
+  const kinds = new Set<string | null>();
+  const kindOf = (value: AnyNode | null | undefined): string | null => {
+    if (!value) return null;
+    if (value.type === 'Literal') return value.regex ? 'RegExp' : typeof value.value === 'string' ? 'String' : typeof value.value === 'number' ? 'Number' : typeof value.value === 'boolean' ? 'Boolean' : null;
+    if (value.type === 'TemplateLiteral') return 'String';
+    if (value.type === 'ArrayExpression') return 'Array';
+    return typeOfExpression(code.slice(value.start, value.end), code);
+  };
+  for (const n of tree.nodes) {
+    if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.id.name === name && n.init) kinds.add(kindOf(n.init));
+    else if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && n.left.name === name) kinds.add(kindOf(n.right));
+  }
+  return kinds.size === 1 && !kinds.has(null) ? ([...kinds][0] as string) : null;
 }
 
 /**
@@ -791,6 +811,7 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
     }
   }
   const required = [...reads].filter((m) => !(m in Object.prototype));
+  const bindingType = (name: string): string | null => (tree ? bindingTypeOf(code, tree, name) : null);
   const fitsReads = (expr: string): boolean => {
     if (required.length === 0 || !tree) return true;
     // A page element, or a name set from a lookup of one: what the page says that element is
@@ -811,7 +832,7 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
         for (const n of tree.nodes) if (n.type === 'MemberExpression' && !n.computed && n.object.type === 'Identifier' && n.object.name === expr) keys.add(n.property.name as string);
         return required.every((m) => keys.has(m));
       }
-      const type = objectType(code, expr);
+      const type = objectType(code, expr) ?? bindingType(expr);
       if (!type || type.startsWith('@')) return true;
       if (type.startsWith('element:') || type === 'HTMLElement') return required.every((m) => elementHas(m));
       const known = !!(globalThis as unknown as Record<string, { prototype?: object } | undefined>)[type]?.prototype || type === 'CanvasRenderingContext2D';
@@ -828,6 +849,15 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
   scored.sort((a, b) => a.score - b.score || a.order - b.order);
   const result: string[] = [];
   for (const { expr } of scored) if (expr !== blank.text && !result.includes(expr) && fitsReads(expr)) result.push(expr);
+  // A name the program has that is known to have what is used on the blank (a 2D context for clearRect) stands in for
+  // making a new one
+  const knownToFit = (expr: string) => {
+    if (required.length === 0 || !/^[A-Za-z_$][\w$]*$/.test(expr)) return false;
+    const type = objectType(code, expr) ?? bindingType(expr);
+    return !!type && !type.startsWith('@') && !type.startsWith('element:') && type !== 'HTMLElement' && required.every((m) => typeHas(type, m));
+  };
+  const made = new Set(MAKEABLE.map((m) => m.make));
+  if (result.some(knownToFit)) return result.filter((expr) => !made.has(expr)).slice(0, 6);
   return result.slice(0, 6);
 }
 

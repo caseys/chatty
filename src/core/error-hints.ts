@@ -14,9 +14,9 @@
 import { parse, tokenizer, type Node } from 'acorn';
 import { parse as parseLoose } from 'acorn-loose';
 import { sureMatch } from './fuzzy-match.ts';
-import { analyse, isReference, resolve } from './blank-fix.ts';
-import { onlySendsLists, usedAs } from './value-use.ts';
-import { applyCorrection, argumentCountFact, memberKind, memberList, methodHint, missingMethod, objectType, realMembers, relatedness, valueOfPath } from './method-hints.ts';
+import { analyse, bindingTypeOf, isReference, resolve } from './blank-fix.ts';
+import { browserTypeWith, onlySendsLists, usedAs, valueUse } from './value-use.ts';
+import { applyCorrection, argumentCountFact, memberKind, memberList, methodHint, missingConstructor, missingMethod, objectType, realMembers, relatedness, valueOfPath } from './method-hints.ts';
 import { memberNames, writability } from './property-check.ts';
 import { toneStepsOnly, withTransportStart } from './sound-setup.ts';
 
@@ -459,9 +459,9 @@ function repairLine(code: string, line: number, repair: (text: string) => string
 /**
  * A program that doesn't parse only because one line ends in a stray character: a quote or
  * backtick (a reply's `speak("Done.");` with markdown's closing backtick kept), or a closing
- * ) or ] nothing opened (`speak("Done.");)`, where the parser stops at it). That character
- * goes, when removing it alone makes the whole program parse. Quotes are tried from the last
- * line up, the first that works wins; a bracket is the one the parser itself stopped at.
+ * ) or ] nothing opened (`speak("Done.");)`, or `colors[Math.floor(r * 5))]`, where the parser stops
+ * at it). That character goes, when removing it alone makes the whole program parse. Quotes are tried
+ * from the last line up, the first that works wins; a bracket is the one the parser itself stopped at.
  */
 export function dropStrayCharacter(code: string): { code: string; line: number; removed: string } | null {
   let stopped: number | null = null;
@@ -479,11 +479,15 @@ export function dropStrayCharacter(code: string): { code: string; line: number; 
     const candidate = [...lines.slice(0, i), text.slice(0, -1), ...lines.slice(i + 1)].join('\n');
     if (tryParse(candidate)) return { code: candidate, line: i + 1, removed: last };
   }
-  // A closing ) or ] the parser met with nothing open, last on its line and right after a statement
-  // that is complete (`speak("Done.");)`). A } is not taken: a missing { is as good an answer (a loop
-  // body without braces, its last line cut loose), so there is no one answer
+  // A closing ) or ] the parser met with nothing open, last on its line and right after a statement that is
+  // complete (`speak("Done.");)`), or a ) typed twice (`colors[Math.floor(r * 5))]`: either one goes, and the
+  // text is the same). A closer alone in the middle of a line may be a missing opener elsewhere (`a + b) * c`),
+  // and a } is not taken: a missing { is as good an answer (a loop body without braces, its last line cut
+  // loose), so there is no one answer
   const lineStart = stopped === null ? 0 : code.lastIndexOf('\n', stopped - 1) + 1;
-  if (stopped !== null && /[)\]]/.test(code[stopped] ?? '') && /;\s*$/.test(code.slice(lineStart, stopped)) && /^[ \t]*(?:\r?\n|$)/.test(code.slice(stopped + 1))) {
+  const typedTwice = stopped !== null && code[stopped] === ')' && code[stopped - 1] === ')';
+  const endsStatement = stopped !== null && /;\s*$/.test(code.slice(lineStart, stopped)) && /^[ \t]*(?:\r?\n|$)/.test(code.slice(stopped + 1));
+  if (stopped !== null && /[)\]]/.test(code[stopped] ?? '') && (typedTwice || endsStatement)) {
     const candidate = code.slice(0, stopped) + code.slice(stopped + 1);
     if (tryParse(candidate)) return { code: candidate, line: code.slice(0, stopped).split('\n').length, removed: code[stopped] };
   }
@@ -589,6 +593,225 @@ export function unwrapBackticks(code: string): { code: string; lines: number[] }
   let fixed = code;
   for (const edit of [...edits].sort((a, b) => b.start - a.start)) fixed = fixed.slice(0, edit.start) + edit.text + fixed.slice(edit.end);
   return tryParse(fixed) ? { code: fixed, lines: edits.flatMap((edit) => edit.lines).sort((a, b) => a - b) } : null;
+}
+
+/**
+ * Tone's note values written without quotes: `8n` is a BigInt literal (it parses, and Tone gets a BigInt
+ * where it wants the text "8n"), and `1m`, `4t` and the dotted `8n.` are syntax errors. In a program that
+ * uses Tone, such a number in code (not in a string or a comment) becomes the string: "8n", "1m", "4t",
+ * "8n.". A plain `n` only for the note values a BigInt is never meant for (1, 2, 4, 8, 16, 32, 64), so a real
+ * BigInt (`10n ** 20n`) stays. The result must parse.
+ */
+export function quoteToneTimes(code: string): { code: string; quoted: string[] } | null {
+  if (!/\bTone\b/.test(code) || !/\d[nmt]/.test(code)) return null;
+  // Which characters are code: not inside a string, a template's text, a comment
+  const inCode = new Array<boolean>(code.length).fill(true);
+  const mark = (from: number, to: number) => inCode.fill(false, from, to);
+  const braces: number[] = [];
+  let at = 0;
+  while (at < code.length) {
+    const c = code[at];
+    if (c === '/' && code[at + 1] === '/') {
+      const end = code.indexOf('\n', at);
+      const stop = end < 0 ? code.length : end;
+      mark(at, stop);
+      at = stop;
+    } else if (c === '/' && code[at + 1] === '*') {
+      const end = code.indexOf('*/', at + 2);
+      const stop = end < 0 ? code.length : end + 2;
+      mark(at, stop);
+      at = stop;
+    } else if (c === '"' || c === "'") {
+      let i = at + 1;
+      while (i < code.length && code[i] !== c && code[i] !== '\n') i += code[i] === '\\' ? 2 : 1;
+      mark(at, Math.min(i + 1, code.length));
+      at = i + 1;
+    } else if (c === '`' || (c === '}' && braces.length && braces[braces.length - 1] === 0)) {
+      // A template's text, up to its closing backtick or the next ${
+      if (c === '}') braces.pop();
+      let i = at + 1;
+      while (i < code.length && code[i] !== '`' && !(code[i] === '$' && code[i + 1] === '{')) i += code[i] === '\\' ? 2 : 1;
+      if (code[i] === '$') {
+        mark(at, i + 2);
+        braces.push(0);
+        at = i + 2;
+      } else {
+        mark(at, Math.min(i + 1, code.length));
+        at = i + 1;
+      }
+    } else {
+      if (c === '{' && braces.length) braces.push(1);
+      else if (c === '}' && braces.length) braces.pop();
+      at++;
+    }
+  }
+  const quoted: string[] = [];
+  const fixed = code.replace(/(?<![\w$.])(\d+)([nmt])(\.)?(?![\w$])/g, (whole, digits: string, unit: string, dot: string | undefined, offset: number) => {
+    if (!inCode[offset]) return whole;
+    if (unit === 'n' && !dot && !['1', '2', '4', '8', '16', '32', '64'].includes(digits)) return whole;
+    if (unit !== 'n' && dot) return whole;
+    quoted.push(whole);
+    return JSON.stringify(whole);
+  });
+  return quoted.length > 0 && fixed !== code && tryParse(fixed) ? { code: fixed, quoted: [...new Set(quoted)] } : null;
+}
+
+/**
+ * A declaration whose value nothing reads, made with new by a class the library does not have
+ * (`const melody = new Tone.Melody();` where Tone has no Melody and `melody` is named nowhere else): its
+ * only effect is to throw, so it is taken out. The error names the member; the object is one the page really
+ * has, without that member; the arguments make nothing happen (no calls, no assignments); and the name is
+ * in the program nowhere but the declaration. The result must parse.
+ */
+export function dropUnusedFailingDeclaration(code: string, error: string, scope?: Record<string, unknown>): ErrorHint | null {
+  const missing = missingConstructor(error) ?? missingMethod(error);
+  if (!missing || !scope) return null;
+  const real = realMembers(code, missing.object, scope);
+  if (!real || real.members.some((m) => m.name === missing.method)) return null;
+  // (a slip of a real member is corrected, not cut out)
+  if (methodHint(code, error, scope)?.correction) return null;
+  const ast = tryParse(code);
+  if (!ast) return null;
+  const pure = (node: AnyNode): boolean => {
+    let ok = true;
+    walk(node, (inner) => {
+      if (/^(?:CallExpression|NewExpression|AssignmentExpression|UpdateExpression|AwaitExpression|YieldExpression|TaggedTemplateExpression)$/.test(inner.type)) ok = false;
+    });
+    return ok;
+  };
+  const cuts: Array<{ start: number; end: number; name: string }> = [];
+  walk(ast, (node) => {
+    if (node.type !== 'VariableDeclaration' || (node.declarations as AnyNode[]).length !== 1) return;
+    const declarator = (node.declarations as AnyNode[])[0];
+    const init = declarator.init as AnyNode | null;
+    // (a `new` only makes an object that does nothing until it is used; a call may be the very thing asked for)
+    if ((declarator.id as AnyNode).type !== 'Identifier' || init?.type !== 'NewExpression') return;
+    const callee = init.callee as AnyNode;
+    if (callee.type !== 'MemberExpression' || callee.computed || code.slice((callee.object as AnyNode).start, (callee.object as AnyNode).end) !== missing.object || (callee.property as AnyNode).name !== missing.method) return;
+    if (!(init.arguments as AnyNode[]).every(pure)) return;
+    cuts.push({ start: node.start, end: node.end, name: (declarator.id as AnyNode).name as string });
+  });
+  if (cuts.length === 0) return null;
+  let fixed = code;
+  const removed: string[] = [];
+  for (const cut of cuts.sort((a, b) => b.start - a.start)) {
+    const rest = fixed.slice(0, cut.start) + fixed.slice(cut.end);
+    // Named anywhere else (a read, a handler string, a shadowing name): not unused
+    if (new RegExp(`(?<![\\w$.])${cut.name.replace(/\$/g, '\\$')}(?![\\w$])`).test(rest)) continue;
+    const lineStart = fixed.lastIndexOf('\n', cut.start - 1) + 1;
+    const alone = /^[ \t]*$/.test(fixed.slice(lineStart, cut.start)) ? lineStart : cut.start;
+    fixed = fixed.slice(0, alone) + fixed.slice(cut.end).replace(/^[ \t]*\n?/, alone === lineStart ? '' : '$&');
+    removed.push(cut.name);
+  }
+  return removed.length > 0 && fixed.trim() && tryParse(fixed) ? { correction: { code: fixed, note: `${removed.join(', ')} (made by ${missing.object}.${missing.method}, which ${missing.object} does not have, and read nowhere) → declaration removed` } } : null;
+}
+
+/**
+ * Values a program sets and never reads, that look like input to a drawing: a color (`oceanColor = '#4b0082'`, when the
+ * browser says it is one), a number, or a list of points. From the parser's scopes: a name that is only ever written
+ * (declared with the value, or assigned it) and named nowhere else in the program. At most three, in the order set.
+ */
+export function unusedDrawingValues(code: string, isColor: (value: string) => boolean): string[] {
+  const tree = analyse(code);
+  if (!tree) return [];
+  const looksLikeDrawingInput = (value: AnyNode | null | undefined): boolean => {
+    if (!value) return false;
+    if (value.type === 'Literal') return (typeof value.value === 'string' && isColor(value.value as string)) || (typeof value.value === 'number' && Number.isFinite(value.value));
+    if (value.type === 'UnaryExpression' && value.operator === '-') return looksLikeDrawingInput(value.argument as AnyNode);
+    if (value.type === 'ArrayExpression') {
+      const items = (value.elements as Array<AnyNode | null>).filter(Boolean) as AnyNode[];
+      return items.length > 0 && items.every((item) => item.type === 'ArrayExpression' || item.type === 'ObjectExpression' || looksLikeDrawingInput(item));
+    }
+    return false;
+  };
+  const set = new Map<string, number>();
+  for (const node of tree.nodes) {
+    if (node.type === 'VariableDeclarator' && (node.id as AnyNode).type === 'Identifier' && looksLikeDrawingInput(node.init as AnyNode | null)) {
+      if (!set.has((node.id as AnyNode).name as string)) set.set((node.id as AnyNode).name as string, node.start);
+    } else if (node.type === 'AssignmentExpression' && node.operator === '=' && (node.left as AnyNode).type === 'Identifier' && looksLikeDrawingInput(node.right as AnyNode)) {
+      if (!set.has((node.left as AnyNode).name as string)) set.set((node.left as AnyNode).name as string, node.start);
+    }
+  }
+  const unused: string[] = [];
+  for (const [name] of [...set].sort((a, b) => a[1] - b[1])) {
+    const read = tree.nodes.some((node) => {
+      if (node.type !== 'Identifier' || node.name !== name) return false;
+      const parent = tree.parent.get(node);
+      // The declaration's own name, and the left of a plain assignment, only write it
+      if (tree.bindings.has(node)) return false;
+      if (parent?.type === 'AssignmentExpression' && parent.left === node && parent.operator === '=') return false;
+      return isReference(tree, node) || (parent?.type === 'Property' && !!parent.shorthand);
+    });
+    // (named in a string, a handler or a template)
+    const written = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}(?![\\w$])`, 'g');
+    const mentions = [...code.matchAll(written)].length;
+    const writes = tree.nodes.filter((node) => node.type === 'Identifier' && node.name === name && (tree.bindings.has(node) || (tree.parent.get(node)?.type === 'AssignmentExpression' && (tree.parent.get(node) as AnyNode).left === node))).length;
+    if (!read && mentions <= writes) unused.push(name);
+  }
+  return unused.slice(0, 3);
+}
+
+/** Canvas 2D (and renderer) calls that put something on screen: a function making them is a frame's drawing */
+const DRAWING_CALLS = new Set(['clearRect', 'fillRect', 'strokeRect', 'arc', 'ellipse', 'fillText', 'strokeText', 'drawImage', 'fill', 'stroke', 'render']);
+
+/**
+ * A frame loop that does no work beside the one drawing function nothing calls:
+ * `function start() { if (ok) requestAnimationFrame(start); }` next to `function animate() { ctx.clearRect(…);
+ * … }` runs every frame and shows the screen as it was. The loop was meant to run the drawing: its call is
+ * put first in the loop, so each frame draws. Only with exactly one such loop (a top-level function whose
+ * only calls are the request for its own next frame) and exactly one top-level function with no parameters
+ * that makes drawing calls and is mentioned nowhere else (not called, passed, or named in a handler string);
+ * anything else is the program's own plan. Kept only when the result parses.
+ */
+export function callFromFrameLoop(code: string): { code: string; loop: string; called: string } | null {
+  const ast = tryParse(code);
+  if (!ast) return null;
+  const functions = new Map<string, AnyNode>();
+  for (const statement of ast.body as AnyNode[]) {
+    if (statement.type === 'FunctionDeclaration' && statement.id) functions.set((statement.id as AnyNode).name as string, statement);
+    if (statement.type === 'VariableDeclaration') {
+      for (const d of statement.declarations as AnyNode[]) {
+        const init = d.init as AnyNode | null;
+        if ((d.id as AnyNode).type === 'Identifier' && (init?.type === 'ArrowFunctionExpression' || init?.type === 'FunctionExpression')) functions.set((d.id as AnyNode).name as string, init);
+      }
+    }
+  }
+  const calls = (fn: AnyNode) => {
+    const found: AnyNode[] = [];
+    walk(fn.body as AnyNode, (node) => node.type === 'CallExpression' && found.push(node));
+    return found;
+  };
+  const calleeName = (call: AnyNode) => {
+    const callee = call.callee as AnyNode;
+    return callee.type === 'Identifier' ? (callee.name as string) : callee.type === 'MemberExpression' && !callee.computed ? ((callee.property as AnyNode).name as string) : '';
+  };
+  const loops: string[] = [];
+  const drawers: string[] = [];
+  for (const [name, fn] of functions) {
+    if ((fn.body as AnyNode).type !== 'BlockStatement') continue;
+    const made = calls(fn);
+    const nextFrame = (call: AnyNode) => calleeName(call) === 'requestAnimationFrame' && (call.arguments as AnyNode[])[0]?.type === 'Identifier' && ((call.arguments as AnyNode[])[0].name as string) === name;
+    if (made.length > 0 && made.every(nextFrame)) loops.push(name);
+    else if ((fn.params as AnyNode[]).length === 0 && made.some((call) => DRAWING_CALLS.has(calleeName(call)))) drawers.push(name);
+  }
+  if (loops.length !== 1) return null;
+  const mentioned = (name: string) => {
+    let count = 0;
+    const call = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\s*\\(`);
+    walk(ast, (node) => {
+      if (node.type === 'Identifier' && node.name === name) count++;
+      else if (node.type === 'Literal' && typeof node.value === 'string' && call.test(node.value)) count++;
+      else if (node.type === 'TemplateElement' && call.test(String((node.value as { raw?: string }).raw ?? ''))) count++;
+    });
+    return count;
+  };
+  // (the declaration names it once: any other mention is a call or a handing over)
+  const orphans = drawers.filter((name) => mentioned(name) === 1);
+  if (orphans.length !== 1) return null;
+  const loop = functions.get(loops[0])!;
+  const body = loop.body as AnyNode;
+  const fixed = `${code.slice(0, body.start + 1)} ${orphans[0]}();${code.slice(body.start + 1)}`;
+  return tryParse(fixed) ? { code: fixed, loop: loops[0], called: orphans[0] } : null;
 }
 
 /**
@@ -1039,7 +1262,7 @@ function syntaxSlip(code: string, error: string, errorLine?: number): ErrorHint 
     if (quoted) return quoted;
   }
   const stray = dropStrayCharacter(code);
-  if (stray) return { correction: { code: stray.code, note: `${strayName(stray.removed)} at the end of line ${stray.line} → removed` } };
+  if (stray) return { correction: { code: stray.code, note: `${strayName(stray.removed)} on line ${stray.line} → removed` } };
   const braceless = wrapBracelessArrows(code);
   if (braceless) return { correction: { code: braceless.code, note: `statements as an arrow function's body (line${braceless.lines.length > 1 ? 's' : ''} ${braceless.lines.join(', ')}) → wrapped in { }` } };
   const twice = error.match(/Identifier '([^']+)' has already been declared/) ?? error.match(/Cannot declare a (?:const|let) variable twice: '([^']+)'/);
@@ -1567,6 +1790,20 @@ function standInElement(code: string, error: string, errorLine: number | undefin
     // Looked up as an element but used as something else (a MIDI output, an audio node, a
     // drawing context): that is the mistake, not a missing element (value-use.ts)
     const uses = holders.map((h) => usedAs(code, h)).filter((u): u is NonNullable<typeof u> => !!u);
+    // The members it is used with (on the lookup itself or on a name that holds it) belong to one browser type that the
+    // program already has a value of (a 2D context for clearRect and translate): that value is the one to use
+    const reached = [
+      ...new Set([
+        ...[...code.matchAll(new RegExp(`${lookup}\\s*\\.\\s*([A-Za-z_$][\\w$]*)`, 'g'))].map((m) => m[1]),
+        ...holders.flatMap((h) => valueUse(code, h)?.members ?? []),
+      ]),
+    ];
+    const kind = reached.length > 0 ? browserTypeWith(reached, page?.scope) : null;
+    const tree = kind ? analyse(code) : null;
+    const mine = tree ? [...new Set(tree.nodes.filter((n) => n.type === 'VariableDeclarator' && (n.id as AnyNode).type === 'Identifier').map((n) => (n.id as AnyNode).name as string))].filter((name) => !holders.includes(name) && bindingTypeOf(code, tree, name) === kind) : [];
+    if (kind && mine.length === 1) {
+      return { text: `${missing} ${reached.slice(0, 3).map((m) => `${m}()`).join(' and ')} ${reached.length > 1 ? 'are' : 'is'} used on it, but ${reached.length > 1 ? 'they belong' : 'it belongs'} to a ${kind}, and the program already has one: ${mine[0]}. Use ${mine[0]}.${reached[0]}(…) and leave the page element out.` };
+    }
     if (uses.length > 0) {
       // Used only as send([…]): surely the MIDI output, and Chatty has one ready (out)
       if (holders.length > 0 && holders.every((h) => onlySendsLists(code, h))) {
@@ -1851,6 +2088,8 @@ function factoryOfClass(code: string, error: string, scope?: Record<string, unkn
   const real = realMembers(code, missing.object, scope);
   if (!real || real.members.some((m) => m.name === missing.method)) return null;
   const classes = new Set(real.members.filter((m) => m.kind === 'class').map((m) => m.name));
+  const suffix = missing.method.match(/^(?:create|make|new|build)([A-Z]\w*)$/)?.[1];
+  const madeOf = suffix && classes.has(suffix) ? suffix : null;
   const ast = tryParse(code);
   if (!ast) return null;
   const edits: Array<{ start: number; end: number; text: string }> = [];
@@ -1867,6 +2106,11 @@ function factoryOfClass(code: string, error: string, scope?: Record<string, unkn
         : first?.type === 'Literal' && typeof first.value === 'string'
           ? first.value
           : null;
+    // No class handed over, but the method's own name has one (Tone.createPolySynth(…)): all its arguments are the class's
+    if ((!named || !classes.has(named)) && madeOf) {
+      edits.push({ start: node.start, end: node.end, text: `new ${missing.object}.${madeOf}(${args.map((arg) => code.slice(arg.start, arg.end)).join(', ')})` });
+      return;
+    }
     if (!named || !classes.has(named)) {
       others = true;
       return;
@@ -2394,7 +2638,7 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
   const methods = methodReadFacts(code);
   const withMethods = methods ? { ...hint, text: [hint?.text, methods].filter(Boolean).join(' ') } : hint;
   // The library's own facts come last, after whatever the general rules found
-  const facts = [toneOptionFacts(code, page?.scope), toneConnectFacts(code, error, errorLine, page?.scope), toneValueFacts(code, error)].filter(Boolean).join(' ');
+  const facts = [toneOptionFacts(code, page?.scope), toneConnectFacts(code, error, errorLine, page?.scope), toneValueFacts(code, error), toneArgumentFacts(code, page?.scope)].filter(Boolean).join(' ');
   return facts ? { ...withMethods, text: [withMethods?.text, facts].filter(Boolean).join(' ') } : withMethods;
 }
 
@@ -2409,7 +2653,9 @@ function generalErrorHint(code: string, error: string, errorLine?: number, page?
     classCalledWithoutNew(code, error, errorLine, page?.scope) ??
     newOnObject(code, error, page?.scope) ??
     factoryOfClass(code, error, page?.scope) ??
-    classFactory(code, error, page?.scope);
+    classFactory(code, error, page?.scope) ??
+    dropUnusedFailingDeclaration(code, error, page?.scope) ??
+    (looksThrown(error) ? dropMismatchedArguments(code, errorLine, page?.scope) : null);
   if (rule) return rule;
   const helper = helperDeclared(code, error);
   if (helper) return helper;
@@ -2604,6 +2850,179 @@ export function toneValueFacts(code: string, error: string): string | null {
     return `${JSON.stringify(word)}${at >= 0 ? ` (line ${at + 1})` : ''} is not a number Tone can use there.`;
   });
   return `${facts.join(' ')} A pitch is a note name such as "C4" or "F#3" (a letter, an optional # or b, an octave number) or a frequency in Hz such as 261.63; a time is seconds such as 0.5 or a Tone time such as "8n".`;
+}
+
+/**
+ * The parameter names of a Tone class's constructor, in order, read from the class itself: Tone's constructors
+ * hand their arguments to optionsFromArguments(Class.getDefaults(), arguments, ["voice", "options"]), and the
+ * list of names survives the bundle (its function name does not). Null for a class that lists none.
+ */
+export function constructorParameters(cls: unknown): string[] | null {
+  if (typeof cls !== 'function') return null;
+  let source = '';
+  try {
+    source = Function.prototype.toString.call(cls);
+  } catch {
+    return null;
+  }
+  const list = source.match(/\barguments\s*,\s*(\[\s*(?:["'][\w$]+["']\s*,?\s*)+\])/)?.[1];
+  if (!list) return null;
+  try {
+    const names = JSON.parse(list.replace(/'/g, '"').replace(/,\s*\]/, ']')) as unknown;
+    return Array.isArray(names) && names.every((name) => typeof name === 'string') ? (names as string[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What an argument is, where the program says: a string, number, boolean, object, array, or function; null when it can't be told */
+type ArgKind = 'string' | 'number' | 'boolean' | 'object' | 'function';
+
+function argumentKind(code: string, ast: AnyNode, arg: AnyNode, scope: Record<string, unknown>): ArgKind | null {
+  const kindOf = (node: AnyNode, depth: number): ArgKind | null => {
+    switch (node.type) {
+      case 'Literal':
+        return typeof node.value === 'string' ? 'string' : typeof node.value === 'number' ? 'number' : typeof node.value === 'boolean' ? 'boolean' : null;
+      case 'TemplateLiteral':
+        return 'string';
+      case 'ObjectExpression':
+      case 'ArrayExpression':
+        return 'object';
+      case 'ArrowFunctionExpression':
+      case 'FunctionExpression':
+        return 'function';
+      case 'UnaryExpression':
+        return (node.operator === '-' || node.operator === '+') && kindOf(node.argument as AnyNode, depth) === 'number' ? 'number' : null;
+      case 'MemberExpression': {
+        const path = code.slice(node.start, node.end);
+        return typeof valueOfPath(code, path, scope) === 'function' ? 'function' : null;
+      }
+      case 'Identifier': {
+        if (depth > 2) return null;
+        // A name declared once, never assigned again: what it was set to
+        let found: AnyNode | null = null;
+        let declared = 0;
+        let assigned = false;
+        walk(ast, (n) => {
+          if (n.type === 'VariableDeclarator' && (n.id as AnyNode).type === 'Identifier' && (n.id as AnyNode).name === node.name) {
+            declared++;
+            found = n.init as AnyNode | null;
+          } else if (n.type === 'FunctionDeclaration' && n.id && (n.id as AnyNode).name === node.name) {
+            declared++;
+            found = n;
+          } else if (n.type === 'AssignmentExpression' && (n.left as AnyNode).type === 'Identifier' && (n.left as AnyNode).name === node.name) assigned = true;
+          else if (n.type === 'UpdateExpression' && (n.argument as AnyNode).type === 'Identifier' && (n.argument as AnyNode).name === node.name) assigned = true;
+        });
+        const only = found as AnyNode | null;
+        if (declared !== 1 || assigned || !only) return null;
+        return only.type === 'FunctionDeclaration' ? 'function' : kindOf(only, depth + 1);
+      }
+      default:
+        return null;
+    }
+  };
+  return kindOf(arg, 0);
+}
+
+/** Whether a value of this kind can stand where the class's default for the parameter is: Tone reads a time or a frequency from a number or a text */
+function fitsDefault(kind: ArgKind, fallback: unknown): boolean {
+  if (fallback === undefined || fallback === null) return true;
+  const expected = typeof fallback;
+  if (expected === 'function') return kind === 'function';
+  if (expected === 'object') return kind === 'object';
+  if (expected === 'string' || expected === 'number') return kind === 'string' || kind === 'number';
+  if (expected === 'boolean') return kind === 'boolean';
+  return true;
+}
+
+interface ConstructorCall {
+  node: AnyNode;
+  name: string;
+  params: string[];
+  /** The first argument that cannot be what its parameter takes, with what the parameter is */
+  first: { index: number; param: string; kind: ArgKind; expected: string } | null;
+  /** The arguments past the parameters the constructor lists (it ignores them) */
+  extra: number;
+}
+
+/** The `new Tone.Class(…)` calls whose class lists its parameters, with any argument that cannot be what its parameter takes */
+function constructorCalls(code: string, scope?: Record<string, unknown>): ConstructorCall[] {
+  const tone = scope?.Tone as Record<string, unknown> | undefined;
+  const ast = tone ? tryParse(code) : null;
+  if (!tone || !ast || new RegExp('(?:const|let|var|function|class)\\s+Tone\\b').test(code)) return [];
+  const calls: ConstructorCall[] = [];
+  walk(ast, (node) => {
+    if (node.type !== 'NewExpression') return;
+    const callee = node.callee as AnyNode;
+    if (callee.type !== 'MemberExpression' || callee.computed || (callee.object as AnyNode).type !== 'Identifier' || (callee.object as AnyNode).name !== 'Tone') return;
+    const name = (callee.property as AnyNode).name as string;
+    const cls = tone[name];
+    const params = constructorParameters(cls);
+    if (!params) return;
+    let defaults: Record<string, unknown> = {};
+    try {
+      defaults = (cls as { getDefaults?: () => Record<string, unknown> }).getDefaults?.() ?? {};
+    } catch {
+      defaults = {};
+    }
+    const args = node.arguments as AnyNode[];
+    let first: ConstructorCall['first'] = null;
+    // (one object alone is Tone's named form: new Tone.PolySynth({ volume: -8 }))
+    const named = args.length === 1 && argumentKind(code, ast, args[0], scope!) === 'object';
+    for (let index = 0; index < Math.min(args.length, params.length) && !first && !named; index++) {
+      const kind = argumentKind(code, ast, args[index], scope!);
+      if (kind && !fitsDefault(kind, defaults[params[index]])) {
+        const fallback = defaults[params[index]];
+        first = { index, param: params[index], kind, expected: typeof fallback === 'function' ? (params[index] === 'voice' ? 'an instrument class such as Tone.Synth' : 'a function') : typeof fallback === 'object' ? 'an object of options' : typeof fallback };
+      }
+    }
+    const extra = Math.max(0, args.length - params.length);
+    if (first || extra > 0) calls.push({ node, name, params, first, extra });
+  });
+  return calls;
+}
+
+/** Whether an error is one a program threw (a TypeError, a missing name, a library's refusal), not a check on what it did */
+export function looksThrown(error: string): boolean {
+  return /\b(?:is not a function|is not a constructor|is not defined|is not an object|is not iterable|Cannot read propert|Cannot set propert|Cannot access|Cannot destructure|Invalid argument|Failed to execute|Illegal invocation|Maximum call stack|Can't find variable|before initialization|TypeError|RangeError|ReferenceError|Error:)/.test(error) && !/^(?:The (?:program|page|screen)|Nothing the program|sound:)/.test(error);
+}
+
+/**
+ * What a Tone constructor takes, said for each `new Tone.Class(…)` that hands it something its parameter
+ * cannot be (read from the real class, see constructorParameters): `new Tone.Loop(callback, interval)`: the first
+ * argument is a function; here it is a string. Nothing where the arguments could fit.
+ */
+export function toneArgumentFacts(code: string, scope?: Record<string, unknown>): string | null {
+  const facts = constructorCalls(code, scope)
+    .filter((call) => call.first)
+    .map((call) => {
+      const { index, param, kind, expected } = call.first!;
+      const ordinal = ['first', 'second', 'third', 'fourth'][index] ?? `#${index + 1}`;
+      return `new Tone.${call.name}(${call.params.join(', ')}): the ${ordinal} argument is ${param}, ${/^(?:a|an) /.test(expected) ? expected : `a ${expected}`}; here it is ${kind === 'object' ? 'an object' : `a ${kind}`}.`;
+    });
+  return facts.length ? [...new Set(facts)].slice(0, 2).join(' ') : null;
+}
+
+/**
+ * A Tone constructor handed arguments that cannot be what its parameters take (`new Tone.PolySynth("C4", 100, 0)`:
+ * voice is a class and options an object), failing inside the library: from the first argument that cannot fit on,
+ * the arguments go (the later ones would take the place of the earlier), and so do those past the parameters the
+ * constructor lists. For a call on the failing line, or when the error has no line of the program's (it was thrown
+ * inside Tone). The correction is made only if a test run of the program changes the error (mustRunClean is not asked:
+ * the rest of the program may have its own).
+ */
+export function dropMismatchedArguments(code: string, errorLine: number | undefined, scope?: Record<string, unknown>): ErrorHint | null {
+  const calls = constructorCalls(code, scope).filter((call) => call.first && (!errorLine || lineOf(call.node) === errorLine));
+  if (calls.length === 0) return null;
+  let fixed = code;
+  const dropped: string[] = [];
+  for (const call of [...calls].sort((a, b) => b.node.start - a.node.start)) {
+    const args = call.node.arguments as AnyNode[];
+    const from = call.first!.index;
+    fixed = fixed.slice(0, from === 0 ? (call.node.callee as AnyNode).end : args[from - 1].end) + `${from === 0 ? '()' : ')'}${fixed.slice(call.node.end)}`;
+    dropped.push(`new Tone.${call.name}(${args.slice(from).map((arg) => code.slice(arg.start, arg.end)).join(', ')})`);
+  }
+  return tryParse(fixed) && fixed !== code ? { correction: { code: fixed, note: `${dropped.join('; ')}: arguments that its parameters (${calls[0].params.join(', ')}) cannot take → left out` } } : null;
 }
 
 export function toneOptionFacts(code: string, scope?: Record<string, unknown>): string | null {

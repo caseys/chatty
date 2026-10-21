@@ -9,7 +9,7 @@ import type { LlmRuntimeProvider, ToolDefinition } from '../types/index.ts';
 import { loopProtect } from './loop-protect.ts';
 import { playNotesHelper } from './music-tool.ts';
 import { fetchWikipediaSummary } from './web-tools.ts';
-import { closeCutOff, declareOnce, type StandIn } from '../core/error-hints.ts';
+import { callFromFrameLoop, closeCutOff, declareOnce, type StandIn } from '../core/error-hints.ts';
 import { analyse, isReference } from '../core/blank-fix.ts';
 import { sureMatch } from '../core/fuzzy-match.ts';
 import { checkedIds, elementKinds } from './element-kinds.ts';
@@ -234,6 +234,8 @@ export interface PreparedExecutableCode {
   repeatedBlocks?: number;
   /** Lines of bare markup between code blocks (a <canvas> on a line of its own), put on the page instead of said aloud */
   markupBlocks?: number;
+  /** Drawing functions put in the frame loop that never ran them ("animate() → start()") */
+  framed?: string[];
   /** Functions its inline handlers call, made reachable from them (see exposeFunctionsToInlineHandlers) */
   exposed?: string[];
   /** Scripts in markup it sets through innerHTML, whose code now runs as part of the program (see hoistPageScripts) */
@@ -626,6 +628,12 @@ function withTalk(parts: ReplyPart[]): string {
  * it begins: its other functions are left for it to call.
  */
 export function callUncalledFunctions(original: string, awaited = true): string {
+  // A frame loop that does nothing beside the drawing function nothing calls: the loop runs it
+  const looped = callFromFrameLoop(original);
+  if (looped) {
+    original = looped.code;
+    preparing?.looped.push(`${looped.called}() → ${looped.loop}()`);
+  }
   // Judged without comments: a word in a comment ("// then draw") is no call of draw()
   const code = stripComments(original);
   // The program's top-level functions that take nothing, however they are indented (a page's
@@ -1069,14 +1077,14 @@ export function withoutMarkdownLeftovers(text: string): string {
 }
 
 /** What preparing a reply added, for the run log (see inspectExecutableCode) */
-let preparing: { called: string[]; exposed: string[]; redeclared: string[]; repeats: number; markup: number } | null = null;
+let preparing: { called: string[]; exposed: string[]; redeclared: string[]; repeats: number; markup: number; looped: string[] } | null = null;
 
 /**
  * The reply as the program to run, with what preparing it added: the functions it never called,
  * called at its end, and those its inline handlers (onclick="go()") need, made reachable
  */
 export function inspectExecutableCode(rawText: string, options: { closeCutOff?: boolean; speakComment?: boolean } = {}): PreparedExecutableCode {
-  const added = { called: [] as string[], exposed: [] as string[], redeclared: [] as string[], repeats: 0, markup: 0 };
+  const added = { called: [] as string[], exposed: [] as string[], redeclared: [] as string[], repeats: 0, markup: 0, looped: [] as string[] };
   const outer = preparing;
   preparing = added;
   try {
@@ -1096,6 +1104,7 @@ export function inspectExecutableCode(rawText: string, options: { closeCutOff?: 
       ...(added.redeclared.length ? { redeclared: [...new Set(added.redeclared)] } : {}),
       ...(added.repeats ? { repeatedBlocks: added.repeats } : {}),
       ...(added.markup ? { markupBlocks: added.markup } : {}),
+      ...(added.looped.length ? { framed: [...new Set(added.looped)] } : {}),
       ...(hoisted ? { hoistedScripts: hoisted } : {}),
     };
   } finally {
@@ -1791,6 +1800,16 @@ export class JavascriptRuntime {
     }
   }
 
+  /** Functions the card's inline handlers (onclick="rollDice()") call that the page does not have */
+  deadHandlers(): string[] {
+    try {
+      const own = (this.activeIframe?.contentWindow as unknown as { __chattyDeadHandlers?: () => string[] } | null)?.__chattyDeadHandlers;
+      return typeof own === 'function' ? own() : [];
+    } catch {
+      return [];
+    }
+  }
+
   /** The empty elements on the card, as selectors (div.bar ×5), for saying what shows nothing */
   emptyElements(): string[] {
     try {
@@ -1815,12 +1834,22 @@ export class JavascriptRuntime {
    * Whether the card shows anything but canvases nothing was drawn on (hasVisualContent counts a
    * blank canvas as something). A page that can't say is taken as hasVisualContent says.
    */
-  hasDrawnContent(): boolean {
+  hasDrawnContent(boxesOnly = false): boolean {
     try {
-      const own = (this.activeIframe?.contentWindow as unknown as { __chattyHasDrawing?: () => boolean } | null)?.__chattyHasDrawing;
-      return typeof own === 'function' ? own() : this.hasVisualContent();
+      const own = (this.activeIframe?.contentWindow as unknown as { __chattyHasDrawing?: (boxesOnly: boolean) => boolean } | null)?.__chattyHasDrawing;
+      return typeof own === 'function' ? own(boxesOnly) : this.hasVisualContent();
     } catch {
       return this.hasVisualContent();
+    }
+  }
+
+  /** Whether a canvas was cleared after its last drawing call, or cleared and never drawn on: the function of the program the clear ran in (null when the stack names none) */
+  clearedWithoutDrawing(): { fn: string | null } | null {
+    try {
+      const own = (this.activeIframe?.contentWindow as unknown as { __chattyClearedLast?: () => { fn: string | null } | null } | null | undefined)?.__chattyClearedLast;
+      return typeof own === 'function' ? own() : null;
+    } catch {
+      return null;
     }
   }
 
@@ -3179,6 +3208,21 @@ export class JavascriptRuntime {
     // The drawing calls each canvas has had, counted as the runner passes them on (the outcome
     // check's "was anything drawn", without reading pixels back, which costs memory on a phone)
     const __chattyDrawn = new WeakMap();
+    // Which came later on a canvas, its last full clear or its last drawing call (a counter of both), and the function
+    // of the program the clear ran in: a drawing function that clears and then draws nothing shows an empty canvas
+    let __chattyOps = 0;
+    const __chattyLastDraw = new WeakMap();
+    const __chattyLastClear = new WeakMap();
+    function __chattyCallerName() {
+      try {
+        for (const frame of String(new Error().stack || '').split('\\n')) {
+          if (!/chatty-program\\.js/.test(frame)) continue;
+          const found = frame.match(/at (?:async )?([A-Za-z_$][\\w$]*) \\(/) || frame.match(/^([A-Za-z_$][\\w$]*)@/);
+          return found && found[1] !== 'eval' && found[1] !== 'async' ? found[1] : null;
+        }
+      } catch {}
+      return null;
+    }
     const __CHATTY_DRAWING = new Set(['fill', 'stroke', 'fillRect', 'strokeRect', 'fillText', 'strokeText', 'drawImage', 'putImageData', 'drawFocusIfNeeded']);
     // Where the drawing calls land, noted for a moment when asked (the outcome check, once a canvas
     // that is drawn on all the time shows nothing): each call's box in canvas coordinates, kept as
@@ -3233,6 +3277,10 @@ export class JavascriptRuntime {
         proto[key] = function () {
           if (checking) checkCall(label, key, fn.length, Array.prototype.slice.call(arguments));
           if (draws && this && this.canvas) __chattyDrawn.set(this.canvas, (__chattyDrawn.get(this.canvas) || 0) + 1);
+          if (draws && this && this.canvas) __chattyLastDraw.set(this.canvas, ++__chattyOps);
+          else if (checking && key === 'clearRect' && label === 'ctx' && this && this.canvas && Number(arguments[0]) <= 0 && Number(arguments[1]) <= 0 && Number(arguments[2]) >= this.canvas.width && Number(arguments[3]) >= this.canvas.height) {
+            __chattyLastClear.set(this.canvas, { op: ++__chattyOps, fn: __chattyCallerName() });
+          }
           if (__chattyTraceOn && label === 'ctx') __chattyNote(this, key, arguments);
           try {
             return fn.apply(this, arguments);
@@ -4017,6 +4065,12 @@ export class JavascriptRuntime {
         return !__chattyDrawn.get(el);
       } catch { return false; }
     }
+    // Whether the page has a layout at all (a window that is not shown has none). A page whose elements are all
+    // empty has a page height of 0 and still a width, so the width counts too.
+    function __chattyLaidOut() {
+      const root = document.documentElement;
+      return root.getBoundingClientRect().height > 0 || root.clientWidth > 0;
+    }
     // An element with nothing in it and no room of its own (an empty <div id="time">): nothing to
     // see. A page without layout (a window that is not shown) can't say, so nothing is empty there.
     function __chattyEmptyBox(el) {
@@ -4025,7 +4079,7 @@ export class JavascriptRuntime {
         if ((el.textContent || '').trim() || el.querySelector('canvas, svg, img, video, input, button, select, textarea, table, iframe')) return false;
         const box = el.getBoundingClientRect();
         if (box.width > 0 && box.height > 0) return false;
-        return document.documentElement.getBoundingClientRect().height > 0;
+        return __chattyLaidOut();
       } catch { return false; }
     }
     // With ignoreBlank, a canvas nothing was drawn on and an element with nothing in it show
@@ -4050,9 +4104,9 @@ export class JavascriptRuntime {
         return !!el && el.tagName === 'CANVAS' && !!el.width && !!el.height && __chattyIs2d(el) && !!__chattyDrawn.get(el) && __chattyFlat(el) === true;
       } catch { return false; }
     }
-    function __chattyVisualNow(ignoreBlank, ignoreFlat) {
+    function __chattyVisualNow(ignoreBlank, ignoreFlat, boxesOnly) {
       const rootEl = document.getElementById('root');
-      const hidden = (n) => isEmptyStandIn(n) || (ignoreBlank && (n.nodeType === 1 && (__chattyBlank(n) || (ignoreFlat && __chattyFlatDrawn(n)) || __chattyEmptyBox(n) || n.tagName === 'SCRIPT' || n.tagName === 'STYLE')));
+      const hidden = (n) => isEmptyStandIn(n) || (ignoreBlank && (n.nodeType === 1 && ((!boxesOnly && __chattyBlank(n)) || (ignoreFlat && __chattyFlatDrawn(n)) || __chattyEmptyBox(n) || n.tagName === 'SCRIPT' || n.tagName === 'STYLE')));
       const shows = (n) => n.nodeType === 3 ? n.textContent.trim().length > 0 : n.nodeType === 1 && !hidden(n);
       return Boolean(rootEl && Array.from(rootEl.childNodes).some(shows)) ||
         Array.from(document.querySelectorAll('canvas, svg, table, img, video, form, button, input, div:not(#root)')).some((el) => !hidden(el)) ||
@@ -4063,6 +4117,24 @@ export class JavascriptRuntime {
     }
     // How many things the user can press, type in or choose from are on the page
     window.__chattyControls = () => document.querySelectorAll('button, input:not([type="hidden"]), select, textarea, a[href], [onclick], [contenteditable="true"], summary').length;
+    // Functions an inline handler in the markup calls (onclick="rollDice()") that the page does not have: the
+    // handler runs them by name when pressed, and throws. Names the element itself or the document has are real.
+    window.__chattyDeadHandlers = () => {
+      try {
+        const dead = new Set();
+        for (const el of Array.from(document.querySelectorAll('*'))) {
+          for (const attr of Array.from(el.attributes)) {
+            if (!/^on[a-z]+$/.test(attr.name)) continue;
+            for (const m of attr.value.matchAll(/(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*\\(/g)) {
+              const name = m[1];
+              if (/^(?:if|for|while|switch|function|return|typeof|catch|new|await|async)$/.test(name)) continue;
+              if (typeof window[name] !== 'function' && !(name in el) && !(name in document) && !(el.form && name in el.form)) dead.add(name);
+            }
+          }
+        }
+        return Array.from(dead).slice(0, 4);
+      } catch { return []; }
+    };
     // The elements on the page that have nothing in them and no room, as selectors with counts
     // (div.bar ×5, div#time): what the outcome check names when nothing shows
     window.__chattyEmptyElements = () => {
@@ -4076,7 +4148,8 @@ export class JavascriptRuntime {
     };
     // The host asks this page (see hasVisualContent, hasDrawnContent)
     window.__chattyHasVisual = hasVisualNow;
-    window.__chattyHasDrawing = () => __chattyVisualNow(true);
+    // (boxesOnly: a canvas nothing was drawn on still counts, since a game may wait for a tap to draw; elements with nothing in them never do)
+    window.__chattyHasDrawing = (boxesOnly) => __chattyVisualNow(true, false, !!boxesOnly);
     // Whether the card shows anything but text: a canvas that was drawn on, an <svg>, a picture, or a box with
     // a size and a color or an image behind it (a drawing made of elements). Null where it can't be told.
     window.__chattyGraphic = () => {
@@ -4092,13 +4165,24 @@ export class JavascriptRuntime {
           if ((color && color !== 'transparent' && color !== 'rgba(0, 0, 0, 0)') || (style.backgroundImage && style.backgroundImage !== 'none')) return true;
         }
         // A page without layout (a window that is not shown) can't say
-        return document.documentElement.getBoundingClientRect().height > 0 || document.querySelectorAll('#root *').length === 0 ? false : null;
+        return __chattyLaidOut() || document.querySelectorAll('#root *').length === 0 ? false : null;
       } catch {
         return null;
       }
     };
     // Something visible now: as above, and a canvas drawn on that shows only one flat color counts for nothing
     window.__chattySeen = () => __chattyVisualNow(true, true);
+    // A canvas whose last full clear came after its last drawing call (or that was cleared and never drawn on): the
+    // function the clear ran in, if the stack names one. Null when there is none.
+    window.__chattyClearedLast = () => {
+      try {
+        for (const canvas of document.querySelectorAll('canvas')) {
+          const clear = __chattyLastClear.get(canvas);
+          if (clear && (__chattyLastDraw.get(canvas) || 0) < clear.op) return { fn: clear.fn || null };
+        }
+      } catch {}
+      return null;
+    };
     // The 2D canvases that have been drawn on: how many drawing calls each has had, and whether it shows one flat color
     window.__chattyCanvasState = () => {
       const out = [];

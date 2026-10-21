@@ -45,7 +45,7 @@ import { memberBlank, fillMember, blankChoices, blankRequest, choiceRequest, dec
 import { madeAsWrongClass, memberList, withLibraryClassNames, type RealMember } from './method-hints.ts';
 import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest, restoreWhole } from './line-fix.ts';
 import { missingStepsError, sameShortfallNote } from './sound-setup.ts';
-import { addNewToClasses, escapeScriptBackticks, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
+import { addNewToClasses, escapeScriptBackticks, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree, quoteToneTimes, unusedDrawingValues } from './error-hints.ts';
 import { applyAssignmentFixes, moveToContext, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { LOCAL_CHAT_MODELS } from './settings.ts';
@@ -247,6 +247,16 @@ const INTERFACE_REQUEST = new RegExp(`${INTERFACE_THING.source}|\\b(?:form|list|
 const VISUAL_REQUEST = new RegExp([INTERFACE_REQUEST, DRAWING_REQUEST, THREE_D_REQUEST, DIAGRAM_REQUEST].map((r) => r.source).join('|'), 'i');
 /** What must be on screen for the request to be done (what the outcome check goes by) */
 const VISUAL_THING = new RegExp([INTERFACE_THING, DRAWING_REQUEST, THREE_D_REQUEST, DIAGRAM_REQUEST].map((r) => r.source).join('|'), 'i');
+/** A request to see something (a verb for it, or the screen itself) */
+const ASKS_TO_SEE = /\b(?:draw|paint|sketch|animat\w*|show|display|visuali[sz]\w*|illustrate|canvas|chart|plot|graph|screen|picture|image)\b/i;
+/**
+ * Whether the request names something to see. A request for sound whose only visual words are nouns
+ * (a song's title: "Twinkle Twinkle Little Star", a "square" wave) asks for nothing to look at, unless it asks
+ * to see something or names an interface, a diagram or a 3D scene.
+ */
+const namesVisualThing = (request: string): boolean =>
+  VISUAL_THING.test(request) &&
+  !(SOUND_WORDS_REQUEST.test(request) && !ASKS_TO_SEE.test(request) && !INTERFACE_THING.test(request) && !DIAGRAM_REQUEST.test(request) && !THREE_D_REQUEST.test(request));
 /** A question or a look-up: asked as one ("Who was…", "…?"), or a look-up named outright */
 /** Arithmetic ("15 percent of 84", "3 times 4"): worked out, not looked up */
 const MATH_REQUEST = /\d\s*(?:%|percent|times|plus|minus|divided|squared|\*|\+|\/|x\s*\d)|\b(?:sum|average|square root) of\b/i;
@@ -355,10 +365,12 @@ const LISTENS_FOR_USER =
 /**
  * What the outcome check is for: a request to make or show something, not a question or a phrase
  * that names one ("who won the game", "speed of sound", "nearest star"), which a spoken answer
- * completes. "Can you draw a cat?" and "draw a 3x3 grid" are requests.
+ * completes. "Can you draw a cat?" and "draw a 3x3 grid" are requests. So is any instruction
+ * that says what the user will tap, click or type ("Roll a die when I tap a button"): there is
+ * something on screen for that.
  */
 const asksForOutcome = (request: string) =>
-  (ACTION_REQUEST.test(request) || /\b(?:show|display)\b/i.test(request)) && !QUESTION_WORDS.test(request);
+  (ACTION_REQUEST.test(request) || /\b(?:show|display)\b/i.test(request) || (STARTS_WITH_ACTION.test(request.trim()) && ASKS_FOR_INPUT.test(request))) && !QUESTION_WORDS.test(request);
 /** A request that begins with an imperative verb: the user is asking for something to be done ("Flip a coin", "Roll two dice") */
 const STARTS_WITH_ACTION =
   /^(?:please\s+)?(?:(?:can|could|would|will)\s+you\s+)?(?:play|draw|make|build|create|animate|code|program|design|generate|paint|sketch|render|chart|plot|graph|show|display|simulate|write|calculate|compute|convert|flip|roll|pick|choose|list|count|start|set|run|open|find|give|tell|add|remove|clear|change|turn|sort|shuffle|spin|throw)\b/i;
@@ -613,6 +625,16 @@ export function fixReplyTokens(program: string, line: number | undefined, block:
  */
 const ADDS_TO_PAGE =
   /\b(?:appendChild|append|prepend|insertAdjacent(?:HTML|Element|Text)|replaceChildren|replaceWith|innerHTML|outerHTML|textContent|innerText|getContext|THREE)\b|document\.write|\broot\b/;
+
+/**
+ * Whether the page is being painted: an animation frame arrives soon. A page nobody sees (a hidden
+ * pane, a covered or background window) gets none, whatever its visibility state says, and then
+ * nothing that runs on frames can be judged: the check says only what it saw.
+ */
+async function framesArrive(): Promise<boolean> {
+  if (typeof requestAnimationFrame !== 'function') return true;
+  return Promise.race([new Promise<boolean>((resolve) => requestAnimationFrame(() => resolve(true))), settle(700).then(() => false)]);
+}
 
 /**
  * Whether the card keeps changing by itself: its text, its markup or a canvas's pixels (see
@@ -891,6 +913,12 @@ export function repairBeforeRunning(code: string, isProse: boolean, note: (text:
     // First, lines that go (so the line numbers below match the program that runs).
     // Its own speak()/out/clear: taken out so the real helpers are used (error-hints.ts)
     if (!isProse) {
+      // Tone's note values written without quotes (8n is a BigInt; 1m, 4t, 8n. don't parse): the text they stand for
+      const times = quoteToneTimes(executableCode);
+      if (times) {
+        executableCode = times.code;
+        note(`${times.quoted.join(', ')} written without quotes → ${times.quoted.map((q) => JSON.stringify(q)).join(', ')} (Tone's note values are text): corrected before running`);
+      }
       const copies = dropHelperCopies(executableCode);
       if (copies.dropped.length > 0 || copies.renamed.length > 0 || copies.kept.length > 0) {
         executableCode = copies.code;
@@ -923,7 +951,7 @@ export function repairBeforeRunning(code: string, isProse: boolean, note: (text:
       const stray = dropStrayCharacter(executableCode);
       if (stray) {
         executableCode = stray.code;
-        note(`${strayName(stray.removed)} at the end of line ${stray.line} → removed: corrected before running`);
+        note(`${strayName(stray.removed)} on line ${stray.line} → removed: corrected before running`);
       }
       // `a && b = c`: a logical expression can't be assigned to; it is `a && (b = c)`
       const logical = wrapLogicalAssignment(executableCode);
@@ -1949,6 +1977,7 @@ export class ConversationOrchestrator {
           if (inspected.called?.length) appendRunLog('imagined', `${inspected.called.map((n) => `${n}()`).join(', ')} declared but never called → called at the end: corrected before running`);
           if (inspected.hoistedScripts) appendRunLog('imagined', `${inspected.hoistedScripts === 1 ? 'a <script>' : `${inspected.hoistedScripts} <script>s`} in markup the program sets never runs in the browser → its code is part of the program: corrected before running`);
           if (inspected.exposed?.length) appendRunLog('imagined', `${inspected.exposed.map((n) => `${n}()`).join(', ')} made reachable from the page's inline handlers: corrected before running`);
+          if (inspected.framed?.length) appendRunLog('imagined', `${inspected.framed.join(', ')}: a frame loop that did nothing but ask for the next frame now runs the drawing function nothing called: corrected before running`);
           if (inspected.markupBlocks) appendRunLog('imagined', `${inspected.markupBlocks === 1 ? 'a line of' : `${inspected.markupBlocks} blocks of`} markup between the code blocks said aloud → put on the page instead: corrected before running`);
           if (inspected.repeatedBlocks) appendRunLog('imagined', `the program written out again in another code block → one copy kept: corrected before running`);
           if (inspected.redeclared?.length) appendRunLog('imagined', `${inspected.redeclared.join(', ')} declared again → set again (the first declaration made let): corrected before running`);
@@ -2825,7 +2854,7 @@ export class ConversationOrchestrator {
   /** Whether the run is the program that does what was asked, or some of it (the sandbox saw it: shown, or sound started) */
   private didAsked(request: string, soundUsesBefore: number): boolean {
     if (!asksForOutcome(request)) return false;
-    const shown = VISUAL_THING.test(request) && !!this.javascriptRuntime.hasVisualContent?.();
+    const shown = namesVisualThing(request) && !!this.javascriptRuntime.hasVisualContent?.();
     const sound = SOUND_WORDS_REQUEST.test(request) && (this.javascriptRuntime.soundUseCount?.() ?? 0) > soundUsesBefore;
     return shown || sound;
   }
@@ -2937,12 +2966,15 @@ export class ConversationOrchestrator {
     const soundWaits = LISTENS_FOR_USER.test(code);
     // A request that names something to see as well still gets its visual check; a bare "play"
     // (a game, a video) is not a sound on its own then
-    const namesVisual = VISUAL_THING.test(request);
+    const namesVisual = namesVisualThing(request);
     // (a runtime that can't tell, as in tests, is taken at its word)
     // A bare "play" (a game, a video) chooses the sound rule but asks for no sound by itself
     const wantsSound = SOUND_WORDS_REQUEST.test(request) && !!this.javascriptRuntime.soundUseCount && !soundWaits;
     if (soundWaits && SOUND_WORDS_REQUEST.test(request)) appendRunLog('retry', 'outcome check: the sound waits for the user (a key, a tap, a button): not checked');
-    const wantsVisual = namesVisual && !!this.javascriptRuntime.hasVisualContent;
+    // A program that draws on animation frames, in a page that gets none, can't be judged: not a failure, untested
+    const unpainted = namesVisual && /\brequestAnimationFrame\b/.test(code) && !(await framesArrive());
+    if (unpainted) appendRunLog('retry', 'outcome check: the page gets no animation frames (nobody is watching it): what the program draws on frames is not judged');
+    const wantsVisual = namesVisual && !!this.javascriptRuntime.hasVisualContent && !unpainted;
     if (!wantsSound && !wantsVisual) return null;
     // Sound asked for, then measured at the speakers (two seconds): heard, or silent with the audio
     // running. Not measured (audio paused until a tap, or a runtime that can't): the request counts
@@ -2958,7 +2990,8 @@ export class ConversationOrchestrator {
     const shown = () => !!this.javascriptRuntime.hasVisualContent?.();
     // A canvas nothing was drawn on, or an element with nothing in it, shows nothing, unless the
     // program waits for the user to start it (a click, a key); it gets a moment to fill its first frame
-    const drawn = () => (soundWaits || !this.javascriptRuntime.hasDrawnContent ? shown() : this.javascriptRuntime.hasDrawnContent());
+    // (a program that waits for the user may draw its canvas on the first tap, but elements with nothing in them show nothing to tap)
+    const drawn = () => (!this.javascriptRuntime.hasDrawnContent ? shown() : this.javascriptRuntime.hasDrawnContent(soundWaits));
     const done = () => (!wantsSound || soundSettled()) && (!wantsVisual || drawn());
     // Long enough for the speaker measurement when sound was asked for
     for (let waited = 0; !done() && waited < (wantsSound && asked() ? 2500 : 1500); waited += 100) await settle(100);
@@ -2988,6 +3021,7 @@ export class ConversationOrchestrator {
     // A drawing asked for, and the card holds only text: the words stand where the picture should be
     const textOnly = wantsVisual && DRAW_REQUEST.test(request) && !soundWaits && shown() && drawn() && this.javascriptRuntime.hasGraphics?.() === false;
     const emptied = wantsVisual && shown() && !drawn() ? (this.javascriptRuntime.emptyElements?.() ?? []) : [];
+    const deadHandlers = wantsVisual && shown() && drawn() ? (this.javascriptRuntime.deadHandlers?.() ?? []) : [];
     const missing = [
       wantsSound && !asked()
         ? soundKinds(request).music
@@ -3016,12 +3050,24 @@ export class ConversationOrchestrator {
             : stillScreen
               ? 'The screen never changed and nothing is scheduled to change it: something that moves or counts has to keep updating what it shows (setInterval, or requestAnimationFrame that draws again each frame).'
               : '',
+      // A button whose handler in the markup (onclick="rollDice()") names a function the page does not have throws when pressed
+      deadHandlers.length ? `The page's inline handlers call ${deadHandlers.map((name) => `${name}()`).join(', ')}, which the program never defines: onclick="${deadHandlers[0]}()" runs the function of that name when pressed, so it has to exist (function ${deadHandlers[0]}() { … }).` : '',
     ].filter(Boolean);
     if (missing.length === 0) {
       appendRunLog('retry', `outcome check: ${[wantsSound ? 'wanted sound: heard' : '', wantsVisual ? 'wanted visual: seen' : ''].filter(Boolean).join('; ')}`);
       return null;
     }
     // Names the program wrote on its objects that they don't have (a property nothing reads): what the object does have
+    // A drawing that shows nothing: what the page and the program say about why (a canvas cleared after its drawing; values set for the drawing that nothing reads)
+    const failedDrawing = missing.some((text) => /^(?:The program put nothing visible|Nothing the program draws|The program drew nothing)/.test(text));
+    const drawingFacts: string[] = [];
+    if (failedDrawing && (DRAW_REQUEST.test(request) || DRAWING_REQUEST.test(request))) {
+      const cleared = this.javascriptRuntime.clearedWithoutDrawing?.();
+      if (cleared) drawingFacts.push(cleared.fn ? `${cleared.fn}() clears the canvas and then draws nothing.` : 'The canvas is cleared after the last drawing.');
+      const supports = (globalThis as { CSS?: { supports?: (property: string, value: string) => boolean } }).CSS?.supports;
+      const unused = code ? unusedDrawingValues(code, (value) => { try { return !!supports && supports('color', value); } catch { return false; } }) : [];
+      if (unused.length > 0) drawingFacts.push(`${unused.join(', ')} ${unused.length === 1 ? 'is' : 'are'} set but never used.`);
+    }
     const writes = this.javascriptRuntime.unknownWrites?.() ?? [];
     const scope = writes.length > 0 ? this.javascriptRuntime.pageScope?.() : null;
     const facts: string[] = [];
@@ -3031,7 +3077,7 @@ export class ConversationOrchestrator {
       const label = type.startsWith('element:') ? `a <${type.slice(8)}> element` : type;
       facts.push(`${name} isn't a setting of ${label}; its settings: ${list.settings.map((s) => s.name).join(', ')}.`);
     }
-    return [...missing, ...facts].join(' ');
+    return [...missing, ...drawingFacts, ...facts].join(' ');
   }
 
   /** A fix's progress note in the chat ("Fixing (3 of 10): …"): added like a fix turn's own */

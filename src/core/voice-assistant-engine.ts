@@ -101,6 +101,8 @@ function writeLlmLoadMarker(modelId: string): void {
 }
 // Which model was loading when the tab last died (any startup model, for diagnostics)
 const LOAD_STAGE_KEY = 'chatty_load_stage';
+/** The tiny first run right after a model loads (see warmUpChat); off for now */
+const WARM_UP_AFTER_LOAD = false;
 /** A model load that failed (and wasn't retried): shown in Settings on the next visit */
 const LAST_LOAD_FAILED_KEY = 'chatty_last_load_failed';
 function recordLoadFailure(text: string): void {
@@ -694,7 +696,6 @@ export class VoiceAssistantEngine {
             clearLlmLoadMarker();
             if (ticket !== this.llmLoadTicket) return;
             clearLoadFailure();
-            noteStep('warming up the model');
             return this.warmUpChat(provider).then(() => {
               noteStep('getting the sandbox ready');
               if (isConstrained) console.info(`[Chatty] loading ${modelName}: ready`);
@@ -1618,9 +1619,11 @@ export class VoiceAssistantEngine {
    * One tiny generation right after a WebLLM model loads, so the first-generation GPU cost
    * (pipeline compiles, KV cache) is paid while nothing else is happening. Not a chat turn:
    * not streamed, logged or remembered. It runs in the WebLLM worker, which catches and logs a
-   * failure. WebLLM only (LiteRT skipped).
+   * failure. WebLLM only (LiteRT skipped). Off (WARM_UP_AFTER_LOAD) while iPhone Safari's tab
+   * crashes are being narrowed down: the first reply pays the cost instead.
    */
   private async warmUpChat(provider: LlmRuntimeProvider): Promise<void> {
+    if (!WARM_UP_AFTER_LOAD) return;
     if (!(provider instanceof WebLlmProvider) || provider !== this.localChat) return;
     // iPhone/iPad Safari: a full second after the load before the first run (the load's own pause
     // is AFTER_LOAD_MS), the step where its tab was being killed

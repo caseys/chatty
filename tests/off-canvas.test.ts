@@ -191,6 +191,7 @@ describe('the sandbox runner says whether the card holds more than text', () => 
           canvas: any;
           constructor(canvas: any) { this.canvas = canvas; }
           fillRect() {}
+          clearRect() {}
           getTransform() { return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }; }
         }
         w.CanvasRenderingContext2D = Ctx2D;
@@ -220,6 +221,53 @@ describe('the sandbox runner says whether the card holds more than text', () => 
     const box = await page(`document.body.innerHTML = "<div style='background-color: blue'>water</div>";`);
     expect(['box', box.__chattyGraphic()]).toEqual(['box', true]);
     box.close();
+  });
+
+  it('counts a page of empty boxes as laid out when the window has a width (its page height is 0 then)', async () => {
+    // The real card from the tic-tac-toe Qwen3 0.6B wrote: two empty divs, the board never drawn
+    const board = await page(`document.body.innerHTML = "<div id='game'></div><div id='status'></div>";`, false);
+    expect(board.__chattyEmptyElements()).toEqual([]);
+    Object.defineProperty(board.document.documentElement, 'clientWidth', { value: 400, configurable: true });
+    expect(board.__chattyEmptyElements()).toEqual(['div#game', 'div#status']);
+    expect(board.__chattyHasDrawing()).toBe(false);
+    // (waiting for a tap does not make boxes with nothing in them something to see)
+    expect(board.__chattyHasDrawing(true)).toBe(false);
+    board.close();
+    // ... but a canvas nothing was drawn on yet may be waiting for the tap that draws it
+    const waiting = await page('const c = document.createElement("canvas"); c.width = 50; c.height = 50; document.body.append(c);');
+    expect(waiting.__chattyHasDrawing()).toBe(false);
+    expect(waiting.__chattyHasDrawing(true)).toBe(true);
+    waiting.close();
+  });
+
+  it('names the functions an inline handler calls that the page does not have (the die button that rolled nothing)', async () => {
+    // The real card from Qwen3 0.6B's "Roll a six-sided die when I tap a button": onclick="rollDice()" and no rollDice
+    const dead = await page(`document.body.innerHTML = "<button onclick='rollDice()'>Roll</button>";`);
+    expect(dead.__chattyDeadHandlers()).toEqual(['rollDice']);
+    dead.close();
+    // (defined in the program, a function of the window, of the element or of the document, a condition, or no call at all)
+    const fine = await page(
+      `function rollDice() {}\nwindow.rollDice = rollDice;\ndocument.body.innerHTML = "<button onclick='rollDice()'>Roll</button><button onclick='alert(1)'>a</button><button onclick='this.focus()'>b</button><button onclick='if (true) rollDice(); document.write(1)'>c</button><button onclick='go = 1'>d</button>";`
+    );
+    expect(fine.__chattyDeadHandlers()).toEqual([]);
+    fine.close();
+  });
+
+  it('says when a canvas was cleared after its last drawing, naming the function, and not when drawing came last', async () => {
+    const setup = 'const c = document.createElement("canvas"); c.width = 50; c.height = 50; document.body.append(c); const ctx = c.getContext("2d");';
+    const cleared = await page(`${setup}\nfunction draw() { ctx.fillRect(0, 0, 9, 9); }\nfunction wipe() { ctx.clearRect(0, 0, 50, 50); }\ndraw(); wipe();`);
+    expect(cleared.__chattyClearedLast()).toEqual({ fn: expect.anything() });
+    cleared.close();
+    const never = await page(`${setup}\nctx.clearRect(0, 0, 50, 50);`);
+    expect(never.__chattyClearedLast()).not.toBeNull();
+    never.close();
+    const fine = await page(`${setup}\nctx.clearRect(0, 0, 50, 50);\nctx.fillRect(0, 0, 9, 9);`);
+    expect(fine.__chattyClearedLast()).toBeNull();
+    fine.close();
+    // (a clear of part of the canvas is not a clear)
+    const part = await page(`${setup}\nctx.fillRect(0, 0, 9, 9);\nctx.clearRect(0, 0, 5, 5);`);
+    expect(part.__chattyClearedLast()).toBeNull();
+    part.close();
   });
 
   it('cannot say for a page with no layout, and says false for an empty one', async () => {

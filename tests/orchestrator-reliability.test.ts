@@ -205,7 +205,8 @@ describe('the outcome check on an app with nothing to press', () => {
 describe('the outcome check on a canvas nothing was drawn on', () => {
   // The program of Qwen3 0.6B's Pong: a canvas, a paddle and a mouse listener, and nothing that draws
   const pong = 'const canvas = document.createElement("canvas");\ndocument.body.appendChild(canvas);\nconst paddle = { x: 100 };\nwindow.addEventListener("mousemove", (e) => { paddle.x = e.clientX; });';
-  const blank = { soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => false };
+  // (a blank canvas still counts when the program waits for the user: boxesOnly)
+  const blank = { soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: (boxesOnly?: boolean) => !!boxesOnly };
 
   it('is a program that showed nothing drawn, with the facts', async () => {
     const error = await outcome('Make a single-player Pong game with a paddle you move by mouse or touch', blank, pong);
@@ -257,6 +258,40 @@ describe('the outcome check on a screen that never changes', () => {
     // Nothing is asked to move
     expect(await outcome('Draw a smiling cat face', still, 'ctx.fillRect(1, 1, 5, 5);')).toBeNull();
   }, 15000);
+});
+
+describe('the outcome check on a request for sound with a visual word in a title', () => {
+  // Qwen3 0.6B's Twinkle Twinkle program had no picture, and was told it "showed nothing" because of the word Star
+  const played = { soundUseCount: () => 1, hasVisualContent: () => true, hasDrawnContent: () => false, soundHeardCount: () => 1, soundSilentCount: () => 0 };
+
+  it('asks for no picture of a song, but still of a request that asks to see something or names an interface', async () => {
+    expect(await outcome('Play Twinkle Twinkle Little Star on the piano', played, 'synth.triggerAttackRelease("C4", "8n");')).toBeNull();
+    expect(await outcome('Play a melody with a square wave', played, 'osc.start();')).toBeNull();
+    expect(await outcome('Play a drum beat and draw a star on screen', played, 'osc.start();')).toContain('nothing visible');
+    expect(await outcome('Make a piano app with keys I can press', played, 'osc.start();')).toContain('nothing visible');
+    expect(await outcome('Draw a star', played, 'ctx.fillRect(0, 0, 1, 1);')).toContain('nothing visible');
+  }, 30000);
+});
+
+describe('the outcome check on a page that gets no animation frames', () => {
+  const frames = 'function loop() { ctx.fillRect(1, 1, 5, 5); requestAnimationFrame(loop); }\nloop();';
+  const request = 'Animate 10 colored balls bouncing around the screen';
+  const still = { soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => true, pageSignature: () => 'same' };
+
+  it('does not judge what runs on frames when none arrive (a hidden pane), and still does when they do', async () => {
+    const real = globalThis.requestAnimationFrame;
+    try {
+      // (a page nobody watches: the frame request is never answered, though the visibility state says visible)
+      globalThis.requestAnimationFrame = (() => 0) as typeof requestAnimationFrame;
+      expect(await outcome(request, still, frames)).toBeNull();
+      // (a program that does not draw on frames is judged as before)
+      expect(await outcome(request, still, 'ctx.fillRect(1, 1, 5, 5);')).toContain('The screen never changed');
+      globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => setTimeout(() => callback(0), 5)) as unknown as typeof requestAnimationFrame;
+      expect(await outcome(request, still, frames)).toContain('The screen never changed');
+    } finally {
+      globalThis.requestAnimationFrame = real;
+    }
+  }, 20000);
 });
 
 describe('the outcome check names the step a silent program is missing', () => {
@@ -415,6 +450,15 @@ describe('the outcome check on something to tap or use that nothing reacts to', 
     expect(await outcome('Make a game where I click on the moving targets to score points', page(0), board)).toContain(message);
   });
 
+  it('also for an instruction that starts with a verb the check did not list (the die Qwen3 0.6B answered with the request as text)', async () => {
+    const echo = 'document.body.innerHTML = `Roll a six-sided die when I tap a button`;';
+    expect(await outcome('Roll a six-sided die when I tap a button', page(0), echo)).toContain(message);
+    expect(await outcome('Roll a six-sided die when I tap a button', page(0), `${echo}\ndocument.body.addEventListener("click", () => {});`)).toBeNull();
+    // (an instruction that names no tapping is not a request for a screen; a question about tapping is a question)
+    expect(await outcome('Roll a six-sided die', page(0), echo)).toBeNull();
+    expect(await outcome('Why do I tap a button to roll a die?', page(0), echo)).toBeNull();
+  });
+
   it('is content with any handler: a click, a key, a pointer move, an onclick in the markup, an input listener', async () => {
     for (const handler of ['canvas.addEventListener("click", () => {});', 'document.addEventListener("keydown", () => {});', 'window.addEventListener("mousemove", () => {});', 'document.body.innerHTML = "<button onclick=\\"go()\\">go</button>";', 'r.addEventListener("input", () => {});']) {
       expect(await outcome('Make a tic-tac-toe game where two players take turns tapping the squares', page(0), `${board}\n${handler}`), handler).toBeNull();
@@ -427,6 +471,81 @@ describe('the outcome check on something to tap or use that nothing reacts to', 
     expect(await outcome('Show a big ten second countdown on screen', page(0), 'document.body.innerHTML = "10";\nsetInterval(() => {}, 1000);')).toBeNull();
     expect(await outcome('Build a tip calculator', page(0), board)).not.toContain(message);
   });
+});
+
+describe('the outcome check on elements with nothing in them that wait for a tap', () => {
+  // The real board from Qwen3 0.6B's tic-tac-toe: nine empty squares with click handlers, none with a size
+  const empty = { soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => false };
+  const board = 'document.body.innerHTML = `<div id="board"><div class="square"></div></div>`;\ndocument.querySelectorAll(".square").forEach((s) => s.addEventListener("click", () => {}));';
+
+  it('are nothing to look at even when the program waits for the user', async () => {
+    expect(await outcome('Make a tic-tac-toe game where two players take turns tapping the squares', empty, board)).toContain('nothing visible');
+    expect(await outcome('Make a tic-tac-toe game where two players take turns tapping the squares', { ...empty, hasDrawnContent: () => true }, board)).toBeNull();
+  }, 20000);
+});
+
+describe('the outcome check on a handler in the markup that calls a function nothing defines', () => {
+  const page = (dead: string[]) => ({ soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => true, controlCount: () => 1, deadHandlers: () => dead });
+  const die = 'document.body.innerHTML = `<button onclick="rollDice()">Roll</button><div id="result"></div>`;';
+
+  it('says which function is missing, and says nothing when every handler has its function', async () => {
+    const said = await outcome('Roll a six-sided die when I tap a button', page(['rollDice']), die);
+    expect(said).toContain('call rollDice()');
+    expect(said).toContain('which the program never defines');
+    expect(await outcome('Roll a six-sided die when I tap a button', page([]), die)).toBeNull();
+    // (a runtime that cannot tell is taken at its word)
+    expect(await outcome('Roll a six-sided die when I tap a button', { soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => true }, die)).toBeNull();
+  });
+});
+
+describe('the outcome check on a drawing that shows nothing: why, from the page and the program', () => {
+  // The shape of the live beach program: values set for the drawing that nothing reads, and a draw() that clears and draws nothing
+  const beach = [
+    'const canvas = document.createElement("canvas");',
+    'document.body.appendChild(canvas);',
+    'const ctx = canvas.getContext("2d");',
+    'let skyColor = "#87ceeb";',
+    'let oceanColor;',
+    'oceanColor = "rgba(75, 0, 130, 0.9)";',
+    'const sunX = 120;',
+    'function draw() {',
+    '  ctx.clearRect(0, 0, canvas.width, canvas.height);',
+    '}',
+    'draw();',
+  ].join('\n');
+  const request = 'Draw a beach sunset with rainbow sky and deep purple ocean';
+  const nothingShown = (cleared: { fn: string | null } | null) => ({ soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => false, clearedWithoutDrawing: () => cleared });
+  const color = /^(?:#[0-9a-f]{6}|rgba?\([\d., ]+\))$/;
+
+  it('names the function that cleared the canvas last and the values nothing reads', async () => {
+    const real = (globalThis as { CSS?: unknown }).CSS;
+    (globalThis as { CSS?: unknown }).CSS = { supports: (_property: string, value: string) => color.test(value) };
+    try {
+      const said = await outcome(request, nothingShown({ fn: 'draw' }), beach);
+      expect(said).toContain('The program put nothing visible');
+      expect(said).toContain('draw() clears the canvas and then draws nothing.');
+      expect(said).toContain('skyColor, oceanColor, sunX are set but never used.');
+      expect((await outcome(request, nothingShown({ fn: null }), beach)) ?? '').toContain('The canvas is cleared after the last drawing.');
+      // (a program that clears and then draws has neither fact: nothing says it was cleared last, and what it sets it reads)
+      const drawn = beach.replace('  ctx.clearRect(0, 0, canvas.width, canvas.height);', '  ctx.clearRect(0, 0, canvas.width, canvas.height);\n  ctx.fillStyle = skyColor;\n  ctx.fillRect(sunX, 0, 9, 9);\n  ctx.fillStyle = oceanColor;');
+      const clean = await outcome(request, nothingShown(null), drawn);
+      expect(clean ?? '').not.toContain('clears the canvas');
+      expect(clean ?? '').not.toContain('never used');
+    } finally {
+      (globalThis as { CSS?: unknown }).CSS = real;
+    }
+  }, 30000);
+
+  it('says neither on a drawing that shows, nor for a request that is not a drawing', async () => {
+    const real = (globalThis as { CSS?: unknown }).CSS;
+    (globalThis as { CSS?: unknown }).CSS = { supports: (_property: string, value: string) => color.test(value) };
+    try {
+      expect(await outcome(request, { ...nothingShown({ fn: 'draw' }), hasDrawnContent: () => true }, beach)).toBeNull();
+      expect((await outcome('Build a tip calculator', nothingShown({ fn: 'draw' }), beach)) ?? '').not.toContain('never used');
+    } finally {
+      (globalThis as { CSS?: unknown }).CSS = real;
+    }
+  }, 30000);
 });
 
 describe('the outcome check on a drawing that is only words', () => {

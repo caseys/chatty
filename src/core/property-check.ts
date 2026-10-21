@@ -503,6 +503,27 @@ export function unusableAssignments(code: string, scope: Record<string, unknown>
           : null;
     const value = literal?.replace(/\s*!important\s*$/i, '').trim();
     if (!value) continue;
+    // A ; written inside the value ('rgba(255, 255, 255, 0.8);', copied from CSS) makes the browser ignore it; without it the value is valid
+    const withoutSemicolon = value.replace(/\s*;+$/, '');
+    if (withoutSemicolon !== value && withoutSemicolon) {
+      try {
+        const valid = canvasColor ? supports('color', withoutSemicolon) : supports(kebab(member), 'inherit') && supports(kebab(member), withoutSemicolon) && !supports(kebab(member), value);
+        if (valid && (canvasColor ? !supports('color', value) : true)) {
+          const quote = right.type === 'TemplateLiteral' ? '`' : code[right.start];
+          issues.push({
+            line,
+            object,
+            member,
+            kind: 'invalid-value',
+            message: `'${value}' ends with a ; inside the string (${object}.${member}), so the browser ignores it. '${withoutSemicolon}' is valid.`,
+            fix: { start: right.start, end: right.end, text: `${quote}${withoutSemicolon}${quote}`, note: `${object}.${member} = '${value}' → '${withoutSemicolon}': a ; inside the value makes the browser ignore it` },
+          });
+          continue;
+        }
+      } catch {
+        // CSS.supports refused its input
+      }
+    }
     if (canvasColor) {
       // A canvas color the browser doesn't know is ignored without a word
       try {
