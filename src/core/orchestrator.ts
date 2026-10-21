@@ -1108,9 +1108,14 @@ export class ConversationOrchestrator {
               ? { sampling: forModel(reask, generationProvider.modelId) }
               : fixSampling(options.fixAttempt ?? 1)
                 ? { sampling: forModel(fixSampling(options.fixAttempt ?? 1)!, generationProvider.modelId) }
-                : { exact: true }
+                : options.autoFix === NO_PROGRAM_YET
+                  ? {} // a new program: the normal temperature, as for any request
+                  : { exact: true }
             : {}),
-          ...(options?.autoFix ? { fixShape: options.fixBlock ? ('function' as const) : fixLine ? ('line' as const) : ('program' as const) } : {}),
+          // (a new program, asked for when there was none, is held to no fix shape)
+          ...(options?.autoFix && options.autoFix !== NO_PROGRAM_YET
+            ? { fixShape: options.fixBlock ? ('function' as const) : fixLine ? ('line' as const) : ('program' as const) }
+            : {}),
           ...(retry > 0 ? { retry } : {}),
           signal: generationAbort.signal,
           onToken: (chunk) => {
@@ -1560,9 +1565,14 @@ export class ConversationOrchestrator {
               originalTurnId: fixedTurnId ?? turnId,
               errorHistory: options?.errorHistory,
             };
+            // A reply that only talked, for a request to make something: not a failed program, the
+            // program is still to come (its talk was said; the next turn asks for the program)
+            const onlyTalked = !!execResult.error && !options?.autoFix && this.autoFixErrors && isTalkOnly(executableCode) && ACTION_REQUEST.test(normalized);
             this.events.onRunStatus?.(
               turnId,
-              execResult.error
+              onlyTalked
+                ? { kind: 'running', text: 'Writing the program…' }
+                : execResult.error
                 ? { kind: 'error', text: errorText(execResult.error, execResult.errorLine) }
                 : execResult.stillRunning
                   ? { kind: 'running', text: 'Ran; still running' }

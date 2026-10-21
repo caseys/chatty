@@ -1356,12 +1356,18 @@ describe('a reply that only talks, for a request that shows something', () => {
     llm.modelId = 'qwen2.5-0.5b';
     const { runtime } = fakeRuntime([{}, {}]);
     (runtime as unknown as { hasVisualContent: () => boolean }).hasVisualContent = () => false;
-    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    const statuses: RunStatus[] = [];
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime, events: { onRunStatus: (_id, status) => statuses.push(status) } });
     await orchestrator.submitUserInput('Animate a ball bouncing around the screen');
     await vi.waitFor(() => expect(llm.turns.length).toBeGreaterThanOrEqual(3), { timeout: 15000 });
+    // Not shown as a failed program: the program is still to come
+    expect(statuses[0]).toEqual({ kind: 'running', text: 'Writing the program…' });
     const fresh = llm.turns.at(-1)!;
     expect(fresh.messages.at(-1)!.content).toContain('Write the complete JavaScript program for: Animate a ball bouncing around the screen');
     expect(fresh.systemPrompt).not.toBe(FIX_SYSTEM_PROMPT);
+    // A new program: no fix shape, no near-greedy decoding
+    expect(fresh.fixShape).toBeUndefined();
+    expect(fresh.exact).toBeUndefined();
   }, 30000);
 });
 
