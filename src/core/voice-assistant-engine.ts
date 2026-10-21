@@ -147,6 +147,8 @@ export interface VoiceAssistantEngineEvents {
   onProgramSound?: (sounding: boolean) => void;
   /** A program has timers or async code pending, or its last one ended */
   onProgramActivity?: (active: boolean) => void;
+  /** The program in the card can be downloaded as an HTML file (it ran 2.5 s without an error), or no longer can */
+  onProgramDownloadable?: (ready: boolean) => void;
   onMessageCreated?: (message: ConversationMessage) => void;
   onMessageUpdated?: (message: ConversationMessage) => void;
   onTelemetryUpdated?: (telemetry: SystemTelemetry) => void;
@@ -273,6 +275,7 @@ export class VoiceAssistantEngine {
         this.events.onProgramSound?.(sounding);
       },
       onProgramActivity: (active) => this.events.onProgramActivity?.(active),
+      onDownloadableChange: (ready) => this.events.onProgramDownloadable?.(ready),
       onRunLog: (kind, text) => appendRunLog(kind, text),
       onResult: (res) => {
         this.events.onJavascriptExecution?.(res);
@@ -1428,6 +1431,11 @@ export class VoiceAssistantEngine {
     callback?: (result: JavascriptExecutionResult) => void
   ): Promise<JavascriptExecutionResult> {
     return this.jsRuntime.execute(code, callback);
+  }
+
+  /** The program in the card as a self-contained HTML file, or null when there's none to download */
+  programHtml(): Promise<string | null> {
+    return this.jsRuntime.standaloneHtml();
   }
 
   /** Whether this chat has a program Replay can run again */

@@ -949,6 +949,7 @@ body {
 }
 
 .minimal-corner-btn.btn-sidebar-toggle,
+.minimal-corner-btn.btn-download-program,
 .minimal-corner-btn.btn-settings {
   width: 44px;
   padding: 0;
@@ -2314,6 +2315,7 @@ body {
   }
 
   .minimal-corner-btn.btn-sidebar-toggle,
+  .minimal-corner-btn.btn-download-program,
   .minimal-corner-btn.btn-settings {
     width: 38px;
     padding: 0;

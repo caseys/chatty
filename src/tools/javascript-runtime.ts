@@ -80,6 +80,8 @@ export interface JavascriptRuntimeOptions {
   onRunLog?: (kind: RunLogKind, text: string) => void;
   /** A program has timers or async code pending (true), or its last one ended (false) */
   onProgramActivity?: (active: boolean) => void;
+  /** The program in the card can be downloaded (it ran 2.5 s without an error), or no longer can */
+  onDownloadableChange?: (ready: boolean) => void;
 }
 
 export const CODING_AGENT_SYSTEM_PROMPT = [
@@ -170,6 +172,9 @@ const TRIAL_HOST = `(() => {
     }),
   };
 })()`;
+
+/** How long a program runs without an error before it can be downloaded */
+const DOWNLOAD_AFTER_MS = 2500;
 
 const AsyncFunctionCtor = Object.getPrototypeOf(async function () {}).constructor;
 
@@ -789,6 +794,10 @@ export class JavascriptRuntime {
   private onProgramError?: (message: string, line?: number) => void;
   private onProgramAudio?: (sounding: boolean) => void;
   private onProgramActivity?: (active: boolean) => void;
+  private onDownloadableChange?: (ready: boolean) => void;
+  /** The program in the card, and whether it has run cleanly long enough to download */
+  private downloadable: { code: string; timer: ReturnType<typeof setTimeout> | null } | null = null;
+  private downloadReady = false;
   private onRunLog?: (kind: RunLogKind, text: string) => void;
   private programSounding = false;
   // The last program_activity the sandbox reported: timers, animation frames or async work pending
@@ -810,6 +819,7 @@ export class JavascriptRuntime {
     this.onProgramError = options?.onProgramError;
     this.onProgramAudio = options?.onProgramAudio;
     this.onProgramActivity = options?.onProgramActivity;
+    this.onDownloadableChange = options?.onDownloadableChange;
     this.onRunLog = options?.onRunLog;
     if (this.getSharedAudioContext && typeof window !== 'undefined') {
       // Read by the sandbox's AudioContext stand-in (same origin)
@@ -1035,6 +1045,7 @@ export class JavascriptRuntime {
   }
 
   private async resetVisualNow(): Promise<void> {
+    this.spoilDownload();
     const hadIframe = Boolean(this.activeIframe);
     this.abortPendingRuns('Visual screen was cleared');
     this.silenceProgramAudio();
@@ -1502,7 +1513,7 @@ export class JavascriptRuntime {
   // --------------------------------------------------------------------------
 
   /** The sandbox page. A trial one (hidden, muted) differs only in where the page's host calls go (TRIAL_HOST). */
-  private buildRunnerHtml(trial: boolean): string {
+  private buildRunnerHtml(trial: boolean, host?: string): string {
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -1623,7 +1634,7 @@ export class JavascriptRuntime {
 <body>
   <div id="root"></div>
   <script>
-    const __chattyHost = ${trial ? TRIAL_HOST : 'window.parent'};
+    const __chattyHost = ${host ?? (trial ? TRIAL_HOST : 'window.parent')};
     const hasTopLevelReturn = ${hasTopLevelReturn.toString()};
     let currentExecId = null;
     const pendingAsyncCalls = new Map();
@@ -2349,6 +2360,57 @@ export class JavascriptRuntime {
 </html>`;
   }
 
+  /** A new program is in the card: it can be downloaded once it has run 2.5 s without an error */
+  private trackDownload(code: string): void {
+    this.spoilDownload();
+    const entry: { code: string; timer: ReturnType<typeof setTimeout> | null } = { code, timer: null };
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      if (this.downloadable !== entry) return;
+      this.downloadReady = true;
+      this.onDownloadableChange?.(true);
+    }, DOWNLOAD_AFTER_MS);
+    this.downloadable = entry;
+  }
+
+  /** An error or a cleared card: nothing to download */
+  private spoilDownload(): void {
+    if (this.downloadable?.timer) clearTimeout(this.downloadable.timer);
+    this.downloadable = null;
+    if (!this.downloadReady) return;
+    this.downloadReady = false;
+    this.onDownloadableChange?.(false);
+  }
+
+  isDownloadReady(): boolean {
+    return this.downloadReady;
+  }
+
+  /**
+   * The program in the card as one self-contained HTML file: the same page it runs in here, with
+   * Chatty's part (sound, MIDI, notes, Wikipedia, speech) and three.js, when it uses THREE, inlined.
+   */
+  async standaloneHtml(): Promise<string | null> {
+    const code = this.downloadReady ? this.downloadable?.code : null;
+    if (!code) return null;
+    const scriptOf = async (url: string) => {
+      const text = await (await fetch(url)).text();
+      // In a function: the bundle's top-level names stay out of the program's global scope
+      return `<script>(function () {\n${text.replace(/<\/script/gi, '<\\/script')}\n})();</script>`;
+    };
+    const [{ default: hostUrl }, three] = await Promise.all([
+      import('../standalone/host.ts?worker&url'),
+      /\bTHREE\b/.test(code) ? import('../standalone/three-global.ts?worker&url') : null,
+    ]);
+    const head = [await scriptOf(hostUrl), three ? await scriptOf(three.default) : ''].join('\n');
+    const json = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c');
+    const start = `<script>window.postMessage({ type: 'execute', id: 'standalone', code: ${json(code)}, idKinds: ${json(elementKinds(code))} }, '*');</script>`;
+    return this.buildRunnerHtml(false, 'window.__chattyStandaloneHost')
+      // Functions as replacements: the inlined code has $ patterns a replacement string would expand
+      .replace('<head>', () => `<head>\n  <title>Chatty program</title>\n  <meta name="viewport" content="width=device-width, initial-scale=1">\n${head}`)
+      .replace(/<\/body>\s*<\/html>\s*$/, () => `${start}\n</body>\n</html>`);
+  }
+
   /** Builds the sandbox iframe ahead of the first program (empty card, hidden) if none exists */
   prepare(): void {
     if (this.mode !== 'iframe' || typeof document === 'undefined' || this.activeIframe) return;
@@ -2458,6 +2520,7 @@ export class JavascriptRuntime {
     }
 
     if (data.type === 'program_error') {
+      this.spoilDownload();
       this.onRunLog?.('error', typeof data.line === 'number' ? `line ${data.line}: ${data.message}` : String(data.message ?? 'Unknown error'));
       this.onProgramError?.(String(data.message ?? 'Unknown error'), typeof data.line === 'number' ? data.line : undefined);
       return;
@@ -2534,6 +2597,7 @@ export class JavascriptRuntime {
         }
         const hasVisual = Boolean(data.hasVisual);
         this.onVisualChange?.(hasVisual, this.activeIframe);
+        if (!data.success) this.spoilDownload();
         resolve({
           success: Boolean(data.success),
           output: data.output,
@@ -2568,6 +2632,7 @@ export class JavascriptRuntime {
       }, this.timeoutMs);
 
       this.pendingRuns.set(reqId, { options, spokenTexts, timer, finish: settle });
+      this.trackDownload(code);
       void withThree(code, iframe.contentWindow).then(() =>
         iframe.contentWindow?.postMessage({ type: 'execute', id: reqId, code, idKinds: elementKinds(code) }, '*')
       );

@@ -132,6 +132,7 @@ export class MinimalVoiceApp {
   private mainButtonReplays = false;
   private modelsReadyAnnounced = false;
   private clearScreenBtn = document.getElementById('btn-clear-screen') as HTMLButtonElement | null;
+  private downloadProgramBtn = document.getElementById('btn-download-program') as HTMLButtonElement | null;
 
   private jsIframeContainer = document.getElementById('js-runtime-iframe-container');
 
@@ -219,6 +220,9 @@ export class MinimalVoiceApp {
       onProgramActivity: (active) => {
         this.programRunning = active;
         this.updateUiState();
+      },
+      onProgramDownloadable: (ready) => {
+        if (this.downloadProgramBtn) this.downloadProgramBtn.hidden = !ready;
       },
       onMessageCreated: (msg) => {
         // Chatty's own "fix this error" turns aren't the user's words
@@ -427,6 +431,20 @@ export class MinimalVoiceApp {
       if (this.chatLogEl) keepAtBottom.observe(this.chatLogEl);
       if (this.rawOutputEl) keepAtBottom.observe(this.rawOutputEl);
     }
+    // The program in the card, saved as one HTML file that runs on its own
+    this.downloadProgramBtn?.addEventListener('click', async () => {
+      const html = await this.engine.programHtml().catch((err) => {
+        console.warn('Download failed:', err);
+        return null;
+      });
+      if (!html) return;
+      const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'chatty-program.html';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    });
     this.clearScreenBtn?.addEventListener('click', () => {
       this.resetVisualScreen();
       this.updateUiState();

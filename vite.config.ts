@@ -34,6 +34,32 @@ function swBuildAssets(): Plugin {
   };
 }
 
+// A downloaded program inlines these bundles as plain scripts (see JavascriptRuntime.standaloneHtml):
+// fail the build if one became a module (a split chunk, an import or export)
+function standaloneBundlesArePlain(): Plugin {
+  let outDir = 'dist';
+  return {
+    name: 'chatty-standalone-bundles',
+    apply: 'build',
+    configResolved(config) {
+      outDir = resolve(config.root, config.build.outDir);
+    },
+    closeBundle() {
+      const assets = resolve(outDir, 'assets');
+      for (const name of readdirSync(assets)) {
+        if (!/^(host|three-global)-.*\.js$/.test(name)) continue;
+        const code = readFileSync(resolve(assets, name), 'utf8');
+        if (code.length < 1000) continue; // the small module that gives the bundle's URL
+        try {
+          new Function(code);
+        } catch (err) {
+          throw new Error(`${name} must be a plain script for downloads: ${(err as Error).message}`);
+        }
+      }
+    },
+  };
+}
+
 export default defineConfig({
   // Deployed at https://www.mudberry.com/chatty/
   base: '/chatty/',
@@ -48,7 +74,7 @@ export default defineConfig({
       },
     },
   },
-  plugins: [swBuildAssets()],
+  plugins: [swBuildAssets(), standaloneBundlesArePlain()],
   worker: {
     format: 'es',
   },
