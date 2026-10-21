@@ -131,6 +131,10 @@ export interface PreparedExecutableCode {
   cutOff?: { dropped: number; closed: number };
   /** A program that says nothing ended on a sentence in a comment: said with speak() (see speakClosingComment) */
   spokeComment?: string;
+  /** Functions it declared but never called, called at its end (see callUncalledFunctions) */
+  called?: string[];
+  /** Functions its inline handlers call, made reachable from them (see exposeFunctionsToInlineHandlers) */
+  exposed?: string[];
 }
 
 /**
@@ -388,14 +392,16 @@ function withTalk(parts: ReplyPart[]): string {
  * Code runs exactly as written, so a program that only defines its functions does nothing.
  * Calls the zero-argument top-level functions nothing else refers to (draw(), main(), ...).
  */
-export function callUncalledFunctions(code: string): string {
+export function callUncalledFunctions(original: string): string {
+  // Judged without comments: a word in a comment ("// then draw") is no call of draw()
+  const code = stripComments(original);
   // The program's top-level functions that take nothing, however they are indented (a page's
   // <script> usually is); by their line start when the program doesn't parse
   const declared = topLevelNoArgFunctions(code) ?? [
     ...Array.from(code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(\s*\)/gm), (m) => m[1]),
     ...Array.from(code.matchAll(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(\s*\)\s*=>/gm), (m) => m[1]),
   ];
-  if (declared.length === 0) return code;
+  if (declared.length === 0) return original;
   // A function's own body doesn't count: one that only calls itself (a loop, a timer) still needs
   // its first call. Without a parse, every mention counts, so only the declaration may name it.
   const own = topLevelFunctionRanges(code);
@@ -407,7 +413,8 @@ export function callUncalledFunctions(code: string): string {
   const roots = declared.filter((name) => refs(name) === (own.has(name) ? 0 : 1));
   let toCall = roots.filter((name) => /^(?:main|init|start|run|setup|draw|play|render|animate|create|build|show|make)/i.test(name));
   if (toCall.length === 0 && roots.length === declared.length) toCall = [declared[declared.length - 1]];
-  return toCall.length ? `${code}\n${toCall.map((name) => `await ${name}();`).join('\n')}` : code;
+  preparing?.called.push(...toCall);
+  return toCall.length ? `${original}\n${toCall.map((name) => `await ${name}();`).join('\n')}` : original;
 }
 
 /**
@@ -690,6 +697,7 @@ export function exposeFunctionsToInlineHandlers(code: string): string {
     ...Array.from(code.matchAll(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/gm), (m) => m[1]),
   ];
   if (names.length === 0) return code;
+  preparing?.exposed.push(...new Set(names));
   return `${code}\n${[...new Set(names)].map((name) => `try { window.${name} = ${name}; } catch {}`).join('\n')}`;
 }
 
@@ -727,7 +735,30 @@ export function withoutMarkdownLeftovers(text: string): string {
     .join('\n');
 }
 
+/** What preparing a reply added, for the run log (see inspectExecutableCode) */
+let preparing: { called: string[]; exposed: string[] } | null = null;
+
+/**
+ * The reply as the program to run, with what preparing it added: the functions it never called,
+ * called at its end, and those its inline handlers (onclick="go()") need, made reachable
+ */
 export function inspectExecutableCode(rawText: string, options: { closeCutOff?: boolean; speakComment?: boolean } = {}): PreparedExecutableCode {
+  const added = { called: [] as string[], exposed: [] as string[] };
+  const outer = preparing;
+  preparing = added;
+  try {
+    const prepared = prepareProgram(rawText, options);
+    return {
+      ...prepared,
+      ...(added.called.length ? { called: [...new Set(added.called)] } : {}),
+      ...(added.exposed.length ? { exposed: [...new Set(added.exposed)] } : {}),
+    };
+  } finally {
+    preparing = outer;
+  }
+}
+
+function prepareProgram(rawText: string, options: { closeCutOff?: boolean; speakComment?: boolean } = {}): PreparedExecutableCode {
   let cleaned = normalizeFences((rawText || '').trim());
 
   // HTML instead of JavaScript (a whole page for "an app", or bare <canvas> + <script>): its
@@ -1921,6 +1952,7 @@ export class JavascriptRuntime {
       }
     }
     const shown = (v) => (typeof v === 'string' ? "'" + v + "'" : String(v));
+    const COLOR_PROPS = new Set(['fillStyle', 'strokeStyle', 'shadowColor']);
     function watchSetters(proto, label) {
       if (!proto) return;
       for (const key of Object.getOwnPropertyNames(proto)) {
@@ -1930,6 +1962,11 @@ export class JavascriptRuntime {
           ...d,
           set(value) {
             if (badValue(value)) noteRejected(label + '.' + key + ' = ' + shown(typeof value === 'string' ? value.slice(0, 60) : value) + ': almost surely a bug');
+            // A canvas color the browser doesn't know is ignored without a word (the drawing keeps
+            // its old color): that is the program's error
+            else if (COLOR_PROPS.has(key) && typeof value === 'string' && window.CSS && CSS.supports && !CSS.supports('color', value)) {
+              noteRejected(label + '.' + key + ' = ' + shown(value.slice(0, 60)) + ' is not a color the browser knows, so it was ignored');
+            }
             return d.set.call(this, value);
           },
         });

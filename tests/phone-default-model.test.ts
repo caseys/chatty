@@ -16,7 +16,7 @@ describe('phone default chat model', () => {
   });
 
   it('gives a phone that never chose a model its phone default, not the Gemma default', () => {
-    expect(DEFAULT_SETTINGS.chatModelId).toBe(GEMMA); // desktop default is unchanged
+    expect(DEFAULT_SETTINGS.chatModelId).toBe('qwen3.5-2b'); // the desktop default
     expect(loadChatModelChoice()).toBeNull();
     // (this test browser is no iPhone: the default for other phones, Chrome on Android)
     expect(resolvePhoneChatModelId(loadChatModelChoice())).toBe('qwen3-1.7b');
@@ -28,7 +28,7 @@ describe('phone default chat model', () => {
     saveSettingsToStorage({ speechEnabled: true });
     saveSettingsToStorage({ sidebarOpen: true });
     saveSettingsToStorage({ voiceId: 'en_US-hfc_male-medium' });
-    expect(JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY)!).chatModelId).toBe(GEMMA);
+    expect(JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY)!).chatModelId).toBe('qwen3.5-2b');
     expect(loadChatModelChoice()).toBeNull();
     expect(resolvePhoneChatModelId(loadChatModelChoice(), DEFAULT_PHONE_CHAT_MODEL_ID)).toBe('qwen3-0.6b');
   });

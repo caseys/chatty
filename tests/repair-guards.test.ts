@@ -368,3 +368,50 @@ describe('an animation that runs one frame', async () => {
     expect(loopOneFrameAnimations('function paint() {\n  const y = 2;\n  ctx.fillRect(0, y, 5, 5);\n}\nrequestAnimationFrame(paint);').looped).toEqual([]);
   });
 });
+
+describe('from the beach sunset log', async () => {
+  const { callUncalledFunctions } = await import('../src/tools/javascript-runtime.ts');
+  it('calls the frame function a comment mentions but nothing calls', () => {
+    const code = 'function draw() {\n  requestAnimationFrame(draw);\n}\n// Initialize canvas and draw\nspeak("Drawn.");';
+    expect(callUncalledFunctions(code).trim().endsWith('await draw();')).toBe(true);
+  });
+});
+
+describe('repairs made while preparing a reply are reported for the run log', async () => {
+  const { inspectExecutableCode } = await import('../src/tools/javascript-runtime.ts');
+  it('names the functions it called and the ones it made reachable', () => {
+    expect(inspectExecutableCode('function draw() {\n  speak("Hi.");\n}').called).toEqual(['draw']);
+    const page = '<button onclick="startGame()">Go</button>\n<script>\n  function startGame() { speak("Go!"); }\n</script>';
+    expect(inspectExecutableCode(page).exposed).toEqual(['startGame']);
+    expect(inspectExecutableCode('speak("Hi.");').called).toBeUndefined();
+  });
+});
+
+describe('from the blues loop log', async () => {
+  const { fixIteratorResults, fixAudioNodeProperties } = await import('../src/core/error-hints.ts');
+  it('takes the item from an iterator result used as the item', () => {
+    const code = 'const midi = await navigator.requestMIDIAccess();\nconst output = midi.outputs.values().next();\noutput.send([0x90, 60, 100]);';
+    const { code: out, fixed } = fixIteratorResults(code);
+    expect(fixed).toEqual(['output']);
+    expect(out).toContain('const output = midi.outputs.values().next().value;');
+    // Used as the result it is ({ value, done }): left alone
+    expect(fixIteratorResults('const step = list.values().next();\nif (!step.done) speak(step.value);').fixed).toEqual([]);
+  });
+
+  it('makes an audio node read as a property with its create call', () => {
+    const code = 'const ctx = new AudioContext();\nconst osc = ctx.oscillator;\nconst g = new AudioContext().gain;\nconst o2 = ctx.oscillator();';
+    const { code: out, fixed } = fixAudioNodeProperties(code);
+    expect(out).toContain('const osc = ctx.createOscillator();');
+    expect(out).toContain('const g = new AudioContext().createGain();');
+    expect(out).toContain('const o2 = ctx.createOscillator();');
+    expect(fixed).toEqual(['oscillator → createOscillator()', 'gain → createGain()']);
+  });
+
+  it('offers no object for a number slot', () => {
+    const code = 'const midi = await navigator.requestMIDIAccess();\nconst note = 60;\nconst level = 100;\nout.send([0x90 + 0, note, velocity]);';
+    const blank = findBlank(code, "Can't find variable: velocity", 4)!;
+    const choices = blankChoices(code, blank, { ids: [] });
+    expect(choices).not.toContain('midi');
+    expect(choices).toContain('level');
+  });
+});

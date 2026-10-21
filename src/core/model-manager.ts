@@ -549,12 +549,12 @@ export class ModelManager {
     if (hasHighEndDesktopGpu) {
       return {
         sttModelId: 'whistle-stt-base',
-        llmModelId: 'gemma-4-e4b-it-web',
+        llmModelId: 'qwen3.5-2b',
         fallbackLlmModelId: 'gemma-4-e2b-it-web',
         ttsModelId: 'en_US-hfc_female-medium',
         recommendedContextLimit: 8192,
         recommendedMaxOutputTokens: 1024,
-        reasoning: 'High-memory WebGPU adapter and ample storage detected; selecting Gemma 4 E4B (4B) with full 8k context.',
+        reasoning: 'High-memory WebGPU adapter and ample storage detected; selecting the desktop default, Qwen3.5 2B.',
       };
     }
 
@@ -574,12 +574,12 @@ export class ModelManager {
     // 3. Typical laptop / standard profile
     return {
       sttModelId: 'whistle-stt-base',
-      llmModelId: 'gemma-4-e2b-it-web',
+      llmModelId: 'qwen3.5-2b',
       fallbackLlmModelId: 'gemma-4-e2b-it-web',
       ttsModelId: 'en_US-hfc_female-medium',
       recommendedContextLimit: 8192,
       recommendedMaxOutputTokens: 1024,
-      reasoning: 'Standard WebGPU environment detected; selecting Gemma 4 E2B (2B) with 8k context.',
+      reasoning: 'Standard WebGPU environment detected; selecting the desktop default, Qwen3.5 2B.',
     };
   }
 

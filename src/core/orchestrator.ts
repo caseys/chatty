@@ -41,7 +41,7 @@ import {
 import { appendRunLog } from './run-log.ts';
 import { blankChoices, blankRequest, choiceRequest, declareMissing, fillBlank, findBlank, type Blank } from './blank-fix.ts';
 import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest, restoreDeclarations } from './line-fix.ts';
-import { dropBrowserCopies, dropHelperCopies, dropStrayQuote, fixKeySlips, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
+import { dropBrowserCopies, dropHelperCopies, dropStrayQuote, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
 import { applyAssignmentFixes, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { LOCAL_CHAT_MODELS } from './settings.ts';
@@ -1345,6 +1345,8 @@ export class ConversationOrchestrator {
             speakComment: !options?.autoFix || options.autoFix === NO_PROGRAM_YET,
           });
           if (inspected.spokeComment) appendRunLog('imagined', `its closing comment → speak(${JSON.stringify(inspected.spokeComment.slice(0, 80))}): corrected before running`);
+          if (inspected.called?.length) appendRunLog('imagined', `${inspected.called.map((n) => `${n}()`).join(', ')} declared but never called → called at the end: corrected before running`);
+          if (inspected.exposed?.length) appendRunLog('imagined', `${inspected.exposed.map((n) => `${n}()`).join(', ')} made reachable from the page's inline handlers: corrected before running`);
           if (inspected.cutOff) {
             const { dropped, closed } = inspected.cutOff;
             appendRunLog('imagined', `the reply was cut off: ${dropped ? `its unfinished last ${dropped === 1 ? 'line' : `${dropped} lines`} removed and ` : ''}${closed} open block${closed === 1 ? '' : 's'} closed: corrected before running`);
@@ -1426,6 +1428,18 @@ export class ConversationOrchestrator {
             if (keys.fixed.length > 0) {
               executableCode = keys.code;
               for (const { object, from, to } of keys.fixed) appendRunLog('imagined', `${object}.${from} → ${object}.${to} (the key it has): corrected before running`);
+            }
+            // An iterator's result kept instead of its item (outputs.values().next()): its value
+            const iterated = fixIteratorResults(executableCode);
+            if (iterated.fixed.length > 0) {
+              executableCode = iterated.code;
+              for (const name of iterated.fixed) appendRunLog('imagined', `${name} = ….next() is { value, done } → ….next().value: corrected before running`);
+            }
+            // An audio node read as a property of an AudioContext: the create…() that makes it
+            const nodes = fixAudioNodeProperties(executableCode);
+            if (nodes.fixed.length > 0) {
+              executableCode = nodes.code;
+              for (const change of nodes.fixed) appendRunLog('imagined', `audio context ${change}: corrected before running`);
             }
             // An animation that moves things but asks for one frame only: it asks for the next too
             const frames = loopOneFrameAnimations(executableCode);

@@ -1047,6 +1047,94 @@ export function loopOneFrameAnimations(code: string): { code: string; looped: st
   return tryParse(out) ? { code: out, looped: edits.map((e) => e.name), atLines } : { code, looped: [], atLines: [] };
 }
 
+/**
+ * Before a program runs: `const output = midi.outputs.values().next()` keeps the iterator's
+ * result ({ value, done }), not the item. Used for anything but its value and done (output.send),
+ * it was meant to be the item: `.next().value`.
+ */
+export function fixIteratorResults(code: string): { code: string; fixed: string[] } {
+  const ast = tryParse(code);
+  if (!ast) return { code, fixed: [] };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const declarators: any[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const members = new Map<string, Set<string>>();
+  walk(ast, (node) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && n.init?.type === 'CallExpression') {
+      const callee = n.init.callee;
+      const iterator = callee.type === 'MemberExpression' && !callee.computed && callee.property.name === 'next' && n.init.arguments.length === 0 && callee.object.type === 'CallExpression' && callee.object.callee.type === 'MemberExpression' && /^(?:values|keys|entries)$/.test(callee.object.callee.property?.name ?? '');
+      if (iterator) declarators.push(n);
+    }
+    if (n.type === 'MemberExpression' && !n.computed && n.object.type === 'Identifier') {
+      if (!members.has(n.object.name)) members.set(n.object.name, new Set());
+      members.get(n.object.name)!.add(n.property.name);
+    }
+  });
+  const edits: Array<{ at: number; name: string }> = [];
+  for (const d of declarators) {
+    const used = members.get(d.id.name);
+    if (!used || used.has('value') || used.has('done')) continue;
+    edits.push({ at: d.init.end, name: d.id.name });
+  }
+  if (edits.length === 0) return { code, fixed: [] };
+  let out = code;
+  for (const e of edits.sort((a, b) => b.at - a.at)) out = `${out.slice(0, e.at)}.value${out.slice(e.at)}`;
+  return tryParse(out) ? { code: out, fixed: edits.map((e) => e.name) } : { code, fixed: [] };
+}
+
+/** The audio nodes an AudioContext makes with create…() (for where the browser's own type isn't there) */
+const AUDIO_NODE_MAKERS = ['createOscillator', 'createGain', 'createAnalyser', 'createBufferSource', 'createBiquadFilter', 'createDelay', 'createConvolver', 'createStereoPanner', 'createDynamicsCompressor', 'createWaveShaper', 'createPanner', 'createBuffer'];
+
+/**
+ * Before a program runs: an audio node read as a property of an AudioContext (`ctx.oscillator`,
+ * `new AudioContext().gain`), which has none: AudioContext makes them with create…(), so it
+ * becomes `ctx.createOscillator()` (`ctx.oscillator()` too)
+ */
+export function fixAudioNodeProperties(code: string): { code: string; fixed: string[] } {
+  const ast = tryParse(code);
+  if (!ast) return { code, fixed: [] };
+  const proto = (globalThis as unknown as { AudioContext?: { prototype: object } }).AudioContext?.prototype;
+  const makers = proto ? Object.getOwnPropertyNames(Object.getPrototypeOf(proto) ?? {}).concat(Object.getOwnPropertyNames(proto)).filter((k) => /^create[A-Z]/.test(k)) : AUDIO_NODE_MAKERS;
+  const isNewAudioContext = (n: AnyNode | null | undefined) =>
+    !!n && n.type === 'NewExpression' && /AudioContext/.test(code.slice((n.callee as AnyNode).start, (n.callee as AnyNode).end));
+  // Names that hold an AudioContext the program made
+  const contexts = new Set<string>();
+  walk(ast, (node) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const n = node as any;
+    if (n.type === 'VariableDeclarator' && n.id.type === 'Identifier' && isNewAudioContext(n.init)) contexts.add(n.id.name);
+  });
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const fixed: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const visit = (n: any, parent: any, key: string) => {
+    if (!n || typeof n.type !== 'string') return;
+    if (n.type === 'MemberExpression' && !n.computed && (isNewAudioContext(n.object) || (n.object.type === 'Identifier' && contexts.has(n.object.name)))) {
+      const prop: string = n.property.name;
+      const maker = `create${prop[0].toUpperCase()}${prop.slice(1)}`;
+      const written = parent?.type === 'AssignmentExpression' && key === 'left';
+      if (!written && !(proto && prop in proto) && makers.includes(maker)) {
+        const called = parent?.type === 'CallExpression' && key === 'callee';
+        edits.push({ start: n.property.start, end: n.property.end, text: called ? maker : `${maker}()` });
+        fixed.push(`${prop} → ${maker}()`);
+      }
+    }
+    for (const k of Object.keys(n)) {
+      if (k === 'loc') continue;
+      const v = n[k];
+      if (Array.isArray(v)) v.forEach((c) => visit(c, n, k));
+      else if (v && typeof v.type === 'string') visit(v, n, k);
+    }
+  };
+  visit(ast, null, '');
+  if (edits.length === 0) return { code, fixed: [] };
+  let out = code;
+  for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + e.text + out.slice(e.end);
+  return tryParse(out) ? { code: out, fixed: [...new Set(fixed)] } : { code, fixed: [] };
+}
+
 /** The browser's timing and loading functions: a program's own function of that name hides the real one */
 const BROWSER_FUNCTIONS = ['requestAnimationFrame', 'cancelAnimationFrame', 'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'fetch'];
 

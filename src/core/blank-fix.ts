@@ -432,6 +432,19 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
       (/^(?:-|\*|\/|%|\*\*|<|>|<=|>=)$/.test(parent.operator as string) || (parent.operator === '+' && !textual(other)))) ||
     (parent?.type === 'UnaryExpression' && /^[-+]$/.test(parent.operator as string)) ||
     (parent?.type === 'AssignmentExpression' && /^(?:-=|\*=|\/=)$/.test(parent.operator as string));
+  // A number slot: arithmetic, or an array whose other items are numbers ([0x90 + channel, note, velocity])
+  const numberLike = (n: AnyNode | null | undefined): boolean =>
+    !!n &&
+    ((n.type === 'Literal' && typeof n.value === 'number') ||
+      (n.type === 'UnaryExpression' && numberLike(n.argument)) ||
+      (n.type === 'BinaryExpression' && /^(?:[-+*/%]|\*\*|<<|>>|>>>|&|\||\^)$/.test(n.operator) && (numberLike(n.left) || numberLike(n.right))));
+  const numberSlot =
+    numeric ||
+    (parent?.type === 'ArrayExpression' && (parent.elements as AnyNode[]).filter((e) => e && e !== node).length > 0 && (parent.elements as AnyNode[]).filter((e) => e && e !== node).every((e) => numberLike(e) || e.type === 'Identifier'));
+  // What can't be a number there: an object made, awaited or written out, or a function
+  const madeObject = (init: AnyNode) =>
+    /^(?:AwaitExpression|NewExpression|ObjectExpression|ArrayExpression|ArrowFunctionExpression|FunctionExpression|ClassExpression)$/.test(init.type) ||
+    (init.type === 'CallExpression' && !/^(?:Math\.\w+|Number|parseInt|parseFloat)$/.test(code.slice(init.callee.start, init.callee.end)));
   // In text: inside a template literal, or added to a string
   const inText = parent?.type === 'TemplateLiteral' || (parent?.type === 'BinaryExpression' && parent.operator === '+' && textual(other));
   const word = keyWord(blank.text);
@@ -477,6 +490,8 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
         // Where text goes (`${x + " and "}`, 'Total: ' + x): an element made or looked up there
         // would show as "[object HTMLDivElement]"
         if (inText && declarator?.type === 'VariableDeclarator' && declarator.init && /getElementById|querySelector|createElement/.test(code.slice(declarator.init.start, declarator.init.end))) continue;
+        // Where a number goes, an object (the MIDI access, an audio context) won't do
+        if (numberSlot && declarator?.type === 'VariableDeclarator' && declarator.init && madeObject(declarator.init)) continue;
         // Declared by a function or class declaration (its name), not one of its parameters
         const callable = (owner?.type === 'FunctionDeclaration' || owner?.type === 'ClassDeclaration') && owner.id === binding;
         if (callable !== (role === 'constructor' || role === 'callee')) continue;

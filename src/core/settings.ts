@@ -168,8 +168,8 @@ export const SUPPORTED_PIPER_VOICES: ReadonlyArray<ModelOptionItem> = [
 ];
 
 export const DEFAULT_SETTINGS: ChattySettings = {
-  chatModelId: 'gemma-4-e2b-it-web',
-  codingModelId: 'gemma-4-e2b-it-web',
+  chatModelId: 'qwen3.5-2b',
+  codingModelId: 'qwen3.5-2b',
   voiceId: 'en_US-hfc_female-medium',
   speechEnabled: true,
   sidebarOpen: false,
@@ -229,6 +229,9 @@ export function loadSpeechChoice(): boolean | null {
 const CHAT_MODEL_CHOICE_KEY = 'chatty_chat_model';
 
 /** The chat model the user picked and saved, or null if they never chose one. */
+/** Desktop defaults before this one: in settings saved before choices were recorded, not a pick */
+const EARLIER_DEFAULTS = ['gemma-4-e2b-it-web'];
+
 export function loadChatModelChoice(): string | null {
   try {
     const chosen = localStorage.getItem(CHAT_MODEL_CHOICE_KEY);
@@ -238,7 +241,7 @@ export function loadChatModelChoice(): string | null {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (raw) {
       const stored = (JSON.parse(raw) as Partial<ChattySettings>).chatModelId;
-      if (stored && stored !== DEFAULT_SETTINGS.chatModelId && SUPPORTED_CHAT_MODELS.some((m) => m.id === stored)) {
+      if (stored && stored !== DEFAULT_SETTINGS.chatModelId && !EARLIER_DEFAULTS.includes(stored) && SUPPORTED_CHAT_MODELS.some((m) => m.id === stored)) {
         return stored;
       }
     }

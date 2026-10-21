@@ -989,8 +989,8 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
 
     it('manages settings persistence and supports Gemma chat/coding model & Piper voice selection', async () => {
       // 1. Verify defaults and supported options
-      expect(DEFAULT_SETTINGS.chatModelId).toBe('gemma-4-e2b-it-web');
-      expect(DEFAULT_SETTINGS.codingModelId).toBe('gemma-4-e2b-it-web');
+      expect(DEFAULT_SETTINGS.chatModelId).toBe('qwen3.5-2b');
+      expect(DEFAULT_SETTINGS.codingModelId).toBe('qwen3.5-2b');
       expect(DEFAULT_SETTINGS.voiceId).toBe('en_US-hfc_female-medium');
 
       expect(SUPPORTED_CHAT_MODELS.map((m) => m.id)).toEqual([
