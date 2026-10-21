@@ -80,3 +80,20 @@ describe('WebLLM temperature limit', async () => {
     expect(webLlmSampling({ temperature: 0.9, retry: 3 }, spec).temperature).toBeLessThanOrEqual(WEBLLM_MAX_TEMPERATURE);
   });
 });
+
+describe('one bar for a WebLLM load', async () => {
+  const { loadFraction } = await import('../src/runtimes/webllm-provider.ts');
+  it('moves forward through the download, the weights and the shaders, and leaves the end for when it is ready', () => {
+    // Downloaded first: the weights start where the download ended
+    expect(loadFraction('Fetching param cache[5/10]: …', 0.5, true)).toBeCloseTo(0.3);
+    expect(loadFraction('Loading model from cache[1/10]: …', 0, true)).toBeCloseTo(0.6);
+    expect(loadFraction('Loading model from cache[10/10]: …', 1, true)).toBeCloseTo(0.85);
+    // Already in the cache: the weights take the bar from 0
+    expect(loadFraction('Loading model from cache[5/10]: …', 0.5, false)).toBeCloseTo(0.425);
+    // The shaders count from 0 again in WebLLM, but not on the bar
+    expect(loadFraction('Loading GPU shader modules[1/80]: …', 0.0125, false)!).toBeGreaterThan(0.85);
+    expect(loadFraction('Loading GPU shader modules[80/80]: …', 1, false)).toBeCloseTo(0.98);
+    expect(loadFraction('Finish loading on Apple GPU', 1, false)).toBeLessThan(1);
+    expect(loadFraction('Start to fetch params', 0, false)).toBeNull();
+  });
+});

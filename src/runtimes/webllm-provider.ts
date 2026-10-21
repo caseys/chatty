@@ -7,6 +7,9 @@
 import { ENGLISH_GRAMMAR, fixGrammar } from './fix-grammar.ts';
 import { retryTemperature } from './retry-temperature.ts';
 import type { WebWorkerMLCEngine } from '@mlc-ai/web-llm';
+import { isAppleMobile } from '../core/settings.ts';
+import { AFTER_LOAD_MS, settleOnIos } from '../core/settle.ts';
+import { contextWindowFor, currentDevice, kvBytesPerToken, modelMaxContext, readModelConfig, workingMemoryBudget } from './context-size.ts';
 import type { LlmGenerationOptions, LlmGenerationResult, LlmRuntimeProvider } from '../types/index.ts';
 
 export interface WebLlmModelSpec {
@@ -124,6 +127,28 @@ export async function dropBrokenPieces(cache: Cache, baseUrl: string): Promise<n
   return dropped;
 }
 
+/** How long the worker pauses before each weight piece on iPhone and iPad (see webllm.worker.ts) */
+export const IOS_LOAD_PACE_MS = 80;
+
+/**
+ * Where a WebLLM load report puts the bar, as a fraction of the whole load, or null for a report
+ * that doesn't move it. WebLLM counts each step from 0 again (the download, the weights onto the
+ * GPU, the shaders), so each gets its share of one bar: the download up to 60%, the weights up to
+ * 85% (from 0 when they were all in the cache already), the shaders up to 98%. The last 2% come
+ * only once the model is ready.
+ */
+export function loadFraction(text: string, progress: number, downloaded: boolean): number | null {
+  const p = Math.max(0, Math.min(1, Number.isFinite(progress) ? progress : 0));
+  if (/^Fetching param cache/i.test(text)) return p * 0.6;
+  if (/^Loading model from cache/i.test(text)) {
+    const from = downloaded ? 0.6 : 0;
+    return from + p * (0.85 - from);
+  }
+  if (/^Loading GPU shader modules/i.test(text)) return 0.85 + p * 0.13;
+  if (/^Finish loading/i.test(text)) return 0.98;
+  return null;
+}
+
 /** A load error from a broken stored copy of the model ("Tensor-cache record range [0, 393216) exceeds shard size 0") */
 export function isBrokenCacheError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
@@ -132,8 +157,10 @@ export function isBrokenCacheError(err: unknown): boolean {
 
 export class WebLlmProvider implements LlmRuntimeProvider {
   readonly id: string;
-  readonly contextLimit: number;
-  readonly maxOutputTokens: number;
+  /** The context it gets: the spec's until it loads, then what this device's budget holds for it (see context-size.ts) */
+  contextLimit: number;
+  /** At most half the context, so a prompt that fills its share and the reply always fit */
+  maxOutputTokens: number;
   readonly supportsStreaming = true;
   readonly supportsCancellation = true;
   readonly supportsTools = false;
@@ -162,6 +189,7 @@ export class WebLlmProvider implements LlmRuntimeProvider {
       const webllm = await import('@mlc-ai/web-llm');
       const total = this.spec.sizeBytes;
       onProgress?.(0, total);
+      await this.sizeContext(webllm.prebuiltAppConfig.model_list.find((m) => m.model_id === this.spec.mlcId)?.model);
       try {
         await this.load(webllm.CreateWebWorkerMLCEngine, total, onProgress);
       } catch (err) {
@@ -185,6 +213,23 @@ export class WebLlmProvider implements LlmRuntimeProvider {
     return this.initPromise;
   }
 
+  /**
+   * The context this device can hold for the model: its KV cache's cost per token (from its
+   * config) against the device's budget, never above the spec's (see context-size.ts)
+   */
+  private async sizeContext(modelUrl: string | undefined): Promise<void> {
+    const config = modelUrl ? await readModelConfig(`${modelFilesUrl(modelUrl)}mlc-chat-config.json`) : null;
+    const perToken = kvBytesPerToken(config);
+    const budget = workingMemoryBudget(currentDevice());
+    this.contextLimit = contextWindowFor(perToken, budget, this.spec.contextLimit, modelMaxContext(config));
+    this.maxOutputTokens = Math.min(this.spec.maxOutputTokens, Math.floor(this.contextLimit / 2));
+    if (perToken) {
+      console.info(
+        `[WebLLM] ${this.modelId}: ${this.contextLimit}-token context (${((perToken * this.contextLimit) / (1024 * 1024)).toFixed(0)} MB of working memory, ${(perToken / 1024).toFixed(0)} KB a token; budget ${(budget / (1024 * 1024)).toFixed(0)} MB)`
+      );
+    }
+  }
+
   /** One attempt at loading the model in a new worker */
   private async load(
     create: typeof import('@mlc-ai/web-llm').CreateWebWorkerMLCEngine,
@@ -193,21 +238,34 @@ export class WebLlmProvider implements LlmRuntimeProvider {
   ): Promise<void> {
     const worker = new Worker(new URL('../workers/webllm.worker.ts', import.meta.url), { type: 'module' });
     this.worker = worker;
+    // iPhone Safari gets pauses between the load's heavy steps (the worker reads this first)
+    worker.postMessage({ kind: 'chatty-pace', ms: isAppleMobile() ? IOS_LOAD_PACE_MS : 0 });
+    // The bar only moves forward, through every step (see loadFraction)
+    let downloaded = false;
+    let shown = 0;
     try {
       const engine = await create(
         worker,
         this.spec.mlcId,
-        // WebLLM reports a 0..1 fraction (download, then loading onto the GPU) and what it's doing
+        // WebLLM reports what it's doing and a 0..1 fraction of that step
         {
           initProgressCallback: (report) => {
-            this.loadStage = report.text ?? '';
-            onProgress?.(Math.round(report.progress * total), total);
+            const text = report.text ?? '';
+            this.loadStage = text;
+            if (/^Fetching param cache/i.test(text)) downloaded = true;
+            const at = loadFraction(text, report.progress, downloaded);
+            if (at === null || at <= shown) return;
+            shown = at;
+            onProgress?.(Math.round(at * total), total);
           },
         },
         // Our context size, never a sliding window: WebLLM accepts only one of the two, and some
         // models (Gemma 3) ship both
-        { context_window_size: this.spec.contextLimit, sliding_window_size: -1 }
+        { context_window_size: this.contextLimit, sliding_window_size: -1 }
       );
+      // A breath on iPhone before the app moves on, and the bar full only then: the last thing
+      // the load changes
+      await settleOnIos(AFTER_LOAD_MS);
       if (this.worker !== worker) {
         // Disposed while loading
         await engine.unload().catch(() => {});

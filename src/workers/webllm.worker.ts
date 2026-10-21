@@ -5,5 +5,46 @@
 
 import { WebWorkerMLCEngineHandler } from '@mlc-ai/web-llm';
 
+// Pacing for iPhone and iPad Safari, which kills the tab when the GPU work of a load piles up (a
+// model read back from the cache comes as fast as storage allows, one weight piece straight after
+// another). The page sends the pause before loading starts (none elsewhere):
+//  - each weight piece waits that long before it is read, so the one before can be freed
+//  - the shaders are built one at a time (WebLLM starts them all at once), a moment apart, and
+//    the first waits longest: the model's working memory has just been set aside then
+let paceMs = 0;
+const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const readBytes = Response.prototype.arrayBuffer;
+Response.prototype.arrayBuffer = async function (this: Response): Promise<ArrayBuffer> {
+  if (paceMs > 0 && /params_shard_\d+\.bin/.test(this.url)) await pause(paceMs);
+  return readBytes.call(this);
+};
+
+type PipelineBuilder = { prototype: { createComputePipelineAsync: (this: unknown, descriptor: unknown) => Promise<unknown> } };
+const Device = (globalThis as unknown as { GPUDevice?: PipelineBuilder }).GPUDevice;
+if (Device) {
+  const build = Device.prototype.createComputePipelineAsync;
+  let queue: Promise<unknown> = Promise.resolve();
+  let built = 0;
+  Device.prototype.createComputePipelineAsync = function (this: unknown, descriptor: unknown) {
+    if (paceMs <= 0) return build.call(this, descriptor);
+    const first = built++ === 0;
+    const run = async () => {
+      await pause(first ? paceMs * 6 : Math.max(5, Math.round(paceMs / 8)));
+      return build.call(this, descriptor);
+    };
+    const next = queue.then(run, run);
+    queue = next.catch(() => {});
+    return next;
+  };
+}
+
 const handler = new WebWorkerMLCEngineHandler();
-self.onmessage = (event: MessageEvent) => handler.onmessage(event);
+self.onmessage = (event: MessageEvent) => {
+  const data = event.data as { kind?: string; ms?: number } | null;
+  if (data && data.kind === 'chatty-pace') {
+    paceMs = Number(data.ms) || 0;
+    return;
+  }
+  handler.onmessage(event);
+};

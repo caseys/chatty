@@ -1457,9 +1457,11 @@ export class MinimalVoiceApp {
     const step = index >= 0 && order.length > 1 ? ` (${index + 1} of ${order.length})` : '';
     const rate = this.measureDownloadRate(label, own.loaded);
     const rateText = rate && own.loaded < own.total ? ` · ${rate.toFixed(1)} MB/s` : '';
-    // Nothing downloaded yet: say what the runtime is doing instead ("Loading GPU shader
-    // modules [12/80]"), so a load that stalls before the download shows where
-    const stage = kind === 'llm' && own.loaded === 0 ? loadStageText(this.engine.getLlmLoadStage()) : '';
+    // Nothing downloaded yet, or past the download (the weights going onto the GPU, the
+    // shaders): say what the runtime is doing ("Loading GPU shader modules [12/80]"), so a load
+    // that stalls shows where, and no download speed shows for work that isn't a download
+    const llmStage = kind === 'llm' ? this.engine.getLlmLoadStage() : '';
+    const stage = kind === 'llm' && (own.loaded === 0 || /^Loading (?:model from cache|GPU shader)/i.test(llmStage)) ? loadStageText(llmStage) : '';
     // The left says what is loading (and how fast); the right and the bar, how far along it all is
     this.updateDownloadProgress(
       stage ? `Loading ${label}${step} — ${stage}` : `Loading ${label}${step}${rateText}`,
