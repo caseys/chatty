@@ -418,6 +418,13 @@ export function fixReplyTokens(program: string, line: number | undefined, block:
   return Math.min(max, Math.max(160, Math.round((replaced.length / 3) * 2) + 120));
 }
 
+/**
+ * The browser calls that put something on the page (or draw on it): a program that showed nothing
+ * and has none of them has nothing a fix could correct
+ */
+const ADDS_TO_PAGE =
+  /\b(?:appendChild|append|prepend|insertAdjacent(?:HTML|Element|Text)|replaceChildren|replaceWith|innerHTML|outerHTML|textContent|innerText|getContext|THREE)\b|document\.write|\broot\b/;
+
 /** A reply that left nothing to run */
 const NO_PROGRAM = 'The reply had no program in it';
 /** The program a fix turn starts from when there was none (a fix turn is known by its program) */
@@ -1944,9 +1951,10 @@ export class ConversationOrchestrator {
       kind: 'error',
       text: `${errorText(run.error, run.errorLine)} (asking the model to fix it)`,
     });
-    // No program to fix (nothing ran, or only speak()): the request is asked for again, as a
-    // whole program
-    if (!run.code.trim() || isTalkOnly(run.code)) {
+    // No program to fix (nothing ran, only speak(), or it showed nothing and puts nothing on the
+    // page at all): the request is asked for again, as a whole program
+    const nothingToShow = run.error.startsWith('The program showed nothing') && !ADDS_TO_PAGE.test(run.code);
+    if (!run.code.trim() || isTalkOnly(run.code) || nothingToShow) {
       this.startFixLog(run);
       appendRunLog('retry', `the reply had no program: asking the model for the whole program (try ${attempt} of ${MAX_FIX_TRIES})`);
       const ask = [

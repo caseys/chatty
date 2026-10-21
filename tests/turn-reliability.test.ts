@@ -1361,3 +1361,22 @@ describe('a reply that only talks, for a request that shows something', () => {
     expect(fresh.systemPrompt).not.toBe(FIX_SYSTEM_PROMPT);
   }, 30000);
 });
+
+describe('a program that showed nothing and puts nothing on the page', () => {
+  it('gets a new program written, not a fix of what it did', async () => {
+    const program = 'function animateBall() {\n  document.body.style.transform = "translate(5px, 0)";\n}\nanimateBall();';
+    const llm = new QueueLlm([program, '// Cause: no canvas\nconst c = document.createElement("canvas");\ndocument.body.appendChild(c);\nspeak("A ball.");']);
+    llm.modelId = 'qwen2.5-0.5b';
+    const { runtime } = fakeRuntime([{}, {}]);
+    let shown = false;
+    (runtime as unknown as { hasVisualContent: () => boolean }).hasVisualContent = () => shown;
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Animate a ball bouncing around the screen');
+    await vi.waitFor(() => expect(llm.turns.length).toBe(2), { timeout: 15000 });
+    shown = true;
+    const ask = llm.turns[1].messages.at(-1)!.content;
+    expect(ask).toContain('Write the complete JavaScript program for: Animate a ball bouncing around the screen');
+    expect(ask).not.toContain('document.body.style.transform');
+    expect(llm.turns[1].systemPrompt).not.toBe(FIX_SYSTEM_PROMPT);
+  }, 30000);
+});

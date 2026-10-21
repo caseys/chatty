@@ -211,6 +211,8 @@ export class MinimalVoiceApp {
         this.setRawOutput(raw);
       },
       onRunStatus: (_turnId, status) => {
+        // Every fix failed: the run log shows what happened, without a tap
+        if (status.kind === 'error' && status.text.endsWith(GAVE_UP_STATUS)) this.showingRunLog = true;
         this.setRunStatus(status);
         this.showProgramState(status);
       },
