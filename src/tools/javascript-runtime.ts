@@ -1401,17 +1401,26 @@ export class JavascriptRuntime {
       const midi = softwareMidiSummary();
       const noMidiNote = midi.sent > 0 && midi.noteOns === 0;
       const audio = `audio ${context.state}, ${context.sampleRate} Hz${session}`;
+      // What the program itself played: a note on an instrument, or a source it started (the oscillators inside an
+      // instrument that started as it was made are not either). A program that made nothing played nothing.
+      const setup = this.soundSetup();
+      const played = !!setup && setup.things.some((t) => (t.notes ?? 0) > 0 || (t.starts && t.started));
+      const nothingPlayed = !!setup && !played && this.notesSent === 0 && midi.sent === 0;
       this.onRunLog?.(
         peak > 0.001 ? 'console' : 'error',
         peak > 0.001
           ? `sound: reached the speakers (level ${peak.toFixed(2)}, ${audio})`
           : noMidiNote
             ? `sound: no MIDI note-on above velocity 0 was sent, so nothing reached the speakers (${audio}); the messages were ${midi.others.join('; ')}`
-            : `sound: notes were sent, but nothing reached the speakers (${audio})`
+            : nothingPlayed
+              ? `sound: no note was played and no source was started, so nothing reached the speakers (${audio})`
+              : `sound: notes were sent, but nothing reached the speakers (${audio})`
       );
     }, 100);
   }
 
+  /** The playNotes() calls of the current run (a program that played that way played something, whatever the page tracked) */
+  private notesSent = 0;
   private soundLevelPending = false;
 
   private watchProgramSound(output: GainNode): void {
@@ -1805,6 +1814,16 @@ export class JavascriptRuntime {
       return typeof read === 'function' ? read() : [];
     } catch {
       return [];
+    }
+  }
+
+  /** Whether the card shows anything but text (a drawn canvas, an <svg>, a picture, a colored box); null when the page can't say */
+  hasGraphics(): boolean | null {
+    try {
+      const graphic = (this.activeIframe?.contentWindow as unknown as { __chattyGraphic?: () => boolean | null } | null | undefined)?.__chattyGraphic;
+      return typeof graphic === 'function' ? graphic() : null;
+    } catch {
+      return null;
     }
   }
 
@@ -4041,6 +4060,26 @@ export class JavascriptRuntime {
     // The host asks this page (see hasVisualContent, hasDrawnContent)
     window.__chattyHasVisual = hasVisualNow;
     window.__chattyHasDrawing = () => __chattyVisualNow(true);
+    // Whether the card shows anything but text: a canvas that was drawn on, an <svg>, a picture, or a box with
+    // a size and a color or an image behind it (a drawing made of elements). Null where it can't be told.
+    window.__chattyGraphic = () => {
+      try {
+        for (const canvas of document.querySelectorAll('canvas')) if (canvas.width && canvas.height && !__chattyBlank(canvas)) return true;
+        if (document.querySelector('svg, img, video, picture')) return true;
+        for (const el of document.querySelectorAll('#root *')) {
+          if (!/^(?:DIV|SPAN|SECTION|ARTICLE|P|LI|UL|H[1-6])$/.test(el.tagName)) continue;
+          const box = el.getBoundingClientRect();
+          if (box.width < 4 || box.height < 4) continue;
+          const style = getComputedStyle(el);
+          const color = style.backgroundColor;
+          if ((color && color !== 'transparent' && color !== 'rgba(0, 0, 0, 0)') || (style.backgroundImage && style.backgroundImage !== 'none')) return true;
+        }
+        // A page without layout (a window that is not shown) can't say
+        return document.documentElement.getBoundingClientRect().height > 0 || document.querySelectorAll('#root *').length === 0 ? false : null;
+      } catch {
+        return null;
+      }
+    };
     // Something visible now: as above, and a canvas drawn on that shows only one flat color counts for nothing
     window.__chattySeen = () => __chattyVisualNow(true, true);
     // The 2D canvases that have been drawn on: how many drawing calls each has had, and whether it shows one flat color
@@ -4559,6 +4598,7 @@ export class JavascriptRuntime {
     try {
       if (data.type === 'playNotes') {
         this.soundUses++;
+        this.notesSent++;
         result = await playNotesHelper(
           String(data.notes ?? ''),
           data.tempo,
@@ -4596,6 +4636,7 @@ export class JavascriptRuntime {
     this.lastRunOptions = options;
     // Each program run is counted on its own (what its MIDI was, see midiSummary)
     resetMidiSummary();
+    this.notesSent = 0;
 
     return new Promise((resolve) => {
       const settle = (

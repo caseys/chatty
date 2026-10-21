@@ -100,20 +100,25 @@ export function closeCutOff(code: string): { code: string; dropped: number; clos
     for (const [ending, template] of [['', false], ['\n`;', true]] as const) {
       if (template && !inTemplate) continue;
       const text = kept + ending;
-      const open: string[] = [];
+      const open: Array<{ label: string; callback: boolean }> = [];
       try {
         for (const token of tokenizer(text, PARSE_OPTIONS)) {
           const label = token.type.label;
-          if (label === '{' || label === '(' || label === '[' || label === '${') open.push(label);
-          else if (label === '}' || label === ')' || label === ']') open.pop();
+          // A bracket that opens a call's callback (`setTimeout(() => {`, `list.forEach(function (x) {`) is closed
+          // with its block: the cut was inside the function it holds
+          if (label === '{' || label === '(' || label === '[' || label === '${') {
+            const rest = text.slice(token.start);
+            open.push({ label, callback: label === '(' && (/^\(\s*(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/.test(rest) || /^\(\s*(?:async\s+)?function\b[^(){]*\([^()]*\)\s*\{/.test(rest)) });
+          } else if (label === '}' || label === ')' || label === ']') open.pop();
         }
       } catch {
         continue; // cut inside a string or comment: another line goes, or the template is closed
       }
-      // Only blocks are closed: a cut call or array (`ctx.arc(100, 100`) loses its line instead
-      if (open.some((o) => o !== '{') || (open.length === 0 && !template)) continue;
-      const closed = open.length ? `${text}\n${open.map(() => '}').join('\n')}` : text;
-      if (tryParse(closed)) return { code: closed, dropped, closed: open.length, template };
+      // Only blocks (and the calls that hold a callback's block) are closed: a cut call or array
+      // (`ctx.arc(100, 100`) loses its line instead
+      if (open.some((o) => o.label !== '{' && !o.callback) || (open.length === 0 && !template)) continue;
+      const closed = open.length ? `${text}\n${[...open].reverse().map((o) => (o.label === '{' ? '}' : ')')).join('\n')}` : text;
+      if (tryParse(closed)) return { code: closed, dropped, closed: open.filter((o) => o.label === '{').length, template };
     }
   }
   return null;

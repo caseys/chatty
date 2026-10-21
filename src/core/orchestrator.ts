@@ -228,6 +228,8 @@ export const MAKES_USED_THING = new RegExp(
   `\\b(?:make|build|create|code|write|design|develop|generate|program|implement)\\s+(?:(?:me|us)\\s+)?(?:(?:a|an|the|my|our|some)\\s+)?(?:(?!about\\b|of\\b|for\\b|on\\b|with\\b)[\\w'-]+\\s+){0,2}(?:${USED_WORDS})\\b`,
   'i'
 );
+/** A request to draw: the verb, but not a card, a number or a winner (those are drawn at random, in words) */
+const DRAW_REQUEST = /\b(?:draw|paint|sketch|illustrate)\b(?!(?:\s+\w+){0,2}\s+(?:card|cards|number|numbers|name|names|winner|lot|lots|straw|conclusion|breath|blood|attention|raffle)\b)/i;
 /** A request for something the user does to it: tap, click, press, type in, drag, move by mouse or keys */
 const ASKS_FOR_INPUT = /\b(?:tap(?:s|ping)?|click(?:s|ing)?|pressing|swipe|drag(?:ging)?|typ(?:e|ing) (?:in|into)|arrow keys|keyboard|mouse or touch|(?:with|by|using) (?:the |your )?mouse)\b/i;
 /** What asks for something that changes by itself on screen */
@@ -2982,6 +2984,8 @@ export class ConversationOrchestrator {
     const listens = LISTENS_FOR_USER.test(code) || MOVES_WITH_USER.test(code);
     const noHandlers =
       wantsVisual && !soundWaits && !listens && shown() && drawn() && (ASKS_FOR_INPUT.test(request) || (MAKES_USED_THING.test(request) && !!this.javascriptRuntime.controlCount && this.javascriptRuntime.controlCount() > 0));
+    // A drawing asked for, and the card holds only text: the words stand where the picture should be
+    const textOnly = wantsVisual && DRAW_REQUEST.test(request) && !soundWaits && shown() && drawn() && this.javascriptRuntime.hasGraphics?.() === false;
     const emptied = wantsVisual && shown() && !drawn() ? (this.javascriptRuntime.emptyElements?.() ?? []) : [];
     const missing = [
       wantsSound && !asked()
@@ -3002,6 +3006,8 @@ export class ConversationOrchestrator {
           ? `The program put nothing visible on screen: its canvas has nothing drawn on it, or its elements are empty${emptied.length ? ` (${emptied.join(', ')} have no text and no size)` : ''}. Put text in an element (textContent, innerHTML) or give it a size (a style with width and height), or draw with the 2d context (fillRect, arc, lineTo, fill, stroke, fillText) in a function that is called.`
           : offCanvas
             ? offCanvas
+          : textOnly
+            ? 'The program drew nothing: the card shows only text. A drawing is a canvas drawn on (fillRect, arc, lineTo, fill, stroke), an <svg>, or elements with a size and a background color.'
           : noControls
             ? 'The page has nothing to press or type in: this app needs controls the user can use (button, input, select), each with a handler (onclick, an input listener) that does the work.'
             : noHandlers

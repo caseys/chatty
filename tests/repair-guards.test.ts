@@ -536,3 +536,59 @@ describe('the mark a test copy carries, as the browser prints it in an error', (
     expect(unmarkReached('x.y is not a function')).toBe('x.y is not a function');
   });
 });
+
+describe('a made-up capitalized name next to a question', () => {
+  it('is not taken for it: Tone.Note() is not Tone.isNote(), which asks a question', async () => {
+    const { sureMatch } = await import('../src/core/fuzzy-match.ts');
+    // The real slip from the happy birthday melody: a note was meant, isNote answers yes or no
+    expect(sureMatch('Note', ['isNote', 'now', 'start'], { reshaped: true })).toBeNull();
+    expect(sureMatch('Note', ['hasNote', 'start'], { reshaped: true })).toBeNull();
+    // A name made by a verb of making still is the one
+    expect(sureMatch('Note', ['createNote', 'now'], { reshaped: true })).toBe('createNote');
+    // A lowercase name keeps all the verbs (open → isOpen)
+    expect(sureMatch('open', ['isOpen', 'close'], { reshaped: true })).toBe('isOpen');
+    expect(sureMatch('page', ['getPage', 'turn'], { reshaped: true })).toBe('getPage');
+  });
+});
+
+describe('a reply cut off inside the callbacks of nested calls', () => {
+  // The countdown Qwen3 0.6B wrote: a chain of setTimeout callbacks, stopped at the output limit
+  const CUT = [
+    'speak("Show a big ten second countdown on screen.");',
+    "document.getElementById('countdown').innerHTML = \"Countdown: 10 seconds left\";",
+    'setTimeout(() => {',
+    "  document.getElementById('countdown').innerHTML = \"Countdown: 9 seconds left\";",
+    '  setTimeout(() => {',
+    "    document.getElementById('countdown').innerHTML = \"Countdown: 8 seconds left\";",
+    '    setTimeout(() => {',
+    "      document.getElementById('countdown').innerHTML = \"Countdown: 7 seconds left\";",
+    '      setTimeout(() => {',
+    '        ',
+  ].join('\n');
+
+  it('closes every open callback, so the program that was written so far runs', async () => {
+    const { closeCutOff } = await import('../src/core/error-hints.ts');
+    const cut = closeCutOff(CUT)!;
+    expect(cut).toBeTruthy();
+    expect(cut.closed).toBe(4);
+    expect(() => new Function(cut.code)).not.toThrow();
+    expect(cut.code).toContain('Countdown: 7 seconds left');
+  });
+
+  it('works for a function expression, an async arrow, and a name for the parameter', async () => {
+    const { closeCutOff } = await import('../src/core/error-hints.ts');
+    for (const open of ['items.forEach(function (item) {', 'items.forEach(async (item) => {', 'items.forEach(item => {', 'run((a, b) => {']) {
+      const cut = closeCutOff(`const items = [1];\n${open}\n  speak(String(items.length));\n`);
+      expect(cut, open).toBeTruthy();
+      expect(() => new Function(`const run = (f) => f(1, 2);\n${cut!.code}`), open).not.toThrow();
+    }
+  });
+
+  it('still drops a cut call or list instead of closing it', async () => {
+    const { closeCutOff } = await import('../src/core/error-hints.ts');
+    // (a call cut in its arguments, no callback in it: its line goes)
+    const cut = closeCutOff('function a() {\n  ctx.arc(100, 100\n');
+    expect(cut?.dropped).toBe(1);
+    expect(closeCutOff('const list = [1, 2,\n')).toBeNull();
+  });
+});

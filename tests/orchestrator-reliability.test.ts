@@ -428,3 +428,24 @@ describe('the outcome check on something to tap or use that nothing reacts to', 
     expect(await outcome('Build a tip calculator', page(0), board)).not.toContain(message);
   });
 });
+
+describe('the outcome check on a drawing that is only words', () => {
+  const drawing = (graphic: boolean | null) => ({ soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => true, hasGraphics: () => graphic });
+  const message = 'The program drew nothing: the card shows only text';
+  const words = 'document.body.innerHTML = `<div id="sailboat">Sailboat in the ocean</div><div id="water">Blue water</div>`;';
+
+  it('says the card holds only text where a picture was asked for (the sailboat Qwen3 0.6B wrote)', async () => {
+    expect(await outcome('Draw a sailboat on blue water', drawing(false), words)).toContain(message);
+    expect(await outcome('Paint a sunset over the sea', drawing(false), words)).toContain(message);
+  });
+
+  it('is content with a picture, a page that cannot say, a request that does not draw, or a draw of cards and numbers', async () => {
+    expect(await outcome('Draw a sailboat on blue water', drawing(true), 'ctx.fillRect(0, 0, 9, 9);')).toBeNull();
+    expect(await outcome('Draw a sailboat on blue water', drawing(null), words)).toBeNull();
+    expect(await outcome('Draw a sailboat on blue water', { soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => true }, words)).toBeNull();
+    expect(await outcome('Show my to-do list: milk, eggs', drawing(false), words)).toBeNull();
+    for (const request of ['Draw a card from a deck and show it', 'Draw a random number between 1 and 10', 'Draw the winner of the raffle']) {
+      expect(await outcome(request, drawing(false), words), request).toBeNull();
+    }
+  });
+});

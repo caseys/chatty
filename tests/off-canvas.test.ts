@@ -173,3 +173,61 @@ describe('the sandbox runner reads what is visible on a canvas', () => {
     win.close();
   });
 });
+
+describe('the sandbox runner says whether the card holds more than text', () => {
+  async function page(code: string, laidOut = true) {
+    const runtime = new JavascriptRuntime();
+    const html = (runtime as unknown as { buildRunnerHtml(trial: boolean, host?: string, token?: string): string }).buildRunnerHtml(false, undefined, 'tok');
+    const dom = new JSDOM(html, {
+      runScripts: 'dangerously',
+      pretendToBeVisual: true,
+      url: 'http://localhost/',
+      beforeParse(w: any) {
+        // (jsdom has no layout: every element is 120 x 60 where the test says the page is laid out)
+        w.Element.prototype.getBoundingClientRect = function () {
+          return laidOut ? { width: 120, height: 60, top: 0, left: 0, right: 120, bottom: 60 } : { width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0 };
+        };
+        class Ctx2D {
+          canvas: any;
+          constructor(canvas: any) { this.canvas = canvas; }
+          fillRect() {}
+          getTransform() { return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }; }
+        }
+        w.CanvasRenderingContext2D = Ctx2D;
+        w.HTMLCanvasElement.prototype.getContext = function () { return (this.__ctx ??= new Ctx2D(this)); };
+      },
+    });
+    const win = dom.window as any;
+    await new Promise((r) => setTimeout(r, 50));
+    win.postMessage({ type: 'execute', id: 'g1', code }, '*');
+    await new Promise((r) => setTimeout(r, 80));
+    return win;
+  }
+
+  it('says only text for the sailboat of words, and a picture for a canvas, an svg, or a box with a color', async () => {
+    const words = await page(`document.body.innerHTML = "<div id='a'>Sailboat in the ocean</div><div id='b'>Blue water</div>";`);
+    expect(words.__chattyGraphic()).toBe(false);
+    words.close();
+    const canvas = await page('const c = document.createElement("canvas"); c.width = 50; c.height = 50; document.body.append(c); c.getContext("2d").fillRect(0, 0, 9, 9);');
+    expect(['canvas', canvas.__chattyGraphic()]).toEqual(['canvas', true]);
+    canvas.close();
+    const blank = await page('const c = document.createElement("canvas"); c.width = 50; c.height = 50; document.body.append(c);');
+    expect(blank.__chattyGraphic()).toBe(false);
+    blank.close();
+    const svg = await page(`document.body.innerHTML = "<svg width='20' height='20'><circle r='5'/></svg>";`);
+    expect(['svg', svg.__chattyGraphic()]).toEqual(['svg', true]);
+    svg.close();
+    const box = await page(`document.body.innerHTML = "<div style='background-color: blue'>water</div>";`);
+    expect(['box', box.__chattyGraphic()]).toEqual(['box', true]);
+    box.close();
+  });
+
+  it('cannot say for a page with no layout, and says false for an empty one', async () => {
+    const hidden = await page('document.body.innerHTML = "<div>text</div>";', false);
+    expect(hidden.__chattyGraphic()).toBeNull();
+    hidden.close();
+    const empty = await page('const x = 1;', false);
+    expect(empty.__chattyGraphic()).toBe(false);
+    empty.close();
+  });
+});

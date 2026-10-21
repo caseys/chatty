@@ -67,7 +67,8 @@ export function sureMatch(
   // 4. Reshaped (members): a verb added or dropped, or the name cut short. One answer is sure;
   // among several, the one the program itself uses elsewhere (it uses .value: val is value)
   if (options.reshaped && want.length >= 3) {
-    const verbs = ['get', 'set', 'create', 'make', 'is', 'has', 'add', 'remove', 'to'];
+    // (a capitalized name, Note or Synth, names a thing that is made: isNote and hasNote are questions, not it)
+    const verbs = /^[A-Z]/.test(missing) ? ['create', 'make'] : ['get', 'set', 'create', 'make', 'is', 'has', 'add', 'remove', 'to'];
     const pick = (found: string[]) => {
       if (found.length === 1) return found[0];
       const used = found.filter((n) => (options.used ?? []).includes(n));
