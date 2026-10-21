@@ -653,6 +653,21 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
     expect(result?.interrupted).toBe(true);
   });
 
+  it('shows a Stopped status (with the log and copy buttons) when the reply is stopped while written', async () => {
+    const statuses: Array<{ kind: string; text: string }> = [];
+    const orchestrator = new ConversationOrchestrator({
+      stateCoordinator: new StateMachineCoordinator(),
+      llmProvider: new TestStubLlmProvider({ tokenDelayMs: 50 }),
+      ttsProvider: new TestStubTtsProvider(),
+      events: { onRunStatus: (_id, status) => statuses.push(status) },
+    });
+    const turnPromise = orchestrator.submitUserInput('draw three circles');
+    await new Promise((r) => setTimeout(r, 5));
+    orchestrator.interruptCurrentTurn('User clicked Stop');
+    await turnPromise;
+    expect(statuses.at(-1)).toEqual({ kind: 'none', text: 'Stopped before the program was finished' });
+  });
+
   describe('Dynamic Title Generation (Conversation Text & Compacted Summary)', () => {
     it('generates a title from current conversation text when no summary exists', async () => {
       const stateCoordinator = new StateMachineCoordinator();

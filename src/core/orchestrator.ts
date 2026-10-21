@@ -1309,6 +1309,11 @@ export class ConversationOrchestrator {
         signal.removeEventListener('abort', abortGeneration);
         // Discard stale results if turn was canceled during generation
         if (!this.scheduler.isTurnValid(turnId) || (genResult.aborted && !stoppedRepeating)) {
+          // Stopped while the model wrote: what it had written goes in the run log, and the status
+          // line (with its log and copy buttons) says so
+          const partial = rawAccumulatedTokens || genResult.text;
+          appendRunLog('discarded', `// Stopped before the reply was finished, so nothing ran. The model had written:\n${partial || '(nothing yet)'}`);
+          this.events.onRunStatus?.(turnId, { kind: 'none', text: 'Stopped before the program was finished' });
           return assistantMsg;
         }
 
