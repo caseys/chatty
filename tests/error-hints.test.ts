@@ -14,11 +14,19 @@ describe('"x is not defined"', () => {
     expect(hint.correction!.code).toBe('const total = 5;\nspeak("totla");\nspeak(`${total}`);');
   });
 
-  it('lists what the program does declare when nothing is close', () => {
-    const code = 'function playMusic() {}\nconst bpm = 90;\nsetupSynth();';
-    expect(errorHint(code, 'setupSynth is not defined', 3)!.text).toBe(
-      "Nothing named setupSynth is declared. The program's functions: playMusic(). Its variables: bpm."
-    );
+  it('lists what the program defines, closest to the missing name first, and what Chatty provides, when nothing is close', () => {
+    const code = 'function startLoop() {}\nfunction playChord() {}\nclass Piano {}\nconst bpm = 90;\nplayNote("C4");';
+    // The names that really exist: the program's own, from its scopes, the nearest first; Chatty's helpers from the page
+    const scope = { __chattyHelpers: { out: {}, speak() {}, playNotes() {} } } as unknown as Record<string, unknown>;
+    expect(errorHint(code, 'playNote is not defined', 5, { ids: [], scope })!.text).toBe("playNote isn't defined; the program defines playChord(), startLoop(), Piano, bpm. Chatty provides playNotes(), out, speak().");
+    // Safari's wording, and no page: only what the program defines
+    expect(errorHint(code, "Can't find variable: playNote", 5)!.text).toBe("playNote isn't defined; the program defines playChord(), startLoop(), Piano, bpm.");
+    expect(errorHint('const x = 1;\nsetupSynth();', 'setupSynth is not defined', 2, { ids: [], scope })!.text).toBe("setupSynth isn't defined; the program defines x. Chatty provides out, speak(), playNotes().");
+  });
+
+  it('keeps a sure near-miss first: the slip is corrected, no list', () => {
+    const code = 'function playChord() {}\nplayChrod();';
+    expect(errorHint(code, 'playChrod is not defined', 2)!.correction?.code).toBe('function playChord() {}\nplayChord();');
   });
 });
 
@@ -184,7 +192,7 @@ describe('packages the browser does not have', () => {
 
   it('lists each variable once', () => {
     const code = "const { getBody } = foo();\nconst c = 1;\nzap();";
-    expect(errorHint(code, 'zap is not defined', 3)?.text).toContain('Its variables: getBody, c.');
+    expect(errorHint(code, 'zap is not defined', 3)?.text).toContain('the program defines getBody, c.');
   });
 });
 

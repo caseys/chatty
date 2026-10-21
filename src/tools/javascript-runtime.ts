@@ -98,6 +98,22 @@ import { midiSummary as softwareMidiSummary, resetMidiSummary, silenceSoftwareMi
 
 export type JavascriptExecutionMode = 'iframe' | 'worker' | 'eval';
 
+/** A name a program read from an element or an event that the object doesn't have (see __chattyMissingReads in the runner) */
+export interface MissingRead {
+  name: string;
+  /** 'element:input', 'event:MouseEvent' */
+  type: string;
+  line: number;
+}
+
+/** What a hidden test run found: its error, whether the marked code ran, and the missing reads it saw */
+export interface TrialResult {
+  error: string | null;
+  errorLine?: number;
+  reached?: boolean;
+  reads?: MissingRead[];
+}
+
 /** Where a canvas's drawing calls landed over a moment: per kind of call, how many and the range they covered (see traceDrawing) */
 export interface CanvasTrace {
   width: number;
@@ -406,6 +422,9 @@ const looksLikeTalk = (line: string) => {
  * HTML template string), it was code after all.
  */
 function paragraphParts(text: string): ReplyPart[] {
+  // A fence's marker left on a line of its own (a third ``` after the program and its closing line, an
+  // opener with nothing after it) is markdown, not code: left in, it reads as an empty template string
+  text = text.replace(/^[ \t]*`{3,}[\w-]*[ \t]*$/gm, '');
   // Each piece: a paragraph's lines, split into talk before, code (or talk), talk after
   const pieces: Array<{ before: string[]; middle: string[]; after: string[]; isCode: boolean }> = [];
   for (const paragraph of text.split(/\n[ \t]*\n/)) {
@@ -1613,6 +1632,20 @@ export class JavascriptRuntime {
     }
   }
 
+  /** The helpers the program's page has and the member names of each (out: send, play, playNote), as the runner's own objects have them */
+  helperMembers(): Record<string, string[]> {
+    try {
+      const helpers = (this.activeIframe?.contentWindow as unknown as { __chattyHelpers?: Record<string, unknown> } | null | undefined)?.__chattyHelpers;
+      const out: Record<string, string[]> = {};
+      for (const [name, value] of Object.entries(helpers ?? {})) {
+        out[name] = value && (typeof value === 'object' || typeof value === 'function') ? Object.getOwnPropertyNames(value).filter((key) => key !== 'constructor' && key !== 'length' && key !== 'name' && key !== 'prototype' && !key.startsWith('_')) : [];
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  }
+
   /** What each element id of the visible card is (`board` → `canvas`, `result` → `div`), as the page built it */
   pageTags(): Record<string, string> {
     try {
@@ -1654,11 +1687,14 @@ export class JavascriptRuntime {
    */
   pageScope(): Record<string, unknown> | null {
     try {
-      const page = this.activeIframe?.contentWindow as unknown as Record<string, { __chattyRaw?: unknown } | undefined> | null | undefined;
-      if (!page || !(page.Tone || page.THREE)) return null;
+      const page = this.activeIframe?.contentWindow as unknown as (Record<string, { __chattyRaw?: unknown } | undefined> & { __chattyHelpers?: Record<string, unknown> }) | null | undefined;
+      if (!page) return null;
       return new Proxy(globalThis as unknown as Record<string, unknown>, {
         get(target, prop) {
           if (prop === 'Tone' || prop === 'THREE') return page[prop]?.__chattyRaw ?? page[prop];
+          // Chatty's helpers, as the program's page has them (out, speak, playNotes…)
+          if (prop === '__chattyHelpers') return page.__chattyHelpers;
+          if (typeof prop === 'string' && page.__chattyHelpers && prop in page.__chattyHelpers && !(prop in target)) return page.__chattyHelpers[prop];
           return Reflect.get(target, prop);
         },
       });
@@ -2520,6 +2556,26 @@ export class JavascriptRuntime {
         const thing = { kind, system, starts, started: false, edges: [], opaque: false, role: makesSound ? 'source' : starts && !connects ? 'scheduler' : 'node' };
         // What the object has of its own as it is made: a name the program writes after that is its own addition
         if (system === 'tone') thing.keys = new Set(Object.getOwnPropertyNames(obj));
+        // The notes the program plays on an instrument: each call of triggerAttack and triggerAttackRelease
+        // (a source that merely started inside an instrument, MetalSynth's oscillators, is no note)
+        if (system === 'tone' && (typeof obj.triggerAttack === 'function' || typeof obj.triggerAttackRelease === 'function')) {
+          thing.notes = 0;
+          for (const key of ['triggerAttack', 'triggerAttackRelease']) {
+            const trigger = obj[key];
+            if (typeof trigger === 'function') {
+              obj[key] = function (...args) {
+                thing.notes++;
+                // The time of a note is seconds on Tone's own clock (Tone.now() is the present): a number below it
+                // (a time of 0) is already past, and the note plays and ends at once, unheard
+                try {
+                  const at = key === 'triggerAttack' ? args[1] : args[2];
+                  if (typeof at === 'number' && window.Tone && typeof window.Tone.now === 'function' && window.Tone.now() > at + 0.05) thing.past = (thing.past || 0) + 1;
+                } catch {}
+                return trigger.apply(this, args);
+              };
+            }
+          }
+        }
         __chattyMade.by.set(obj, thing);
         __chattyMade.things.push(thing);
         if (starts) {
@@ -2605,7 +2661,18 @@ export class JavascriptRuntime {
             const wrapper = new Proxy(value, {
               construct(target, args, newTarget) {
                 const made = Reflect.construct(target, args, newTarget === wrapper ? target : newTarget);
-                return __chattyTrack(made, 'Tone.' + key, 'tone', isOutput);
+                const tracked = __chattyTrack(made, 'Tone.' + key, 'tone', isOutput);
+                // A loop, part or sequence plays what its callback does: whether it was given one (as an argument
+                // or an option, or set on it afterwards: see __chattySetup)
+                try {
+                  const thing = __chattyMade.by.get(made);
+                  if (thing && thing.role === 'scheduler') {
+                    const first = args[0];
+                    thing.given = typeof first === 'function' || !!(first && typeof first === 'object' && typeof first.callback === 'function');
+                    thing.callback0 = made.callback;
+                  }
+                } catch {}
+                return tracked;
               },
             });
             Object.defineProperty(watched, key, { value: wrapper, enumerable: true, configurable: true, writable: true });
@@ -2667,6 +2734,40 @@ export class JavascriptRuntime {
       } catch {}
       return found;
     };
+    // In a test run only (the real run pays nothing): a name the program reads from an element or an event that
+    // nothing in its prototype chain has (input.val for input.value) gives undefined and no error. A spy sits in
+    // the chain above Node.prototype (elements) and Event.prototype (events): a lookup that found nothing below
+    // ends there, and the spy answers as the rest of the chain would. The objects themselves are the real ones
+    // (identity, instanceof, appending, writes all as they were), and 'in' checks never reach it. Recorded: the
+    // name, the kind of object, the program's line (a read from a library is not the program's: no line, not
+    // recorded).
+    const __chattyMissing = [];
+    window.__chattyMissingReads = () => __chattyMissing.slice();
+    if (__chattyTrial) {
+      try {
+        const seenReads = new Set();
+        // Names JavaScript and libraries ask of any object (then, toJSON…): not the program's reads
+        const asked = new Set(['then', 'catch', 'finally', 'toJSON', 'constructor', 'prototype', 'nodeType', 'asymmetricMatch', '$$typeof', 'tagName', 'nodeName']);
+        const spyAbove = (base) => new Proxy(Object.create(base), {
+          get(target, prop, receiver) {
+            if (typeof prop === 'string' && !(prop in base) && !asked.has(prop) && !prop.startsWith('_') && __chattyMissing.length < 30) {
+              try {
+                const kind = receiver instanceof Element ? 'element:' + receiver.localName : receiver instanceof Event ? 'event:' + receiver.constructor.name : null;
+                const line = kind ? errorLine(new Error(), true) : undefined;
+                const key = kind + '|' + prop + '|' + line;
+                if (kind && line !== undefined && !seenReads.has(key)) {
+                  seenReads.add(key);
+                  __chattyMissing.push({ name: prop, type: kind, line });
+                }
+              } catch {}
+            }
+            return Reflect.get(base, prop, receiver);
+          },
+        });
+        Object.setPrototypeOf(Node.prototype, spyAbove(EventTarget.prototype));
+        Object.setPrototypeOf(Event.prototype, spyAbove(Object.prototype));
+      } catch {}
+    }
     window.__chattySetup = () => {
       const things = __chattyMade.things.map((t) => ({
         kind: t.kind,
@@ -2675,7 +2776,16 @@ export class JavascriptRuntime {
         starts: t.starts,
         started: t.started,
         connected: t.role !== 'source' || __chattyReaches(t, new Set([t])),
+        ...(typeof t.notes === 'number' ? { notes: t.notes, past: t.past || 0 } : {}),
+        ...(t.role === 'scheduler' && 'given' in t ? { hasCallback: !!t.given } : {}),
       }));
+      // (a callback set on the object afterwards, loop.callback = (time) => {…}, counts: the object has another one than it was made with)
+      for (const [obj, t] of __chattyMade.by) {
+        if (t.role === 'scheduler' && 'given' in t && !t.given && typeof obj.callback === 'function' && obj.callback !== t.callback0) {
+          const entry = things[__chattyMade.things.indexOf(t)];
+          if (entry) entry.hasCallback = true;
+        }
+      }
       const media = new Set(__chattyMade.audios);
       for (const el of document.querySelectorAll('audio, video')) media.add(el);
       for (const el of media) {
@@ -3112,12 +3222,26 @@ export class JavascriptRuntime {
     // (a page may set its own limit before the runner starts: the tests do, to keep them short)
     const __CHATTY_MAX_LIVE = Number(window.__chattyMaxLive) || 20000;
     let __chattyWatcher = null;
+    // A program that keeps allocating (a list that grows by ten every frame) ends in a crashed tab, with no
+    // error to say why: its memory is counted too, where the browser says (Chrome's performance.memory)
+    const __CHATTY_MAX_HEAP = Number(window.__chattyMaxHeap) || 700e6;
+    const __chattyHeap = () => {
+      try { return (performance.memory && performance.memory.usedJSHeapSize) || 0; } catch { return 0; }
+    };
     function __chattyStartWatch() {
       __chattyRunaway = 0;
       if (__chattyWatcher !== null) realClearInterval(__chattyWatcher);
       let last = 0;
       let growing = 0;
+      const heapStart = __chattyHeap();
+      let heapTold = false;
       __chattyWatcher = realSetInterval(() => {
+        const heap = __chattyHeap();
+        if (heapStart && !heapTold && heap - heapStart > __CHATTY_MAX_HEAP) {
+          heapTold = true;
+          __chattyStopWork();
+          __chattyReportLate('The program has taken ' + Math.round((heap - heapStart) / 1e6) + ' MB of memory since it started and keeps allocating more (a list or an object that grows every frame): it was stopped', undefined);
+        }
         const live = document.getElementsByTagName('*').length;
         growing = live > __CHATTY_MAX_LIVE && live > last ? growing + 1 : 0;
         last = live;
@@ -3986,6 +4110,9 @@ export class JavascriptRuntime {
       window.root.innerHTML = '';
       __chattyHost.postMessage({ type: 'clear' }, '*');
     };
+    // The helpers a program gets, as they really are (the host lists what they offer when a program asks for
+    // something they don't have: out.say(), speak.loud())
+    window.__chattyHelpers = { out: defaultMidiOut, speak: window.speak, playNotes: window.playNotes, searchWikipedia: window.searchWikipedia, clear: window.clear };
 
     // After the page has loaded, document.write would replace all of it (the card, the program's
     // wiring and this runner): its HTML goes into the card instead, and its scripts run
@@ -4545,13 +4672,13 @@ export class JavascriptRuntime {
    * prototypes and a program can too (globals, listeners, timers), and only a new window is
    * certain to be clean.
    */
-  trialRun(code: string, ms = 1500): Promise<{ error: string | null; errorLine?: number; reached?: boolean }> {
+  trialRun(code: string, ms = 1500): Promise<TrialResult> {
     const run = this.trialQueue.then(() => this.trialNow(code, ms));
     this.trialQueue = run.catch(() => undefined);
     return run.catch(() => ({ error: null }));
   }
 
-  private trialNow(code: string, ms: number): Promise<{ error: string | null; errorLine?: number; reached?: boolean }> {
+  private trialNow(code: string, ms: number): Promise<TrialResult> {
     if (typeof document === 'undefined' || !document.body) return Promise.resolve({ error: null });
     const iframe = this.takeTrialFrame();
     const id = `trial_${++this.reqCounter}_${Date.now()}`;
@@ -4574,9 +4701,11 @@ export class JavascriptRuntime {
         iframe.removeEventListener('load', onLoad);
         // Whether the code marked with globalThis.__chattyReached ran (see blankStage)
         let reached = false;
+        let reads: Array<{ name: string; type: string; line: number }> = [];
         try {
-          const page = iframe.contentWindow as unknown as { __chattyReached?: boolean; __chattyTrialToken?: string } | null;
+          const page = iframe.contentWindow as unknown as { __chattyReached?: boolean; __chattyTrialToken?: string; __chattyMissingReads?: () => Array<{ name: string; type: string; line: number }> } | null;
           reached = page?.__chattyTrialToken === id && !!page.__chattyReached;
+          if (page?.__chattyTrialToken === id && typeof page.__chattyMissingReads === 'function') reads = page.__chattyMissingReads();
         } catch {
           // frame went away
         }
@@ -4589,7 +4718,7 @@ export class JavascriptRuntime {
           // already gone
         }
         this.trialFrameIdle = setTimeout(() => this.dropTrialFrame(), TRIAL_FRAME_IDLE_MS);
-        resolve(error === null ? { error: null, reached } : { error, errorLine, reached });
+        resolve({ ...(error === null ? { error: null } : { error, errorLine }), reached, ...(reads.length ? { reads } : {}) });
       };
 
       const start = (): void => {
@@ -4673,6 +4802,11 @@ export class JavascriptRuntime {
         finish(err instanceof Error ? err.message : String(err));
       }
     });
+  }
+
+  /** The names a program reads from its elements and events that they don't have, seen in a hidden test run of it (the real run pays nothing) */
+  async trialReads(code: string, ms = 1500): Promise<MissingRead[]> {
+    return (await this.trialRun(code, ms)).reads ?? [];
   }
 
   /** The shared trial frame, made when there isn't one: off screen, but laid out at a fixed size (canvas and DOM code reads sizes) */

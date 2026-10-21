@@ -80,6 +80,10 @@ class Gain extends ToneAudioNode {}
 class Param extends ToneWithContext {}
 class Loop extends ToneWithContext {}
 const scope = { Tone: { PolySynth, Synth, MembraneSynth, Filter, Gain, Param, Loop, Transport: {} } } as unknown as Record<string, unknown>;
+// (with the instrument and source bases the library exports, for the connection facts)
+class Source extends ToneAudioNode {}
+class PluckSynth extends Instrument {}
+const sourcesScope = { Tone: { PolySynth, Synth, PluckSynth, MembraneSynth, Filter, Gain, Instrument, Source, Param, Loop } } as unknown as Record<string, unknown>;
 
 describe('what an instance of a library class has', () => {
   it('lists PolySynth’s own methods and settings, cleaned: no plumbing, no underscores, no repeats, nothing deprecated', () => {
@@ -97,7 +101,7 @@ describe('what an instance of a library class has', () => {
     const code = 'const gMinor = new Tone.PolySynth();\ngMinor.setInstruments({});';
     const hint = methodHint(code, 'gMinor.setInstruments is not a function', scope, 2);
     expect(hint?.text).toBe(
-      'gMinor is a Tone.PolySynth (made at line 1); it has no setInstruments(). Its methods: set(), triggerAttack(), triggerRelease(), triggerAttackRelease(), sync(), get(), releaseAll(), dispose(), unsync(), connect(), toDestination(), disconnect(). Its settings: activeVoices (read-only), volume, maxPolyphony, options, voice.'
+      'gMinor is a Tone.PolySynth (made at line 1); it has no setInstruments(). Its methods: set(), triggerAttack(), triggerRelease(), triggerAttackRelease(), sync(), get(), releaseAll(), dispose(), unsync(), connect(), toDestination(), disconnect(), …. Its settings: activeVoices (read-only), volume, maxPolyphony, options, voice.'
     );
     expect(hint?.correction).toBeUndefined();
     // Through the error hints of the whole program
@@ -159,5 +163,30 @@ describe('a name written on an object that has no such setting', () => {
     const unknown = { soundUseCount: () => 0, hasVisualContent: () => false, unknownWrites: () => [{ type: 'Tone.Nothing', name: 'tempo' }], pageScope: () => scope };
     expect(await outcome('Play a C major chord', unknown)).not.toContain("isn't a setting");
     expect(await outcome('Play a C major chord', { soundUseCount: () => 0, hasVisualContent: () => false })).not.toContain("isn't a setting");
+  });
+});
+
+describe('Tone: something connected into a sound source', () => {
+  const error = 'Cannot connect to node with no inputs';
+  // The program from the live blues run: instruments connected into instruments
+  const code = [
+    'const gMinor = new Tone.PolySynth();',
+    'const synthPiano = new Tone.PluckSynth();',
+    'const reverb = new Tone.Filter();',
+    'gMinor.connect(synthPiano, "input", "toDestination");',
+    'gMinor.connect(reverb);',
+  ].join('\n');
+
+  it('says the target is a sound source with no inputs, for each call on the failing line', () => {
+    const hint = errorHint(code, error, 4, { ids: [], scope: sourcesScope });
+    expect(hint?.text).toBe('synthPiano is a Tone.PluckSynth, a sound source with no inputs: nothing can be connected into it. It sends sound onward: synthPiano.toDestination(), or synthPiano.connect(an effect that has inputs, such as a Tone.Reverb or Tone.Filter).');
+    // Without a line: every call whose target is a source
+    expect(errorHint(code, error, undefined, { ids: [], scope: sourcesScope })?.text).toContain('synthPiano is a Tone.PluckSynth');
+  });
+
+  it('is not said for a node with inputs, another error, or without the page', () => {
+    expect(errorHint(code, error, 5, { ids: [], scope: sourcesScope })?.text ?? '').not.toContain('no inputs: nothing');
+    expect(errorHint(code, 'Tone.Reverb is not a constructor', 4, { ids: [], scope: sourcesScope })?.text ?? '').not.toContain('no inputs');
+    expect(errorHint(code, error, 4)?.text ?? '').not.toContain('no inputs: nothing');
   });
 });

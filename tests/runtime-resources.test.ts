@@ -419,3 +419,47 @@ describe('a loop that ran too long', () => {
     other.win.close();
   });
 });
+
+describe('a program that keeps allocating memory', () => {
+  it('is stopped (frames and timers) and told once when its memory grows past the limit, where the browser says', async () => {
+    const runtime = new JavascriptRuntime();
+    const html = (runtime as unknown as Internals).buildRunnerHtml(false, undefined, 'tok');
+    let used = 50e6;
+    const dom = new JSDOM(html, {
+      runScripts: 'dangerously',
+      pretendToBeVisual: true,
+      url: 'http://localhost/',
+      beforeParse: (w: any) => {
+        w.__chattyMaxHeap = 100e6;
+        Object.defineProperty(w.performance, 'memory', { get: () => ({ usedJSHeapSize: used }) });
+      },
+    });
+    const win: any = dom.window;
+    const posted: any[] = [];
+    win.addEventListener('message', (e: MessageEvent) => posted.push(e.data));
+    win.postMessage({ type: 'execute', id: 'm1', code: 'window.__n = 0;\nfunction frame() { window.__n++; requestAnimationFrame(frame); }\nframe();' }, '*');
+    await wait(200);
+    // Within the limit: the program goes on
+    used = 120e6;
+    await wait(700);
+    expect(posted.some((m) => /MB of memory/.test(String(m.message ?? '')))).toBe(false);
+    used = 400e6;
+    await vi.waitFor(() => expect(posted.filter((m) => /MB of memory/.test(String(m.message ?? ''))).length).toBe(1), { timeout: 3000, interval: 100 });
+    const n = win.__n;
+    await wait(200);
+    expect(win.__n).toBe(n);
+    expect(posted.find((m) => /MB of memory/.test(String(m.message ?? ''))).message).toMatch(/^The program has taken 3\d\d MB of memory since it started/);
+    win.close();
+  }, 10000);
+
+  it('does nothing where the browser does not say how much memory is used', async () => {
+    const { win, posted } = loadRunner(false);
+    win.postMessage({ type: 'execute', id: 'm2', code: 'window.__n = 0;\nfunction frame() { window.__n++; requestAnimationFrame(frame); }\nframe();' }, '*');
+    await wait(900);
+    expect(posted.some((m) => /MB of memory/.test(String(m.message ?? '')))).toBe(false);
+    const n = win.__n;
+    await wait(150);
+    expect(win.__n).toBeGreaterThan(n);
+    win.close();
+  });
+});

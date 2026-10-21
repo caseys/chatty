@@ -16,7 +16,7 @@ import { parse as parseLoose } from 'acorn-loose';
 import { sureMatch } from './fuzzy-match.ts';
 import { analyse, isReference, resolve } from './blank-fix.ts';
 import { onlySendsLists, usedAs } from './value-use.ts';
-import { applyCorrection, argumentCountFact, memberKind, methodHint, missingMethod, objectType, realMembers, valueOfPath } from './method-hints.ts';
+import { applyCorrection, argumentCountFact, memberKind, memberList, methodHint, missingMethod, objectType, realMembers, relatedness, valueOfPath } from './method-hints.ts';
 import { memberNames, writability } from './property-check.ts';
 import { toneStepsOnly, withTransportStart } from './sound-setup.ts';
 
@@ -274,16 +274,27 @@ function notDefined(code: string, error: string, errorLine?: number, page?: Page
     const renamed = slip ? renameUndeclared(code, name, slip) : null;
     if (slip && renamed) return { correction: { code: renamed, note: `${name} → ${slip}` } };
   }
-  const functions = topLevel.filter((d) => d.kind === 'function').map((d) => `${d.name}()`);
-  const variables = topLevel.filter((d) => d.kind === 'variable').map((d) => d.name);
+  // What really exists to be meant: the program's own top-level functions, classes and variables from
+  // its scopes, closest to the missing name first (then in the order declared), and Chatty's helpers
+  const defined = topLevel
+    .filter((d) => d.kind === 'function' || d.kind === 'class' || d.kind === 'variable')
+    .map((d, order) => ({ label: d.kind === 'function' ? `${d.name}()` : d.name, name: d.name, order, score: relatedness(name, d.name) }))
+    .filter((entry, i, all) => all.findIndex((other) => other.name === entry.name) === i)
+    .sort((a, b) => b.score - a.score || a.order - b.order);
+  const helpers = Object.entries(((page?.scope as { __chattyHelpers?: Record<string, unknown> } | undefined)?.__chattyHelpers ?? {}))
+    .filter(([helper]) => !declared.some((d) => d.name === helper))
+    .map(([helper, value]) => ({ label: typeof value === 'function' ? `${helper}()` : helper, score: relatedness(name, helper) }))
+    .sort((a, b) => b.score - a.score);
   // An element on the page named like it (bill → #billInput): where its value is
   const standIns = new Set((page?.standIns ?? []).map((s) => s.id));
   const fields = (page?.ids ?? []).filter((id) => !standIns.has(id) && id.toLowerCase().replace(/[-_]/g, '').includes(name.toLowerCase()));
   const onPage = fields.length
     ? ` The page has ${fields.slice(0, 3).map((id) => `#${id} (document.getElementById('${id}').value)`).join(', ')}.`
     : '';
+  // The fallback when no single name is meant: what the program defines, and what Chatty provides
+  const shown = defined.slice(0, 8).map((d) => d.label);
   return {
-    text: `Nothing named ${name} is declared.${functions.length ? ` The program's functions: ${list(functions)}.` : ''}${variables.length ? ` Its variables: ${list(variables)}.` : ''}${onPage}`,
+    text: `${name} isn't defined${shown.length ? `; the program defines ${shown.join(', ')}${defined.length > 8 ? ', …' : ''}` : ''}.${helpers.length ? ` Chatty provides ${helpers.slice(0, 8).map((h) => h.label).join(', ')}.` : ''}${onPage}`,
   };
 }
 
@@ -927,6 +938,43 @@ export function methodReadFacts(code: string): string | null {
     facts.push(`${text} is a method, so it is always true here; call it as ${text}().`);
   }
   return facts.length ? facts.join(' ') : null;
+}
+
+/**
+ * What a test run saw the program read from an element or an event that the object doesn't have
+ * (`input.val`, which is undefined and no error), as facts: "input.val isn't a member of an <input>
+ * (line 7); its settings: value, valueAsNumber, …". A read the program guards is a feature check and is
+ * not reported: the test of an if, a loop or ?:, the left of && || ??, under ! or typeof, or the
+ * object of an optional chain. Only a read the code at that line has (a name and a line the parser finds).
+ */
+export function missingReadFacts(code: string, reads: Array<{ name: string; type: string; line: number }>, scope?: Record<string, unknown>): string[] {
+  const tree = analyse(code);
+  if (!tree || reads.length === 0) return [];
+  const facts: string[] = [];
+  for (const read of reads) {
+    const nodes = tree.nodes.filter((n) => n.type === 'MemberExpression' && lineOf(n.property as AnyNode) === read.line && (n.computed ? (n.property as AnyNode).value === read.name : (n.property as AnyNode).name === read.name));
+    if (nodes.length === 0) continue;
+    const guarded = (n: AnyNode): boolean => {
+      const parent = tree.parent.get(n);
+      const key = tree.key.get(n);
+      if (!parent) return false;
+      if ((/^(?:IfStatement|WhileStatement|DoWhileStatement|ForStatement|ConditionalExpression)$/.test(parent.type) && key === 'test') || (parent.type === 'LogicalExpression' && key === 'left')) return true;
+      if (parent.type === 'UnaryExpression' && (parent.operator === '!' || parent.operator === 'typeof')) return true;
+      return parent.type === 'MemberExpression' && key === 'object' && !!parent.optional;
+    };
+    const open = nodes.filter((n) => !guarded(n));
+    if (open.length === 0) continue;
+    const n = open[0];
+    const text = `${code.slice((n.object as AnyNode).start, (n.object as AnyNode).end)}.${read.name}`;
+    const element = read.type.startsWith('element:');
+    const tag = read.type.slice(8);
+    const label = element ? `${/^[aeiou]/.test(tag) ? 'an' : 'a'} <${tag}>` : `a ${read.type.slice(6)}`;
+    const list = scope ? memberList(element ? read.type : read.type.slice(6), read.name, scope) : null;
+    const settings = list?.settings.length ? `; its settings: ${list.settings.map((s) => s.name).join(', ')}${list.more ? ', …' : ''}` : list?.methods.length ? `; its methods: ${list.methods.map((m) => `${m}()`).join(', ')}${list.more ? ', …' : ''}` : '';
+    facts.push(`${text} isn't a member of ${label} (line ${read.line})${settings}.`);
+    if (facts.length >= 3) break;
+  }
+  return facts;
 }
 
 /** What a stray character is called in the run log */
@@ -2257,7 +2305,7 @@ export function errorHint(code: string, error: string, errorLine?: number, page?
   const methods = methodReadFacts(code);
   const withMethods = methods ? { ...hint, text: [hint?.text, methods].filter(Boolean).join(' ') } : hint;
   // The library's own facts come last, after whatever the general rules found
-  const facts = toneOptionFacts(code, page?.scope);
+  const facts = [toneOptionFacts(code, page?.scope), toneConnectFacts(code, error, errorLine, page?.scope)].filter(Boolean).join(' ');
   return facts ? { ...withMethods, text: [withMethods?.text, facts].filter(Boolean).join(' ') } : withMethods;
 }
 
@@ -2414,6 +2462,35 @@ export function fixToneCalls(code: string): { code: string; fixed: string[] } {
  * duration: 4, tempo: 120 })` gives a Loop options it has no use for. Only for a class the page
  * has, made with an object of plain keys.
  */
+/**
+ * "Cannot connect to node with no inputs" (Tone): something was connected into a sound source, which has
+ * none (Tone.PluckSynth, Tone.Synth, Tone.Player, Tone.Noise, any instrument). The calls on the failing
+ * line (every one, when the line isn't known) whose argument is a name made with `new` of such a class, from
+ * the page's own classes (an instrument or source: Tone.Instrument, Tone.Source and what extends them).
+ */
+export function toneConnectFacts(code: string, error: string, errorLine: number | undefined, scope?: Record<string, unknown>): string | null {
+  if (!/Cannot connect to node with no inputs/i.test(error)) return null;
+  const tone = scope?.Tone as Record<string, unknown> | undefined;
+  const ast = tryParse(code);
+  if (!tone || !ast) return null;
+  const sources = ['Instrument', 'Source'].map((name) => (tone[name] as { prototype?: object } | undefined)?.prototype).filter((proto): proto is object => !!proto);
+  const facts: string[] = [];
+  walk(ast, (node) => {
+    if (node.type !== 'CallExpression') return;
+    const callee = node.callee as AnyNode;
+    if (callee.type !== 'MemberExpression' || callee.computed || (callee.property as AnyNode).name !== 'connect') return;
+    if (errorLine && lineOf(node) !== errorLine) return;
+    const target = (node.arguments as AnyNode[])[0];
+    if (target?.type !== 'Identifier') return;
+    const name = target.name as string;
+    const type = objectType(code, name);
+    const ctor = type && /^Tone\./.test(type) ? (tone[type.slice(5)] as { prototype?: object } | undefined) : undefined;
+    if (!ctor?.prototype || !sources.some((proto) => proto.isPrototypeOf(ctor.prototype!))) return;
+    facts.push(`${name} is a ${type}, a sound source with no inputs: nothing can be connected into it. It sends sound onward: ${name}.toDestination(), or ${name}.connect(an effect that has inputs, such as a Tone.Reverb or Tone.Filter).`);
+  });
+  return facts.length ? [...new Set(facts)].slice(0, 3).join(' ') : null;
+}
+
 export function toneOptionFacts(code: string, scope?: Record<string, unknown>): string | null {
   const tone = scope?.Tone as Record<string, { getDefaults?: () => Record<string, unknown> }> | undefined;
   if (!tone || !/\bTone\b/.test(code)) return null;

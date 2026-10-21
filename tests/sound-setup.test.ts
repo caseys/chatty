@@ -4,7 +4,7 @@ import { JSDOM } from 'jsdom';
 import { describe, expect, it, vi } from 'vitest';
 import { JavascriptRuntime } from '../src/tools/javascript-runtime.ts';
 import { errorHint } from '../src/core/error-hints.ts';
-import { missingStepsError, onlyTransportMissing, withTransportStart, type SoundSetup } from '../src/core/sound-setup.ts';
+import { missingStepsError, onlyTransportMissing, sameShortfallNote, withTransportStart, type SoundSetup } from '../src/core/sound-setup.ts';
 
 // The sandbox runner page loaded in its own window, with a fake Tone (the shapes Tone.js has that
 // matter here: classes that connect or start, a Transport that schedules and starts) and a fake
@@ -248,7 +248,7 @@ describe('the step a silent program is missing', () => {
       { kind: 'audio element', system: 'media', role: 'source', starts: true, started: false, connected: true },
     ] as SoundSetup['things'];
     expect(missingStepsError(setup({ things }))).toBe(
-      "The oscillator was made but never started: call its start(). The audio element was made but never played: call its play(). The oscillator was never connected to the audio context's destination: connect it with node.connect(audioContext.destination), directly or through other nodes."
+      "The program made 1 source (oscillator), but nothing is heard. The oscillator was made but never started: call its start(). The audio element was made but never played: call its play(). The oscillator was never connected to the audio context's destination: connect it with node.connect(audioContext.destination), directly or through other nodes."
     );
   });
 
@@ -405,6 +405,87 @@ describe('names a program wrote on its objects that they do not have', () => {
     const { win, posted } = loadRunner(fakeTone);
     await run(win, posted, 'const synth = new Tone.Synth().toDestination();\nsynth.triggerAttackRelease("C4", "8n");\nconst el = document.createElement("p");\nel.textContent = "x";\nel.className = "a";');
     expect(win.__chattyUnknownWrites()).toEqual([]);
+    win.close();
+  });
+});
+
+describe('what the program played and what it gave to play', () => {
+  it('counts the notes played on each instrument and whether each loop has a callback, given or set after', async () => {
+    const { win, posted } = loadRunner(fakeTone);
+    const setup = await run(
+      win,
+      posted,
+      [
+        'const played = new Tone.Synth().toDestination();',
+        'const idle = new Tone.Synth().toDestination();',
+        'played.triggerAttackRelease("C4", "8n");',
+        'played.triggerAttack("D4");',
+        'const empty = new Tone.Loop();',
+        'const given = new Tone.Loop((time) => {}, "4n");',
+        'const optioned = new Tone.Loop({ callback: () => {}, interval: "4n" });',
+        'const later = new Tone.Loop();',
+        'later.callback = () => {};',
+      ].join('\n')
+    );
+    const synths = setup.things.filter((t: SoundSetup['things'][number]) => t.kind === 'Tone.Synth').map((t: SoundSetup['things'][number]) => t.notes);
+    expect(synths).toEqual([2, 0]);
+    expect(setup.things.filter((t: SoundSetup['things'][number]) => t.kind === 'Tone.Loop').map((t: SoundSetup['things'][number]) => t.hasCallback)).toEqual([false, true, true, true]);
+    win.close();
+  });
+
+  it('names what an instrument-and-loop program is missing, and only that: Transport alone when it connects and plays', async () => {
+    const { win, posted } = loadRunner(fakeTone);
+    // Connects, has a callback that plays, the loop is started: only the Transport was forgotten
+    const setup = await run(win, posted, BLUES);
+    expect(missingStepsError(setup)).toBe('Tone.Loop was started, but Tone.Transport never was: call Tone.Transport.start().');
+    win.close();
+    // Made and never played on, a loop with nothing in it: the whole list, with what was made first
+    const bare = loadRunner(fakeTone);
+    const made = await run(bare.win, bare.posted, 'const a = new Tone.PolySynth();\nconst b = new Tone.PolySynth();\nconst loop = new Tone.Loop();');
+    const error = missingStepsError(made)!;
+    expect(error.startsWith('The program made 2 instruments (Tone.PolySynth ×2) and 1 Tone.Loop, but nothing is heard. ')).toBe(true);
+    expect(error).toContain('Tone.Transport was never started: call Tone.Transport.start().');
+    expect(error).toContain('Tone.Loop has no callback, so it has nothing to play');
+    expect(error).toContain('No note was ever played');
+    // A note played, or a loop that has a callback: not said
+    const plays = loadRunner(fakeTone);
+    const played = await run(plays.win, plays.posted, 'const a = new Tone.PolySynth().toDestination();\na.triggerAttackRelease("C4", "8n");');
+    expect(missingStepsError(played)).toBeNull();
+    bare.win.close();
+    plays.win.close();
+  });
+});
+
+describe('notes given a time that has already gone by', () => {
+  const connected = (past: number, notes: number) => ({
+    things: [{ kind: 'Tone.PolySynth', system: 'tone', role: 'source', starts: false, started: false, connected: true, notes, past }],
+    tone: { transport: 'stopped', transportStarted: false, scheduled: 0 },
+    library: [],
+  });
+
+  it('is said when every note played was in the past (the Twinkle Twinkle program with time = 0), with what was made first', () => {
+    const error = missingStepsError(connected(1, 1) as any)!;
+    expect(error).toBe(
+      "The program made 1 instrument (Tone.PolySynth), but nothing is heard. Every note was scheduled in the past: the time in triggerAttackRelease(note, duration, time) is seconds on Tone's clock (Tone.now() is the present, so 0 is long gone): leave it out, or pass Tone.now() plus an offset."
+    );
+    expect(sameShortfallNote(error)).toBe('The last fix still gave the notes a time in the past: leave the time out, or pass Tone.now() plus an offset.');
+  });
+
+  it('is not said when a note had no time, or one in the future, or no note was played', () => {
+    expect(missingStepsError(connected(0, 3) as any)).toBeNull();
+    expect(missingStepsError(connected(1, 3) as any)).toBeNull();
+  });
+
+  it('is counted by the runner: the time of triggerAttack and triggerAttackRelease against Tone.now()', async () => {
+    const { win, posted } = loadRunner((w) => {
+      fakeTone(w);
+      w.Tone.now = () => 5;
+    });
+    const setup = await run(win, posted, 'const s = new Tone.Synth().toDestination();\ns.triggerAttackRelease("C4", 0.5, 0);\ns.triggerAttackRelease("D4", 0.5);\ns.triggerAttackRelease("E4", 0.5, 6);\ns.triggerAttack("F4", 1);');
+    const synth = setup.things.find((t: SoundSetup['things'][number]) => t.kind === 'Tone.Synth')!;
+    expect(synth.notes).toBe(4);
+    // (time 0 and time 1 are before 5; no time, and 6, are not)
+    expect(synth.past).toBe(2);
     win.close();
   });
 });

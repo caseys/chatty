@@ -9,7 +9,7 @@ import { SharedAudioSubsystem } from '../audio/audio-subsystem.ts';
 import type { InterfaceSound } from '../audio/interface-sounds.ts';
 import { ConversationMemoryStore } from './memory-store.ts';
 import { ModelManager } from './model-manager.ts';
-import { classifyTranscript, ConversationOrchestrator, type RunStatus } from './orchestrator.ts';
+import { classifyTranscript, ConversationOrchestrator, WELCOME_BACK_MESSAGE, WELCOME_MESSAGE, type RunStatus } from './orchestrator.ts';
 import { StateMachineCoordinator, type CoordinatedStateSnapshot } from './state-machine.ts';
 import { WhistleSttProvider } from '../runtimes/stt-provider.ts';
 import { NativeSpeechRecognizer } from '../runtimes/native-stt.ts';
@@ -58,7 +58,6 @@ import type {
 import { clearSpeechModelCache } from './model-cache.ts';
 import { AFTER_HEAVY_MS, AFTER_LOAD_MS, settle, settleAfterLoad, settleOnIos } from './settle.ts';
 
-const WELCOME_MESSAGE = 'Welcome to Chatty, I can do anything your browser can do.';
 /** Returning users get the short greeting (set after the first full welcome) */
 const WELCOMED_KEY = 'chatty_welcomed';
 /** Events in which browsers let a page start sound */
@@ -79,7 +78,6 @@ function turnWorking(snap: CoordinatedStateSnapshot): boolean {
 }
 /** Chats kept: a new chat beyond this deletes the one used least recently */
 const MAX_CHATS = 10;
-const WELCOME_BACK_MESSAGE = 'Welcome back, what would you like to do with this browser?';
 
 /** The full introduction the first time, a short greeting after that. */
 function takeWelcomeMessage(): string {

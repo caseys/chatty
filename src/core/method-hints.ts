@@ -49,11 +49,6 @@ const NAMED: Record<string, string> = {
 /** Tone methods that give back the object they were called on, so a chain of them still is that object */
 const GIVES_BACK_THIS = new Set(['toDestination', 'toMaster', 'connect', 'chain', 'fan', 'sync']);
 
-/** Methods of Chatty's own objects (not browser types) */
-const OWN_METHODS: Record<string, string[]> = {
-  '@out': ['send', 'play', 'playNote'],
-};
-
 /** The type (or named object) the object expression refers to in this program, or null */
 /** A name the program declares exactly once, and never as a parameter or loop variable */
 function declaredOnce(code: string, name: string): boolean {
@@ -99,6 +94,11 @@ function typeMadeBy(expression: string, code = ''): string | null {
     return null;
   }
   if (top.type === 'AwaitExpression') top = top.argument;
+  // A value written out: a list, a string, a number, a pattern: what the language itself makes of it
+  const literal = top as unknown as { type: string; value?: unknown; regex?: unknown };
+  if (literal.type === 'ArrayExpression') return 'Array';
+  if (literal.type === 'TemplateLiteral') return 'String';
+  if (literal.type === 'Literal') return literal.regex ? 'RegExp' : typeof literal.value === 'string' ? 'String' : typeof literal.value === 'number' ? 'Number' : null;
   if (!top || !/^(?:CallExpression|NewExpression)$/.test(top.type)) return null;
   // A class of a library the page has (new Tone.Synth().toDestination(), new THREE.Mesh(a, b))
   type Loose = { type: string; callee?: Loose; object?: Loose; property?: { name?: string }; name?: string; computed?: boolean };
@@ -145,7 +145,8 @@ export function objectType(code: string, object: string): string | null {
 export function typeLabel(type: string, object: string): string {
   if (type.startsWith('@')) return object;
   if (type.startsWith('element:')) return `a <${type.slice(8)}> element`;
-  return `a ${type}`;
+  const builtIn: Record<string, string> = { Array: 'an array', String: 'a string', Number: 'a number', RegExp: 'a regular expression' };
+  return builtIn[type] ?? `a ${type}`;
 }
 
 /**
@@ -178,7 +179,6 @@ export function namesSources(type: string, scope: Record<string, unknown> = glob
 
 /** Every member name (methods and properties) of a browser type, own and inherited (not Object's own: valueOf, toString) */
 function memberNamesOf(type: string, scope?: Record<string, unknown>): string[] {
-  if (OWN_METHODS[type]) return OWN_METHODS[type];
   const names = new Set<string>();
   const plain = new Set(Object.getOwnPropertyNames(Object.prototype));
   if (type === 'CSSStyleDeclaration') {
@@ -192,7 +192,7 @@ function memberNamesOf(type: string, scope?: Record<string, unknown>): string[] 
   }
   for (const source of namesSources(type, scope)) {
     let target: unknown = source;
-    while (target && target !== Object.prototype) {
+    while (target && !isRootPrototype(target)) {
       for (const key of Object.getOwnPropertyNames(target)) {
         if (key !== 'constructor' && !key.startsWith('_') && !plain.has(key) && /^[A-Za-z_$][\w$]*$/.test(key)) names.add(key);
       }
@@ -221,11 +221,10 @@ export function closestMembers(type: string, missing: string, isCall: boolean, s
 
 /** Every method name of a browser type or known object (own and inherited) */
 export function methodNames(type: string, scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>): string[] {
-  if (OWN_METHODS[type]) return OWN_METHODS[type];
   const names = new Set<string>();
   for (const source of namesSources(type, scope)) {
     let target: unknown = source;
-    while (target && target !== Object.prototype) {
+    while (target && !isRootPrototype(target)) {
       for (const key of Object.getOwnPropertyNames(target)) {
         if (key === 'constructor' || key.startsWith('_')) continue;
         const descriptor = Object.getOwnPropertyDescriptor(target, key);
@@ -271,6 +270,24 @@ export interface RealMember {
   kind: 'class' | 'function' | 'property';
 }
 
+/**
+ * Whether an object is the root of a chain: Object.prototype or Function.prototype, of this realm or of the
+ * program's page (an iframe has its own, which `=== Object.prototype` does not match): what every object has is
+ * not what this object has
+ */
+export function isRootPrototype(target: unknown): boolean {
+  if (target === Object.prototype || target === Function.prototype) return true;
+  if (typeof target !== 'object' && typeof target !== 'function') return false;
+  try {
+    const own = (name: string) => Object.prototype.hasOwnProperty.call(target, name);
+    const root = Object.getPrototypeOf(target) === null && own('isPrototypeOf') && own('propertyIsEnumerable');
+    const fn = own('call') && own('apply') && own('bind') && own('toString') && own('constructor');
+    return root || fn;
+  } catch {
+    return false;
+  }
+}
+
 const FUNCTION_INTRINSICS = new Set(['constructor', 'prototype', 'length', 'name', 'caller', 'arguments', 'callee']);
 
 /** Whether a function is a class (`class X`), or a capitalized function with a prototype of methods (a native constructor) */
@@ -289,7 +306,7 @@ export function membersOfValue(value: unknown): RealMember[] {
   if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return [];
   const found = new Map<string, RealMember>();
   let target: unknown = value;
-  for (let hops = 0; target && hops < 12 && target !== Object.prototype && target !== Function.prototype; hops++) {
+  for (let hops = 0; target && hops < 12 && !isRootPrototype(target); hops++) {
     for (const key of Object.getOwnPropertyNames(target)) {
       if (FUNCTION_INTRINSICS.has(key) || key.startsWith('_') || !/^[A-Za-z$][\w$]*$/.test(key) || found.has(key)) continue;
       const descriptor = Object.getOwnPropertyDescriptor(target, key);
@@ -420,7 +437,7 @@ export function valueOfPath(code: string, path: string, scope: Record<string, un
 }
 
 /** How near a real member's name is to the missing one: shared words weigh most, then a name inside the other, then a few edits (0: unrelated) */
-function relatedness(missing: string, name: string): number {
+export function relatedness(missing: string, name: string): number {
   const mine = nameWords(missing);
   const shared = nameWords(name).filter((w) => w.length > 2 && mine.includes(w)).length;
   const a = flatName(missing);
@@ -538,6 +555,11 @@ export function methodHint(code: string, error: string, scope?: Record<string, u
   // A sure method (a slip, or the name reshaped: page() for getPage()) is corrected; otherwise the
   // closest members, methods or properties (getPage() where it has page), each shown as it is used
   let fix = sureMatch(missing.method, names, { reshaped: true, used: usedMembers(code) });
+  // Chatty's own helper (out): what it really offers, when no single name is meant
+  if (!fix && type === '@out') {
+    const helper = helperListText(code, missing.object, missing.method, scope);
+    if (helper) return { text: helper };
+  }
   // A method that belongs to a setting of the object (gain.setValueAtTime(…), which is
   // gain.gain.setValueAtTime(…)): when exactly one of its settings has it, that is the one
   const through = fix ? null : memberWithMethod(type, missing.method, scope);
@@ -549,13 +571,22 @@ export function methodHint(code: string, error: string, scope?: Record<string, u
   const owners = library ? classesWithMethod(type, missing.method, scope) : [];
   // A namespace (Tone, Math): the real names that share a word, or what it makes, in place of its closest names
   if (type.startsWith('@')) {
+    // The language's own namespaces (Math, JSON, console): their own functions and values, nearest first
+    const own = !fix && POPULAR[type] ? namespaceList(type, missing.method, scope) : null;
+    if (own) {
+      const functions = own.methods.length ? ` Its functions: ${own.methods.map((m) => `${m}()`).join(', ')}${own.more ? ', …' : ''}.` : '';
+      const values = own.settings.length ? ` Its values: ${own.settings.map((v) => v.name).join(', ')}.` : '';
+      return { text: `${missing.object} has no ${missing.method}().${functions}${values}` };
+    }
     const real = realMembers(code, missing.object, scope);
     const facts = real && !fix ? memberFacts(missing.object, missing.method, real.members, real.namespace, 'call') : '';
     if (facts) return { text: facts };
   }
   // What an instance of a class of the library or the browser really has: one clean list (a methods line and a
   // settings line) in place of the closest names, when the page can say
-  const list = scope && !fix ? memberListText(missing.object, type, missing.method, 'call', scope) : null;
+  const builtIn = !type.includes('.') && !type.startsWith('element:') && !type.startsWith('@') && type in POPULAR;
+  const listScope = scope ?? (builtIn ? (globalThis as unknown as Record<string, unknown>) : undefined);
+  const list = listScope && !fix ? memberListText(missing.object, type, missing.method, 'call', listScope) : null;
   if (list) {
     return { text: `${list.replace(`${missing.object} is ${typeName};`, `${missing.object} is ${typeName}${made ? ` (made at line ${made})` : ''};`)}${owners.length ? ` ${missing.method}() belongs to ${owners.join(', ')}.` : ''}` };
   }
@@ -587,7 +618,26 @@ export function methodHint(code: string, error: string, scope?: Record<string, u
 export interface MemberList {
   methods: string[];
   settings: Array<{ name: string; readOnly: boolean }>;
+  /** More methods or settings than the lists show */
+  more?: boolean;
 }
+
+/**
+ * The members people reach for first on the language's own types, in that order (after any name close to the
+ * wrong one): a name that the object doesn't really have is left out, so this is an order, not a list
+ */
+const POPULAR: Record<string, string[]> = {
+  Array: ['push', 'pop', 'shift', 'unshift', 'includes', 'indexOf', 'find', 'findIndex', 'map', 'filter', 'reduce', 'forEach', 'join', 'slice', 'splice', 'sort', 'reverse', 'concat', 'some', 'every', 'flat', 'fill'],
+  String: ['includes', 'startsWith', 'endsWith', 'indexOf', 'slice', 'substring', 'split', 'trim', 'replace', 'replaceAll', 'toUpperCase', 'toLowerCase', 'padStart', 'padEnd', 'repeat', 'charAt', 'match', 'at', 'concat'],
+  Number: ['toFixed', 'toString', 'toPrecision', 'toLocaleString'],
+  Map: ['get', 'set', 'has', 'delete', 'clear', 'forEach', 'keys', 'values', 'entries'],
+  Set: ['add', 'has', 'delete', 'clear', 'forEach', 'values', 'keys', 'entries'],
+  Date: ['getFullYear', 'getMonth', 'getDate', 'getDay', 'getHours', 'getMinutes', 'getSeconds', 'getTime', 'toISOString', 'toLocaleDateString', 'toLocaleTimeString', 'setDate', 'setHours'],
+  RegExp: ['test', 'exec'],
+  '@Math': ['random', 'floor', 'round', 'ceil', 'max', 'min', 'abs', 'sqrt', 'pow', 'sin', 'cos', 'atan2', 'PI', 'trunc', 'sign'],
+  '@JSON': ['parse', 'stringify'],
+  '@console': ['log', 'warn', 'error', 'info', 'table'],
+};
 
 /** The share of a library's classes that must inherit a prototype for it to be plumbing */
 const PLUMBING_SHARE = 0.8;
@@ -597,7 +647,7 @@ function classOfType(type: string, scope: Record<string, unknown>): { ctor: ((..
     if (type.startsWith('element:')) {
       const element = (scope.document as Document | undefined)?.createElement(type.slice(8));
       const proto = element ? Object.getPrototypeOf(element) : null;
-      if (!proto || proto === Object.prototype || type === 'element:div') return null;
+      if (!proto || isRootPrototype(proto) || type === 'element:div') return null;
       const ctor = proto.constructor;
       return { ctor, proto, universe: htmlClasses(scope) };
     }
@@ -638,7 +688,7 @@ export function memberList(type: string, missing: string, scope: Record<string, 
   const { ctor, proto, universe } = found;
   // The prototypes from the class up, not Object's
   const levels: object[] = [];
-  for (let at: object | null = proto; at && at !== Object.prototype && levels.length < 12; at = Object.getPrototypeOf(at)) levels.push(at);
+  for (let at: object | null = proto; at && !isRootPrototype(at) && levels.length < 12; at = Object.getPrototypeOf(at)) levels.push(at);
   if (levels.length === 0) return null;
   // Plumbing: inherited by most of what the library exports
   const inherits = (cls: unknown, level: object) => {
@@ -683,10 +733,12 @@ export function memberList(type: string, missing: string, scope: Record<string, 
   });
   const related = (name: string) => relatedness(missing, name);
   // The methods: closest to the wrong name (from any level), then the class's own, then inherited; plumbing only when close
+  const popular = POPULAR[type] ?? [];
+  const popularity = (name: string) => (popular.includes(name) ? popular.indexOf(name) : popular.length);
   const wanted = methods
     .filter((m) => !m.plumbing || related(m.name) >= 1)
     .map((m, order) => ({ ...m, order, score: related(m.name) }))
-    .sort((a, b) => b.score - a.score || a.level - b.level || a.order - b.order);
+    .sort((a, b) => b.score - a.score || a.level - b.level || popularity(a.name) - popularity(b.name) || a.order - b.order);
   const names = wanted.map((m) => m.name);
   // The settings: the class's own accessors, the defaults (without context), and accessors between that the defaults name
   const settings: Array<{ name: string; readOnly: boolean }> = [];
@@ -701,9 +753,32 @@ export function memberList(type: string, missing: string, scope: Record<string, 
   // (for a class with no getDefaults: the accessors of its own non-plumbing levels)
   if (defaults.length === 0) for (const a of accessors.filter((a) => !a.plumbing)) addSetting(a.name);
   const bad = flatName(missing);
-  const settingsOrdered = [...settings].sort((a, b) => Number(relatedness(missing, b.name) > 0 && flatName(b.name) !== bad) - Number(relatedness(missing, a.name) > 0 && flatName(a.name) !== bad));
+  const settingsOrdered = [...settings].sort((a, b) => (flatName(b.name) !== bad ? relatedness(missing, b.name) : 0) - (flatName(a.name) !== bad ? relatedness(missing, a.name) : 0));
   if (names.length === 0 && settingsOrdered.length === 0) return null;
-  return { methods: names.slice(0, 12), settings: settingsOrdered.slice(0, 8) };
+  return { methods: names.slice(0, 12), settings: settingsOrdered.slice(0, 8), ...(names.length > 12 || settingsOrdered.length > 8 ? { more: true } : {}) };
+}
+
+/** What a namespace of the language really has (Math, JSON, console): its own functions and values, nearest names first, then the usual order */
+export function namespaceList(type: string, missing: string, scope: Record<string, unknown> = globalThis as unknown as Record<string, unknown>): MemberList | null {
+  const value = scope[type.slice(1)];
+  if (!POPULAR[type] || value === null || (typeof value !== 'object' && typeof value !== 'function')) return null;
+  const popular = POPULAR[type];
+  const methods: string[] = [];
+  const values: string[] = [];
+  for (const name of Object.getOwnPropertyNames(value)) {
+    if (!/^[A-Za-z$][\w$]*$/.test(name) || name.startsWith('_')) continue;
+    const d = Object.getOwnPropertyDescriptor(value, name);
+    if (d && typeof d.value === 'function') methods.push(name);
+    else if (d) values.push(name);
+  }
+  const order = (names: string[]) =>
+    names
+      .map((name, i) => ({ name, i, score: relatedness(missing, name), pop: popular.includes(name) ? popular.indexOf(name) : popular.length }))
+      .sort((a, b) => b.score - a.score || a.pop - b.pop || a.i - b.i)
+      .map((e) => e.name);
+  const m = order(methods);
+  const v = order(values);
+  return m.length + v.length === 0 ? null : { methods: m.slice(0, 12), settings: v.slice(0, 8).map((name) => ({ name, readOnly: true })), ...(m.length > 12 || v.length > 8 ? { more: true } : {}) };
 }
 
 /**
@@ -715,9 +790,27 @@ export function memberListText(object: string, type: string, missing: string, us
   if (type.startsWith('@')) return null;
   const list = memberList(type, missing, scope);
   if (!list) return null;
-  const methods = list.methods.length ? ` Its methods: ${list.methods.map((m) => `${m}()`).join(', ')}.` : '';
+  const methods = list.methods.length ? ` Its methods: ${list.methods.map((m) => `${m}()`).join(', ')}${list.more ? ', …' : ''}.` : '';
   const settings = list.settings.length ? ` Its settings: ${list.settings.map((s) => (s.readOnly ? `${s.name} (read-only)` : s.name)).join(', ')}.` : '';
   return `${object} is ${typeLabel(type, object)}; it has no ${missing}${use === 'read' ? '' : '()'}.${methods}${settings}`;
+}
+
+/**
+ * A member that Chatty's own helpers don't have (`out.say()`, `speak.loud()`): what the helper
+ * really offers, read from the runner's own helper object (the page's scope carries it as
+ * __chattyHelpers), nearest names first. Null when the object is no helper, or the program declares it.
+ */
+export function helperListText(code: string, object: string, missing: string, scope?: Record<string, unknown>): string | null {
+  const helpers = scope?.__chattyHelpers as Record<string, unknown> | undefined;
+  const value = helpers?.[object];
+  if (value === undefined || (typeof value !== 'object' && typeof value !== 'function')) return null;
+  if (new RegExp(`(?:const|let|var|function|class)\\s+${object.replace(/\$/g, '\\$')}\\b`).test(code)) return null;
+  const members = membersOfValue(value).filter((m) => m.name !== 'name' && m.name !== 'length');
+  if (members.length === 0) return `${object} is a Chatty helper function with no members of its own; it has no ${missing}. Call it directly: ${object}(…).`;
+  const order = (names: string[]) => names.map((name, i) => ({ name, i, score: relatedness(missing, name) })).sort((a, b) => b.score - a.score || a.i - b.i).map((e) => e.name);
+  const methods = order(members.filter((m) => m.kind !== 'property').map((m) => m.name));
+  const settings = order(members.filter((m) => m.kind === 'property').map((m) => m.name));
+  return `${object} is Chatty's ${object} helper; it has no ${missing}().${methods.length ? ` Its methods: ${methods.slice(0, 12).map((m) => `${m}()`).join(', ')}.` : ''}${settings.length ? ` Its settings: ${settings.slice(0, 8).join(', ')}.` : ''}`;
 }
 
 /** The line a name is declared on (`const loop = …`), or null when it is not declared exactly once */
@@ -771,6 +864,9 @@ export function classesWithMethod(type: string, method: string, scope?: Record<s
 /** "x.m is not a function" for an object found by walking the page (Tone.Transport.foo): what it has, or the sure slip */
 function realObjectHint(code: string, missing: { object: string; method: string }, scope?: Record<string, unknown>): MethodHint | null {
   if (!scope) return null;
+  // A helper of Chatty's that is a function (speak): what it is
+  const helper = helperListText(code, missing.object, missing.method, scope);
+  if (helper) return { text: helper };
   const real = realMembers(code, missing.object, scope);
   if (!real) return null;
   // The member is there, but a value and no function (Tone.Transport.bpm is a Tone.Param): what it
@@ -855,11 +951,10 @@ const PARAMETER_NAMES: Record<string, string[]> = {
 
 /** The function a type's method is, read from the browser's prototype chain, or null */
 function methodFunction(type: string, name: string, scope?: Record<string, unknown>): ((...args: unknown[]) => unknown) | null {
-  if (OWN_METHODS[type]) return null;
   const found: Array<(...args: unknown[]) => unknown> = [];
   for (const source of namesSources(type, scope)) {
     let target: unknown = source;
-    while (target && target !== Object.prototype) {
+    while (target && !isRootPrototype(target)) {
       const descriptor = Object.getOwnPropertyDescriptor(target, name);
       if (descriptor) {
         if (typeof descriptor.value === 'function') found.push(descriptor.value);
@@ -874,10 +969,9 @@ function methodFunction(type: string, name: string, scope?: Record<string, unkno
 
 /** Whether a type's member is a method or a property, from the browser's own descriptors (null when it has none) */
 export function memberKind(type: string, name: string, scope?: Record<string, unknown>): 'method' | 'property' | null {
-  if (OWN_METHODS[type]) return OWN_METHODS[type].includes(name) ? 'method' : null;
   for (const source of namesSources(type, scope)) {
     let target: unknown = source;
-    while (target && target !== Object.prototype) {
+    while (target && !isRootPrototype(target)) {
       const descriptor = Object.getOwnPropertyDescriptor(target, name);
       if (descriptor) return typeof descriptor.value === 'function' ? 'method' : 'property';
       target = Object.getPrototypeOf(target);

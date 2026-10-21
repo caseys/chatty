@@ -202,13 +202,16 @@ describe('blankChoices', () => {
   it('offers declared names near a slip, and helpers for Chatty methods', () => {
     const code = "const level = 3;\nspek(level);";
     const blank = findBlank(code, 'spek is not defined', 2)!;
-    expect(blankChoices(code, blank, { ids: [] })).toContain('speak');
+    const helpers = { out: ['send', 'play', 'playNote'], speak: [], clear: [] };
+    expect(blankChoices(code, blank, { ids: [], helpers })).toContain('speak');
     const code2 = 'out.send(1);';
     const b2 = findBlank(code2, 'x.send is not a function', 1);
     expect(b2).toBeNull();
     const code3 = 'function f() {\n  player.send({ note: 60 });\n}\nf();';
     const b3 = findBlank(code3, 'player.send is not a function', 2)!;
-    expect(blankChoices(code3, b3, { ids: [] })).toContain('out');
+    expect(blankChoices(code3, b3, { ids: [], helpers })).toContain('out');
+    // (without the page's helpers, none is offered: the list is read from the runner, not kept here)
+    expect(blankChoices(code3, b3, { ids: [] })).not.toContain('out');
   });
   it('lists constructors only for a constructor blank', () => {
     const code = 'class Voice {}\nconst count = 2;\nconst v = new Voise();\nfunction Osc() {}';

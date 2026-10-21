@@ -1265,6 +1265,55 @@ describe('a silent Tone program', () => {
   });
 });
 
+describe('a Tone program that makes instruments and plays nothing', () => {
+  // The program of the live blues run (iPhone, build 9cafcec): instruments made and a Loop with no callback, and nothing else
+  const PROGRAM = [
+    'let synth = new Tone.PolySynth(); const tempo = 120;',
+    'const synthSetup = () => { let synth = new Tone.PolySynth(); const tempo = Tone.Transport.bpm.value; synth = new Tone.PolySynth(); const instrument = new Tone.PluckSynth(); const gMinor = new Tone.MetalSynth(); const loop = new Tone.Loop(); }',
+    'await synthSetup();',
+  ].join('\n');
+  const REQUEST = 'Build a blues music loop with piano, bass, and drums in G minor, 120 bpm, 4 measures';
+  const instrument = (kind: string) => ({ kind, system: 'tone', role: 'source', starts: false, started: false, connected: false, notes: 0 });
+  const MADE = {
+    things: [instrument('Tone.PolySynth'), instrument('Tone.PolySynth'), instrument('Tone.PolySynth'), instrument('Tone.PluckSynth'), instrument('Tone.MetalSynth'), { kind: 'Tone.Loop', system: 'tone', role: 'scheduler', starts: true, started: false, connected: true, hasCallback: false }],
+    tone: { transport: 'stopped', transportStarted: false, scheduled: 0 },
+    library: [],
+  };
+
+  it('is told what it made and what is missing: the checklist from what the page tracked, in place of the generic advice', async () => {
+    const llm = new QueueLlm([PROGRAM, '// Cause: nothing plays\nlet synth = new Tone.PolySynth().toDestination();']);
+    // The audio was asked for once, by the library when it loaded into this page: this run's count did not move
+    const { runtime } = fakeRuntime([{}, {}]);
+    Object.assign(runtime, { soundUseCount: () => 1, soundHeardCount: () => 0, soundSilentCount: () => 0, hasVisualContent: () => false, soundSetup: () => MADE });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput(REQUEST);
+    await vi.waitFor(() => expect(llm.turns.length).toBeGreaterThanOrEqual(2), { timeout: 15000 });
+    const asked = llm.turns[1].messages.at(-1)!.content;
+    expect(asked).toContain(
+      'It failed: The program made 5 instruments (Tone.PolySynth ×3, Tone.PluckSynth, Tone.MetalSynth) and 1 Tone.Loop, but nothing is heard. ' +
+        'Tone.Transport was never started: call Tone.Transport.start(). ' +
+        'Tone.Loop was made but never started: call its start(). ' +
+        'Tone.PolySynth, Tone.PluckSynth and Tone.MetalSynth were never connected to the output: call .toDestination() on each (or connect it to Tone.Destination, directly or through other nodes). ' +
+        'Tone.Loop has no callback, so it has nothing to play: give it one, such as new Tone.Loop((time) => { … synth.triggerAttackRelease(note, duration, time) … }, "4n"). ' +
+        'No note was ever played: nothing called triggerAttackRelease() (or triggerAttack()) on an instrument'
+    );
+    expect(asked).not.toContain('The program played nothing');
+  }, 30000);
+
+  it('says so when the next try changes nothing that is missing: the same facts again', async () => {
+    // Two replies that only move declarations about: the same checklist twice
+    const shuffled = (n: number) => PROGRAM.replace('const tempo = 120;', `const tempo = ${120 + n};`).replace('let synth', `let synth${n}`);
+    const llm = new QueueLlm([PROGRAM, `// Cause: x\n${shuffled(1)}`, `// Cause: y\n${shuffled(2)}`]);
+    const { runtime } = fakeRuntime([{}, {}, {}]);
+    Object.assign(runtime, { soundUseCount: () => 1, soundHeardCount: () => 0, soundSilentCount: () => 0, hasVisualContent: () => false, soundSetup: () => MADE });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput(REQUEST);
+    await vi.waitFor(() => expect(llm.turns.length).toBeGreaterThanOrEqual(3), { timeout: 20000 });
+    expect(llm.turns[1].messages.at(-1)!.content).not.toContain('The last fix still');
+    expect(llm.turns[2].messages.at(-1)!.content).toContain('The last fix still made no notes: add the triggerAttackRelease calls, inside the callback of a Tone.Loop when they repeat.');
+  }, 40000);
+});
+
 describe('a question that asks for something to be made', () => {
   it('is not answered by talk alone: "Can you make a timer?" needs the timer', async () => {
     // The echo is asked for again as a program; talk is not that program (it is not a question's answer)

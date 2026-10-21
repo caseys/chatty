@@ -117,7 +117,7 @@ describe('the blank at the source', () => {
 
   it('offers candidates for how the value is used: the ready MIDI output for send()', () => {
     const blank = findBlank(log, safari, 4)!;
-    expect(blankChoices(log, blank, { ids: [] })[0]).toBe('out');
+    expect(blankChoices(log, blank, { ids: [], helpers: { out: ['send', 'play', 'playNote'] } })[0]).toBe('out');
   });
 
   it('also for Chrome wording, a let nothing writes to, and an iterable or constructor', () => {

@@ -254,3 +254,44 @@ describe('the tic-tac-toe runs: lines, fills and the order of repairs', () => {
     expect(notes.some((n) => n.includes('wrapped in ( )'))).toBe(true);
   });
 });
+
+describe('what a test run read that the elements do not have, in the fix request', () => {
+  const FORM = [
+    "document.body.innerHTML = '<input id=\"bill\"><p id=\"out\"></p>';",
+    "const input = document.getElementById('bill');",
+    "const total = Number(input.val) * 2;",
+    "document.getElementById('out').textContent = total;",
+  ].join('\n');
+  const NAN_ERROR = { error: "el.textContent = NaN is almost surely a bug (the value is NaN)", errorLine: 4 };
+
+  it('adds "input.val isn’t a member of an <input> …" to the request for a value that shows NaN, once for the program', async () => {
+    const llm = new QueueLlm([FORM, '// Cause: val is not a member\nconst total = Number(input.value) * 2;']);
+    const { runtime } = fakeRuntime([NAN_ERROR, {}]);
+    const reads: string[] = [];
+    Object.assign(runtime, {
+      trialReads: async (code: string) => {
+        reads.push(code);
+        return [{ name: 'val', type: 'element:input', line: 3 }];
+      },
+      pageScope: () => globalThis,
+    });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Code a tip calculator app with a UI for entering the bill and tip %');
+    await vi.waitFor(() => expect(llm.turns.length).toBeGreaterThanOrEqual(2), { timeout: 15000 });
+    const asked = llm.turns[1].messages.at(-1)!.content;
+    expect(asked).toMatch(/input\.val isn't a member of an <input> \(line 3\); its settings: .*value/);
+    expect(reads).toHaveLength(1);
+  }, 30000);
+
+  it('does not run a test of the program for a failure the reads cannot explain', async () => {
+    const llm = new QueueLlm([FORM.replace('input.val', 'inputt'), '// Cause: typo\nconst total = 1;']);
+    const { runtime } = fakeRuntime([{ error: 'inputt is not defined', errorLine: 3 }, {}]);
+    let reads = 0;
+    Object.assign(runtime, { trialReads: async () => (reads++, []), pageScope: () => globalThis });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Code a tip calculator app');
+    await vi.waitFor(() => expect(llm.turns.length + 0).toBeGreaterThanOrEqual(1), { timeout: 15000 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(reads).toBe(0);
+  }, 30000);
+});

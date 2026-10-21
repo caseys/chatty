@@ -175,7 +175,8 @@ describe('the outcome check on an app with nothing to press', () => {
   });
 
   it('is content with a control, a request for something to look at, or a runtime that cannot count', async () => {
-    expect(await outcome(request, page(3), quiz)).toBeNull();
+    // (with a handler for them: controls that nothing listens to are the next test)
+    expect(await outcome(request, page(3), `${quiz}\ndocument.addEventListener("click", () => {});`)).toBeNull();
     expect(await outcome('Show a big ten second countdown on screen', page(0), 'document.body.innerHTML = "10";\nsetInterval(() => {}, 1000);')).toBeNull();
     expect(await outcome('Draw a house with a red roof', page(0), 'ctx.fillRect(1, 1, 5, 5);')).toBeNull();
     expect(await outcome(request, { soundUseCount: () => 0, hasVisualContent: () => true }, quiz)).toBeNull();
@@ -398,5 +399,32 @@ describe('the context budget', () => {
     expect(roomy.workingMessages.length).toBe(8);
     const tight = store.resolveContextForQuery('make it bigger', 2000, 5000);
     expect(tight.workingMessages.length).toBe(0);
+  });
+});
+
+describe('the outcome check on something to tap or use that nothing reacts to', () => {
+  const page = (controls: number) => ({ soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => true, controlCount: () => controls });
+  const message = 'Nothing in the program reacts to the user';
+  // The programs Qwen3 0.6B wrote: a board drawn once, and three sliders read once
+  const board = 'const canvas = document.getElementById("gameCanvas");\nconst ctx = canvas.getContext("2d");\nctx.fillRect(0, 0, 10, 10);';
+  const sliders = 'document.body.innerHTML = `<input type="range" id="r"><input type="range" id="g">`;\ndocument.getElementById("out").textContent = document.getElementById("r").value;';
+
+  it('says so for a game to tap and a picker with sliders, when no handler is anywhere in the program', async () => {
+    expect(await outcome('Make a tic-tac-toe game where two players take turns tapping the squares', page(0), board)).toContain(message);
+    expect(await outcome('Make a color picker with three sliders for red, green and blue', page(3), sliders)).toContain(message);
+    expect(await outcome('Make a game where I click on the moving targets to score points', page(0), board)).toContain(message);
+  });
+
+  it('is content with any handler: a click, a key, a pointer move, an onclick in the markup, an input listener', async () => {
+    for (const handler of ['canvas.addEventListener("click", () => {});', 'document.addEventListener("keydown", () => {});', 'window.addEventListener("mousemove", () => {});', 'document.body.innerHTML = "<button onclick=\\"go()\\">go</button>";', 'r.addEventListener("input", () => {});']) {
+      expect(await outcome('Make a tic-tac-toe game where two players take turns tapping the squares', page(0), `${board}\n${handler}`), handler).toBeNull();
+    }
+  });
+
+  it('is not asked of a drawing, a display, or a request that does not name what the user does (a mouse is also an animal)', async () => {
+    expect(await outcome('Draw a mouse with big ears', page(0), board)).toBeNull();
+    expect(await outcome('Draw a house with a red roof', page(0), board)).toBeNull();
+    expect(await outcome('Show a big ten second countdown on screen', page(0), 'document.body.innerHTML = "10";\nsetInterval(() => {}, 1000);')).toBeNull();
+    expect(await outcome('Build a tip calculator', page(0), board)).not.toContain(message);
   });
 });

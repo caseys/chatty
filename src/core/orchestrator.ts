@@ -44,8 +44,8 @@ import { appendRunLog } from './run-log.ts';
 import { memberBlank, fillMember, blankChoices, blankRequest, choiceRequest, declareMissing, fillBlank, findBlank, type Blank } from './blank-fix.ts';
 import { madeAsWrongClass, memberList, withLibraryClassNames, type RealMember } from './method-hints.ts';
 import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest, restoreWhole } from './line-fix.ts';
-import { missingStepsError } from './sound-setup.ts';
-import { addNewToClasses, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
+import { missingStepsError, sameShortfallNote } from './sound-setup.ts';
+import { addNewToClasses, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
 import { applyAssignmentFixes, moveToContext, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { LOCAL_CHAT_MODELS } from './settings.ts';
@@ -228,6 +228,8 @@ export const MAKES_USED_THING = new RegExp(
   `\\b(?:make|build|create|code|write|design|develop|generate|program|implement)\\s+(?:(?:me|us)\\s+)?(?:(?:a|an|the|my|our|some)\\s+)?(?:(?!about\\b|of\\b|for\\b|on\\b|with\\b)[\\w'-]+\\s+){0,2}(?:${USED_WORDS})\\b`,
   'i'
 );
+/** A request for something the user does to it: tap, click, press, type in, drag, move by mouse or keys */
+const ASKS_FOR_INPUT = /\b(?:tap(?:s|ping)?|click(?:s|ing)?|pressing|swipe|drag(?:ging)?|typ(?:e|ing) (?:in|into)|arrow keys|keyboard|mouse or touch|(?:with|by|using) (?:the |your )?mouse)\b/i;
 /** What asks for something that changes by itself on screen */
 const MOTION_REQUEST = /\b(?:animat\w*|bounc\w*|mov(?:ing|es)|spinn?(?:ing)?|rotating|orbit\w*|pulsing|blinking|flashing|falling|floating|flying|scrolling|count ?down|ticking)\b/i;
 /** A program driven by the pointer or keys: what moves is up to the user */
@@ -299,8 +301,16 @@ export const FORMAT_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content: 
   { role: 'assistant', content: 'speak("Hi! What would you like me to make?");' },
 ];
 
-/** What the example reply says (FORMAT_TURNS): a program that copies it into itself doesn't mean it */
-const EXAMPLE_SPOKEN = FORMAT_TURNS.flatMap((t) => (t.role === 'assistant' ? [...t.content.matchAll(/speak\((["'`])(.*?)\1\)/g)].map((m) => m[2]) : []));
+/** What the app says as it greets (the first time, and after): in the chat, so a small model copies them into its program */
+export const WELCOME_MESSAGE = 'Welcome to Chatty, I can do anything your browser can do.';
+export const WELCOME_BACK_MESSAGE = 'Welcome back, what would you like to do with this browser?';
+
+/** What the example reply says (FORMAT_TURNS) and the app's greetings: a program that copies one into itself doesn't mean it */
+const EXAMPLE_SPOKEN = [
+  ...FORMAT_TURNS.flatMap((t) => (t.role === 'assistant' ? [...t.content.matchAll(/speak\((["'`])(.*?)\1\)/g)].map((m) => m[2]) : [])),
+  WELCOME_MESSAGE,
+  WELCOME_BACK_MESSAGE,
+];
 
 /**
  * Before a program runs: a speak() of the example reply's own words, in a program that does
@@ -672,6 +682,15 @@ async function nothingLands(runtime: Pick<JavascriptRuntime, 'canvasState' | 'se
   const fact = offCanvasFact(await runtime.traceDrawing(300));
   appendRunLog('retry', 'outcome check: the canvas is drawn on all the time but shows nothing at the end');
   return `Nothing the program draws is visible on its canvas at the end (it is blank or one flat color), though it keeps drawing on it.${fact ? ` ${fact}` : ''}`;
+}
+
+/**
+ * Whether a failure may come from a name read off an element or event that the object doesn't have: a value that
+ * shows NaN or undefined, an outcome check that failed (nothing shown, nothing happening), or an error that is
+ * about a missing property
+ */
+export function readsMayExplain(error: string | null): boolean {
+  return !!error && (/NaN|undefined|Infinity|Cannot read prop|is not a function/.test(error) || /^(?:The program (?:played nothing|showed nothing|put nothing visible)|The page has nothing|The screen never changed|Nothing the program draws)/.test(error));
 }
 
 /** A reply that left nothing to run */
@@ -2498,8 +2517,35 @@ export class ConversationOrchestrator {
     const attempt = (run.fixAttempt ?? 0) + 1;
     if (attempt > MAX_FIX_TRIES) return;
     run.fixRequested = true;
+    // What the program read from its elements and events that they don't have (seen in a hidden test run
+    // of it: the real run pays nothing), when the failure may come from that
+    if (typeof this.javascriptRuntime.trialReads === 'function' && readsMayExplain(run.error)) {
+      void this.withReadFacts(run, hint?.text).then((text) => {
+        if (this.lastRun !== run || this.scheduler.getActiveTurnId() || this.gaveUp.has(this.requestKey(run))) return;
+        this.nextTry(run, attempt, undefined, text);
+      });
+      return;
+    }
     this.nextTry(run, attempt, undefined, hint?.text);
   }
+
+  /** The hint text with the facts of the reads a test run of the program saw that the objects don't have (once for each program) */
+  private async withReadFacts(run: NonNullable<typeof this.lastRun>, hintText?: string): Promise<string | undefined> {
+    try {
+      let facts = this.readFactsCache.get(run.code);
+      if (facts === undefined) {
+        await settleOnIos(AFTER_HEAVY_MS);
+        const reads = await this.javascriptRuntime.trialReads!(run.code);
+        facts = missingReadFacts(run.code, reads, this.javascriptRuntime.pageScope?.() ?? undefined).join(' ');
+        this.readFactsCache.set(run.code, facts);
+        if (facts) appendRunLog('retry', `a test run read names the elements and events don't have: ${facts}`);
+      }
+      return [hintText, facts].filter(Boolean).join(' ') || undefined;
+    } catch {
+      return hintText;
+    }
+  }
+  private readFactsCache = new Map<string, string>();
 
   /**
    * A correction by rule, test-run first where the runtime can (hidden, like a fix reply's): one
@@ -2562,8 +2608,11 @@ export class ConversationOrchestrator {
     used.add(kind);
     // What Chatty's libraries (Tone.js, three.js) printed or threw for this program goes to the fix as facts
     const libraryFacts = (this.javascriptRuntime.soundSetup?.()?.library ?? []).join(' ');
+    // The last fix left the same things missing (its changes touched none of them): the next ask says so
+    const previousError = run.errorHistory?.at(-1)?.error;
+    const unchanged = previousError && normalizedError(previousError) === normalizedError(run.error) ? sameShortfallNote(run.error) : null;
     const hint =
-      [hintText ?? errorHint(run.code, run.error, run.errorLine, this.pageFacts())?.text, libraryFacts]
+      [unchanged, hintText ?? errorHint(run.code, run.error, run.errorLine, this.pageFacts())?.text, libraryFacts]
         .filter(Boolean)
         .join(' ') || undefined;
     if (kind === 'member' && member) {
@@ -2876,7 +2925,11 @@ export class ConversationOrchestrator {
     if (!wantsSound && !wantsVisual) return null;
     // Sound asked for, then measured at the speakers (two seconds): heard, or silent with the audio
     // running. Not measured (audio paused until a tap, or a runtime that can't): the request counts
-    const asked = () => (this.javascriptRuntime.soundUseCount?.() ?? 0) > soundMark.uses;
+    // (a program that made instruments or sources asked for sound too, though the audio was asked for once, when the
+    // library loaded into a page that a program before it left: the count alone misses it)
+    const setupNow = () => this.javascriptRuntime.soundSetup?.() ?? null;
+    const made = () => (setupNow()?.things.some((t) => t.role !== 'node') ?? false);
+    const asked = () => (this.javascriptRuntime.soundUseCount?.() ?? 0) > soundMark.uses || made();
     const heard = () => (this.javascriptRuntime.soundHeardCount?.() ?? 0) > soundMark.heard;
     const silent = () => !heard() && (this.javascriptRuntime.soundSilentCount?.() ?? 0) > soundMark.silent;
     const measures = !!this.javascriptRuntime.soundHeardCount;
@@ -2901,16 +2954,23 @@ export class ConversationOrchestrator {
     const noNoteStarted = !!midi && midi.sent > 0 && midi.noteOns === 0;
     // Silent with the audio running: the step the program didn't take, when its page says which
     // (Tone.Transport never started, a source never connected), in place of the generic advice
-    const stepMissing = wantsSound && asked() && silent() && !noNoteStarted ? missingStepsError(this.javascriptRuntime.soundSetup?.()) : null;
+    // (also when the speakers weren't measured: what the program made says what is missing, heard or not)
+    const stepMissing = wantsSound && asked() && !heard() && !noNoteStarted ? missingStepsError(setupNow()) : null;
     // An app to press or type in, with nothing on the page to press or type in
     const noControls = wantsVisual && MAKES_USED_THING.test(request) && !DRAWING_REQUEST.test(request) && !soundWaits && shown() && drawn() && !!this.javascriptRuntime.controlCount && this.javascriptRuntime.controlCount() === 0;
+    // Something the user is to tap, click, type in or move, with no handler for any of it anywhere in the program
+    // (controls that do nothing, a board that can't be tapped): the page can say there are controls, the parser
+    // that nothing listens
+    const listens = LISTENS_FOR_USER.test(code) || MOVES_WITH_USER.test(code);
+    const noHandlers =
+      wantsVisual && !soundWaits && !listens && shown() && drawn() && (ASKS_FOR_INPUT.test(request) || (MAKES_USED_THING.test(request) && !!this.javascriptRuntime.controlCount && this.javascriptRuntime.controlCount() > 0));
     const emptied = wantsVisual && shown() && !drawn() ? (this.javascriptRuntime.emptyElements?.() ?? []) : [];
     const missing = [
       wantsSound && !asked()
         ? soundKinds(request).music
           ? 'The program played nothing: notes play through Tone synths (Tone.PolySynth, connected with .toDestination(), played with triggerAttackRelease(note, duration, time)) or Web Audio oscillators.'
           : 'The program played nothing: sounds play through Web Audio oscillators, each connected to the audio context\'s destination.'
-        : wantsSound && silent()
+        : wantsSound && (silent() || !!stepMissing)
           ? noNoteStarted
             ? `No note was started: every MIDI message was something else${midi.others.length ? ` (${midi.others.join('; ')})` : ''}. A note starts with output.send([0x90 + channel, note, velocity]) where channel is 0 to 15 and velocity 1 to 127, and ends with 0x80 + channel.`
             : stepMissing ??
@@ -2926,6 +2986,8 @@ export class ConversationOrchestrator {
             ? offCanvas
           : noControls
             ? 'The page has nothing to press or type in: this app needs controls the user can use (button, input, select), each with a handler (onclick, an input listener) that does the work.'
+            : noHandlers
+              ? 'Nothing in the program reacts to the user: the request is for something to tap, click, type in or move, and no handler does that work (addEventListener("click", …) on what is tapped, an onclick, an input listener, a key or pointer listener).'
             : stillScreen
               ? 'The screen never changed and nothing is scheduled to change it: something that moves or counts has to keep updating what it shows (setInterval, or requestAnimationFrame that draws again each frame).'
               : '',
@@ -2978,7 +3040,7 @@ export class ConversationOrchestrator {
     this.blankAbort = abort;
     const provider = this.phonePipeline?.coder ?? this.llmProvider;
     const facts = [earlierErrors(run.errorHistory, error), hintText].filter(Boolean).join(' ') || undefined;
-    const page = { ids: this.javascriptRuntime.pageIds?.() ?? [], fields: this.javascriptRuntime.pageFields?.() ?? [], tags: this.javascriptRuntime.pageTags?.() };
+    const page = { ids: this.javascriptRuntime.pageIds?.() ?? [], fields: this.javascriptRuntime.pageFields?.() ?? [], tags: this.javascriptRuntime.pageTags?.(), helpers: this.javascriptRuntime.helperMembers?.() };
     // (a member blank: the real members that fit and are related to the name)
     const choices = members ? members.map((m) => m.name) : blankChoices(run.code, blank, page);
 

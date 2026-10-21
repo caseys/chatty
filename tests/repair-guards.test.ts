@@ -492,3 +492,33 @@ describe('repairs that leave capable code alone', async () => {
     }
   });
 });
+
+describe('a fence marker left on a line of its own', () => {
+  it('is no code: the program of the countdown and the cat face, with a third ``` after its speak()', async () => {
+    const { inspectExecutableCode } = await import('../src/tools/javascript-runtime.ts');
+    // The real replies from Qwen3 0.6B: a closed block, a speak() after it, and a last fence with nothing after it
+    const reply = '```javascript\nspeak("Draw a smiling cat face.");\nconst cat = document.createElement("div");\ndocument.body.appendChild(cat);\n```\n\nspeak("Draw a smiling cat face.");\n```';
+    const prepared = inspectExecutableCode(reply);
+    expect(prepared.code).not.toContain('`');
+    expect(prepared.cutOff).toBeUndefined();
+    expect(prepared.code).toContain('document.body.appendChild(cat);');
+    // The same without a fenced block at all, and with a label on the stray fence
+    expect(inspectExecutableCode('const a = 1;\nspeak(String(a));\n```').code).not.toContain('`');
+    expect(inspectExecutableCode('```javascript\nconst a = 1;\n```\nspeak("x");\n```js').code).not.toContain('`');
+    // A template string of the program's own stays
+    expect(inspectExecutableCode('const html = `<p>x</p>`;\ndocument.body.innerHTML = html;').code).toContain('`<p>x</p>`');
+    expect(inspectExecutableCode('document.body.innerHTML = `\n<p>one</p>\n`;').code).toContain('`\n<p>one</p>\n`');
+  });
+});
+
+describe('the app’s own greeting copied into a program', () => {
+  it('is taken out, like the example reply’s words, as in the countdown Qwen3 0.6B wrote', async () => {
+    const { dropCopiedExample } = await import('../src/core/orchestrator.ts');
+    const code = 'document.getElementById("countdown").innerHTML = "10";\nsetInterval(() => {}, 1000);\nspeak("Welcome back, what would you like to do with this browser?");';
+    expect(dropCopiedExample(code)).toEqual({ code: 'document.getElementById("countdown").innerHTML = "10";\nsetInterval(() => {}, 1000);', dropped: true });
+    expect(dropCopiedExample('speak("Welcome to Chatty, I can do anything your browser can do.");\nroot.textContent = 1;').dropped).toBe(true);
+    // A greeting that is all there is stays (a greeting gets a greeting), and a sentence of its own does too
+    expect(dropCopiedExample('speak("Welcome back, what would you like to do with this browser?");').dropped).toBe(false);
+    expect(dropCopiedExample('speak("Welcome to the countdown!");\nroot.textContent = 1;').dropped).toBe(false);
+  });
+});

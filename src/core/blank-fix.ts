@@ -551,9 +551,6 @@ function keyWord(text: string): string | null {
   return names ? names[names.length - 1] : null;
 }
 
-const HELPERS = ['out', 'speak', 'clear', 'root'];
-/** Methods of Chatty's own `out` */
-const OUT_METHODS = ['send', 'play', 'playNote'];
 
 /** Whether an element of this tag has the member (a canvas has getContext, a div doesn't); null where the browser can't say */
 function tagHas(tag: string, member: string): boolean | null {
@@ -584,7 +581,7 @@ function elementHas(member: string): boolean {
  * blank is, element lookups for the page's ids (`.value` for inputs, the element otherwise), and
  * Chatty's helpers when they fit. Deduped, best first, at most 6.
  */
-export function blankChoices(code: string, blank: Blank, page: { ids: string[]; fields?: string[]; tags?: Record<string, string> }): string[] {
+export function blankChoices(code: string, blank: Blank, page: { ids: string[]; fields?: string[]; tags?: Record<string, string>; helpers?: Record<string, string[]> }): string[] {
   const tree = analyse(code);
   const node = tree && blank.spans[0] ? nodeAt(tree, blank.spans[0]) : null;
   // A name declared once for the whole program is declared at the top-level statement before its first
@@ -766,9 +763,11 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
 
   // Chatty's helpers
   if (role !== 'iterable') {
-    for (const helper of HELPERS) {
+    // (the helpers the page really has, with what each offers: read from the runner's own objects; the card, root, is an element)
+    const helperMembers = page.helpers ?? {};
+    for (const helper of [...Object.keys(helperMembers), 'root']) {
       const close = closeness(word, helper);
-      const fits = (helper === 'out' && member !== null && OUT_METHODS.includes(member)) || (helper === 'root' && member !== null && (tagHas('div', member) ?? elementHas(member)));
+      const fits = (helper !== 'root' && member !== null && !!helperMembers[helper]?.includes(member)) || (helper === 'root' && member !== null && (tagHas('div', member) ?? elementHas(member)));
       if (close <= 2 && word && word !== helper) add(helper, close);
       else if (fits) add(helper, 1);
     }
