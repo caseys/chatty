@@ -129,6 +129,8 @@ export interface PreparedExecutableCode {
   isProse: boolean;
   /** The reply was cut off before its end: its unfinished last lines removed, its open blocks closed */
   cutOff?: { dropped: number; closed: number };
+  /** A program that says nothing ended on a sentence in a comment: said with speak() (see speakClosingComment) */
+  spokeComment?: string;
 }
 
 /**
@@ -406,6 +408,38 @@ export function callUncalledFunctions(code: string): string {
   let toCall = roots.filter((name) => /^(?:main|init|start|run|setup|draw|play|render|animate|create|build|show|make)/i.test(name));
   if (toCall.length === 0 && roots.length === declared.length) toCall = [declared[declared.length - 1]];
   return toCall.length ? `${code}\n${toCall.map((name) => `await ${name}();`).join('\n')}` : code;
+}
+
+/**
+ * A program that says nothing (no speak()) but ends on a comment written as a sentence to the user
+ * (`// This draws a red ball that bounces.`): the sentence is said, as the prompt asked for. Code
+ * notes (`// draw loop`, `// x = 5`) stay comments.
+ */
+export function speakClosingComment(code: string): { code: string; text: string } | null {
+  if (/\bspeak\s*\(/.test(code)) return null;
+  const comments: Array<{ value: string; start: number }> = [];
+  let program: ReturnType<typeof parse>;
+  try {
+    program = parse(code, {
+      ecmaVersion: 'latest',
+      sourceType: 'script',
+      allowAwaitOutsideFunction: true,
+      allowReturnOutsideFunction: true,
+      onComment: (_block, value, start) => comments.push({ value, start }),
+    });
+  } catch {
+    return null;
+  }
+  const lastCode = program.body.length ? program.body[program.body.length - 1].end : 0;
+  const text = comments
+    .filter((c) => c.start >= lastCode)
+    .map((c) => c.value.replace(/^\s*\*+|\*+\s*$/gm, '').trim())
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  // A sentence: four words or more, letters, and nothing that reads as code
+  if (text.split(' ').length < 4 || !/[A-Za-z]/.test(text) || /[=;{}()[\]<>]|=>|\b(?:const|let|var|function|return)\b/.test(text)) return null;
+  return { code: `${code}\nspeak(${JSON.stringify(text)});`, text };
 }
 
 /** The names of all top-level functions (declared, or a function in a const/let/var), however indented; null when the code doesn't parse */
@@ -693,7 +727,7 @@ export function withoutMarkdownLeftovers(text: string): string {
     .join('\n');
 }
 
-export function inspectExecutableCode(rawText: string, options: { closeCutOff?: boolean } = {}): PreparedExecutableCode {
+export function inspectExecutableCode(rawText: string, options: { closeCutOff?: boolean; speakComment?: boolean } = {}): PreparedExecutableCode {
   let cleaned = normalizeFences((rawText || '').trim());
 
   // HTML instead of JavaScript (a whole page for "an app", or bare <canvas> + <script>): its
@@ -765,7 +799,8 @@ export function inspectExecutableCode(rawText: string, options: { closeCutOff?: 
   }
 
   if (isValidJs) {
-    return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(cleaned)), isProse: false };
+    const said = options.speakComment === false ? null : speakClosingComment(cleaned);
+    return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(said?.code ?? cleaned)), isProse: false, ...(said ? { spokeComment: said.text } : {}) };
   }
 
   const page = unclosedPage(cleaned);
@@ -788,7 +823,14 @@ export function inspectExecutableCode(rawText: string, options: { closeCutOff?: 
         cutOff = { dropped: closed.dropped, closed: closed.closed };
       }
     }
-    return { code: exposeFunctionsToInlineHandlers(callUncalledFunctions(withTalk(program))), isProse: false, ...(cutOff ? { cutOff } : {}) };
+    const talked = withTalk(program);
+    const said = options.speakComment === false ? null : speakClosingComment(talked);
+    return {
+      code: exposeFunctionsToInlineHandlers(callUncalledFunctions(said?.code ?? talked)),
+      isProse: false,
+      ...(cutOff ? { cutOff } : {}),
+      ...(said ? { spokeComment: said.text } : {}),
+    };
   }
 
   // 5. If it's a simple arithmetic expression or number (e.g. 42 or 3 * 7), compute and speak it

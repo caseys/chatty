@@ -339,3 +339,18 @@ describe('the shared name matcher', async () => {
     expect(closestNames('fillCircle', ['arc', 'fillRect', 'clearRect', 'fill'])[0]).toMatch(/^fill/);
   });
 });
+
+describe('a program that ends on a sentence in a comment', async () => {
+  const { inspectExecutableCode, speakClosingComment } = await import('../src/tools/javascript-runtime.ts');
+  it('says the sentence when the program says nothing', () => {
+    const reply = '```javascript\nconst c = document.createElement("canvas");\ndocument.body.appendChild(c);\n// This draws a red ball that bounces around.\n```';
+    const prepared = inspectExecutableCode(reply);
+    expect(prepared.spokeComment).toBe('This draws a red ball that bounces around.');
+    expect(prepared.code).toContain('speak("This draws a red ball that bounces around.");');
+  });
+  it('leaves code notes, and programs that already speak, alone', () => {
+    expect(speakClosingComment('draw();\n// draw loop')).toBeNull();
+    expect(speakClosingComment('draw();\n// x = 5 then redraw it')).toBeNull();
+    expect(speakClosingComment('draw();\nspeak("Done.");\n// This draws a red ball.')).toBeNull();
+  });
+});

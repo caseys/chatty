@@ -823,11 +823,11 @@ export class MinimalVoiceApp {
     }
 
     if (displayText) {
-      // What a running program said (not the chat model) is marked as the program's
+      // What a running program said (not the chat model) is marked as its Output
       if (fromProgram) {
         const source = document.createElement('div');
         source.className = 'bubble-source';
-        source.textContent = 'program';
+        source.textContent = 'Output';
         target.appendChild(source);
       }
       const textDiv = document.createElement('div');
