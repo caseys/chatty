@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { ConversationMemoryStore } from '../src/core/memory-store.ts';
-import { ConversationOrchestrator, changedLines, normalizedError, promptRules } from '../src/core/orchestrator.ts';
+import { ConversationOrchestrator, changedLines, droppedCapabilities, normalizedError, promptRules } from '../src/core/orchestrator.ts';
 import { StateMachineCoordinator } from '../src/core/state-machine.ts';
 import { pastProgramResult } from '../src/core/history-format.ts';
 import type { ConversationMessage } from '../src/types/index.ts';
@@ -9,6 +9,10 @@ import type { ConversationMessage } from '../src/types/index.ts';
 const outcome = (request: string, runtime: object, code = '') =>
   (ConversationOrchestrator.prototype as any).missingOutcome.call({ javascriptRuntime: runtime }, request, { uses: 0, heard: 0, silent: 0 }, code) as Promise<string | null>;
 const nothing = { soundUseCount: () => 0, hasVisualContent: () => false };
+/** The two sound rules: Tone for music, Web Audio for beeps and sound effects */
+const TONE_RULE = 'For music, Tone (Tone.js) is ready to use';
+const WEB_AUDIO_RULE = 'Beeps, tones and sound effects use Web Audio (new AudioContext()';
+const hasSoundRule = (rules: string) => rules.includes(TONE_RULE) || rules.includes(WEB_AUDIO_RULE);
 const sees = { soundUseCount: () => 0, hasVisualContent: () => true };
 
 describe('the outcome check', () => {
@@ -50,9 +54,9 @@ describe('the outcome check', () => {
   });
 
   it('takes "a minor" for music only in a musical phrase', () => {
-    expect(promptRules('Can I sell alcohol to a minor', true)).not.toContain('Sound:');
-    expect(promptRules('Build a blues loop in G minor', true)).toContain('Sound:');
-    expect(promptRules('Play an A minor chord', true)).toContain('Sound:');
+    expect(hasSoundRule(promptRules('Can I sell alcohol to a minor', true))).toBe(false);
+    expect(promptRules('Build a blues loop in G minor', true)).toContain(TONE_RULE);
+    expect(promptRules('Play an A minor chord', true)).toContain(TONE_RULE);
   });
 
   it('still fires for something that must appear', async () => {
@@ -62,9 +66,9 @@ describe('the outcome check', () => {
 
   it('does not take organize, playlist or a notes app for sound', async () => {
     for (const request of ['Organize my day', 'Make a playlist page', 'Build a notes app']) {
-      expect(promptRules(request, true)).not.toContain('Sound:');
+      expect(hasSoundRule(promptRules(request, true))).toBe(false);
     }
-    expect(promptRules('Play a piano chord', true)).toContain('Sound:');
+    expect(promptRules('Play a piano chord', true)).toContain(TONE_RULE);
   });
 
   it('keeps the visual check when the request names sound and something visual', async () => {
@@ -79,10 +83,83 @@ describe('the outcome check', () => {
 });
 
 describe('prompt rules', () => {
-  it('teaches real browser interfaces: fetch for facts, Web MIDI for music', () => {
+  it('teaches real browser interfaces: fetch for facts, Tone for music', () => {
     expect(promptRules('Who was Ada Lovelace?', true)).toContain('https://en.wikipedia.org/api/rest_v1/page/summary/');
-    expect(promptRules('Play a drum beat', true)).toContain('navigator.requestMIDIAccess()');
-    expect(promptRules('Play a drum beat', true)).not.toMatch(/out\.send|out\.loop/);
+    const drums = promptRules('Play a drum beat', true);
+    expect(drums).toContain(TONE_RULE);
+    expect(drums).not.toMatch(/requestMIDIAccess|out\.send|out\.loop/);
+  });
+
+  it('names the Tone API, positively and without example code', () => {
+    const rule = promptRules('Play a melody', true).split('\n').find((line) => line.includes(TONE_RULE))!;
+    for (const name of ['Tone.PolySynth', 'Tone.PluckSynth', 'Tone.MembraneSynth', 'Tone.NoiseSynth', 'Tone.MetalSynth', '.toDestination()', 'triggerAttackRelease(note, duration, time)', '"8n"', 'Tone.Transport.bpm.value', 'Tone.Loop', 'Tone.Part', '.start(0)', 'Tone.Transport.start()']) {
+      expect(rule).toContain(name);
+    }
+    expect(rule).not.toMatch(/\bnew Tone\.|\bconst |=>|;\s/);
+    expect(rule).not.toMatch(/\b(?:don't|never|do not)\b/i);
+  });
+
+  it('gives music Tone and no Web Audio sentence', () => {
+    for (const request of ['Play a song', 'Make a melody in G minor', 'Build a beat at 120 bpm', 'A drum rhythm', 'Play an A minor chord on the piano', 'Slow tempo jazz']) {
+      const rules = promptRules(request, true);
+      expect(rules, request).toContain(TONE_RULE);
+      expect(rules, request).not.toContain('Web Audio');
+    }
+  });
+
+  it('gives sound effects Web Audio and no Tone rule', () => {
+    for (const request of ['Make a beep', 'Play a chime', 'An alarm that buzzes', 'Add a click sound effect', 'A siren', 'Ding when I press the button', 'Make a high tone']) {
+      const rules = promptRules(request, true);
+      expect(rules, request).toContain(WEB_AUDIO_RULE);
+      expect(rules, request).not.toContain('Tone');
+    }
+  });
+
+  it('gives both when a request names both or neither kind of sound, and neither when it is about no sound', () => {
+    for (const request of ['Play a sound', 'play something', 'Play a song with a beep at the end', 'Make some audio']) {
+      const rules = promptRules(request, true);
+      expect(rules, request).toContain(TONE_RULE);
+      expect(rules, request).toContain(WEB_AUDIO_RULE);
+    }
+    expect(hasSoundRule(promptRules('Draw a cat', true))).toBe(false);
+    // Unfiltered (the bigger models): every rule
+    expect(promptRules()).toContain(TONE_RULE);
+    expect(promptRules()).toContain(WEB_AUDIO_RULE);
+    // An edit is matched against the program it changes too
+    expect(promptRules('make it faster\nTone.Transport.bpm.value = 90;', true)).toContain(TONE_RULE);
+    expect(promptRules('make it louder\nconst ctx = new AudioContext();', true)).not.toContain(TONE_RULE);
+  });
+
+  it('no longer teaches Web MIDI (programs that use it still run)', () => {
+    expect(promptRules()).not.toMatch(/Web MIDI|requestMIDIAccess|output\.send/);
+  });
+});
+
+describe('a Tone program is sound', () => {
+  const song = 'const synth = new Tone.PolySynth().toDestination();\nsynth.triggerAttackRelease(["C4", "E4", "G4"], "8n");';
+  const request = 'Play a C major chord';
+
+  it('counts Tone calls as sound when a fix is judged', () => {
+    // A fix that takes out every Tone call has lost the sound
+    expect(droppedCapabilities(request, song, 'speak("A C major chord.");')).toEqual(['sound']);
+    // One that keeps them has not
+    expect(droppedCapabilities(request, song, song.replace('"8n"', '"4n"'))).toEqual([]);
+    // Nor has a fix of a program that never had any
+    expect(droppedCapabilities(request, 'speak("hi");', 'speak("hello");')).toEqual([]);
+    // Tone in a comment is not a Tone call
+    expect(droppedCapabilities(request, song, '// Tone.PolySynth plays it\nspeak("A C major chord.");')).toEqual(['sound']);
+  });
+
+  it('is recorded as played sound in the history', () => {
+    expect(pastProgramResult({ id: 'm', turnId: 't', role: 'assistant', canonicalContent: 'A chord.', rawCode: song, timestamp: 0 })).toContain('played sound');
+  });
+
+  it('asks for Tone, and for connecting a Tone synth, in the outcome check', async () => {
+    const silent = { soundUseCount: () => 0, hasVisualContent: () => false };
+    expect(await outcome('Play a C major chord', silent)).toContain('Tone');
+    expect(await outcome('Make a beep', silent)).not.toContain('Tone');
+    const quiet = { soundUseCount: () => 1, hasVisualContent: () => false, soundHeardCount: () => 0, soundSilentCount: () => 1 };
+    expect(await outcome('Play a C major chord', quiet, song)).toContain('.toDestination()');
   });
 });
 

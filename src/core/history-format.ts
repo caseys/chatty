@@ -31,7 +31,7 @@ export function pastProgramResult(msg: ConversationMessage): string {
   const result = (msg.toolCall?.result ?? {}) as { error?: string; hasVisualOutput?: boolean; success?: boolean };
   const did: string[] = [];
   if (programDraws(code) || result.hasVisualOutput) did.push('showed something on screen');
-  if (/\bout\s*\.\s*send\b|AudioContext|requestMIDIAccess|playNotes|\.play\(/.test(code)) did.push('played sound');
+  if (/\bout\s*\.\s*send\b|AudioContext|requestMIDIAccess|playNotes|\bTone\s*\.|\.play\(/.test(code)) did.push('played sound');
   const error = msg.toolCall?.error || result.error;
   const outcome = error ? `it failed: ${String(error).slice(0, 140)}` : msg.toolCall ? 'it ran without an error' : 'it ran';
   // Chatty's own fallback text for a program that said nothing (fromProgram === false) isn't the program's

@@ -11,7 +11,7 @@ No account and no inference server. Models download once from Hugging Face, are 
 - **Replies are programs.** "Draw a night sky", "make a tip calculator", "play a blues riff", "how many seconds are in a leap year?": the model writes JavaScript, and its output is a live card in the chat. It speaks its answer with `speak()`.
 - **Choice of local models.** Google Gemma 4 (E2B, E4B) on LiteRT-LM, and Qwen 2.5/3/3.5, Llama 3.2, SmolLM2, Phi-4-mini, Ministral and others on WebLLM, from 200 MB to about 5 GB. Phones get a shortlist sized for a mobile tab.
 - **Voice in and out, on-device.** Whistle (Cactus Compute) for speech-to-text, Piper for text-to-speech. Speech can be switched off for a typing-only chat.
-- **Sound and music.** Programs get Web Audio and a software Web MIDI synth, so `navigator.requestMIDIAccess()` works even on iPhone Safari.
+- **Sound and music.** Programs get Web Audio, Tone.js (bundled, for music) and a software Web MIDI synth, so `navigator.requestMIDIAccess()` works even on iPhone Safari.
 - **Self-repair.** When a program fails, Chatty corrects sure slips itself (typos in method or property names, checked against the browser's own APIs) and otherwise runs a short fix turn with the error and the failing line.
 - **Chats and memory.** Multiple conversations, kept locally, with a context meter and automatic summarizing when the window fills.
 - **Installable and offline-capable.** A PWA with a service worker; once the models are cached it works without a network (apart from look-ups the program makes itself, such as Wikipedia).

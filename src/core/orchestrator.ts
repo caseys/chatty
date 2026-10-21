@@ -188,10 +188,29 @@ export function classifyTranscript(
 }
 
 /** Requests (or the program being changed) that the optional rules are for */
-const SOUND_WORDS =
-  String.raw`\b(?:music|songs?|sing(?:s|ing)?|sound|beats?|groove|drums?|pianos?|bass|guitars?|organ|violins?|trumpets?|sax(?:ophone)?|flutes?|chords?|melod(?:y|ies)|tunes?|midi|rhythm|jam|loop(?:ed)? (?:the )?(?:song|beat|music|melody)|tempo|bpm|beeps?|audio|instruments?|(?:in|key of) [a-g][#b]? (?:major|minor|pentatonic)|[a-g][#b]? (?:major|minor|pentatonic) (?:scales?|chords?|keys?|progressions?|arpeggios?)|(?:major|minor|pentatonic) scale|scale (?:in|of) [a-g])\b|requestMIDIAccess|AudioContext`;
-/** (a bare "play" also asks for games and videos: it chooses the rule, but isn't a sound on its own) */
+const MUSIC_WORDS = String.raw`music|songs?|sing(?:s|ing)?|beats?|groove|drums?|pianos?|bass|guitars?|organ|violins?|trumpets?|sax(?:ophone)?|flutes?|chords?|melod(?:y|ies)|tunes?|midi|rhythm|jam|loop(?:ed)? (?:the )?(?:song|beat|music|melody)|tempo|bpm|instruments?|(?:in|key of) [a-g][#b]? (?:major|minor|pentatonic)|[a-g][#b]? (?:major|minor|pentatonic) (?:scales?|chords?|keys?|progressions?|arpeggios?)|(?:major|minor|pentatonic) scale|scale (?:in|of) [a-g]`;
+const SOUND_WORDS = String.raw`\b(?:${MUSIC_WORDS}|sound|beeps?|audio)\b|requestMIDIAccess|AudioContext`;
+/** (a bare "play" also asks for games and videos: it chooses the sound rules, but isn't a sound on its own) */
 const SOUND_REQUEST = new RegExp(String.raw`\bplay(?:s|ing)?\b|${SOUND_WORDS}`, 'i');
+/** Music, which Tone plays: instruments, a song, a melody, chords, a beat, drums, a tempo, a key (or a program already written with Web MIDI or Tone) */
+const MUSIC_REQUEST = new RegExp(String.raw`\b(?:${MUSIC_WORDS})\b|requestMIDIAccess`, 'i');
+const TONE_PROGRAM = /\bTone\s*\./;
+/** Sound effects, which Web Audio plays: a beep, a chime, an alarm, a click (or a program already written with Web Audio) */
+const EFFECT_REQUEST = new RegExp(String.raw`\b(?:beeps?|tones?|chimes?|alarms?|dings?|buzz(?:es|ed|ing|er)?|clicks?|sirens?|sound effects?)\b|AudioContext`, 'i');
+
+/**
+ * Which sound rules a request needs: Tone for music, Web Audio for sound effects, both when it
+ * names both or names neither ("play a sound"), none when it has nothing to do with sound
+ */
+function soundKinds(request: string): { music: boolean; effects: boolean } {
+  const music = MUSIC_REQUEST.test(request) || TONE_PROGRAM.test(request);
+  const effects = EFFECT_REQUEST.test(request);
+  if (!music && !effects) {
+    const either = SOUND_REQUEST.test(request);
+    return { music: either, effects: either };
+  }
+  return { music, effects };
+}
 const SOUND_WORDS_REQUEST = new RegExp(SOUND_WORDS, 'i');
 const DRAWING_REQUEST =
   /\b(?:draw|paint|sketch|picture|image|art\b|animat|game|simulat|bounc|canvas|scene|shape|circle|square|triangle|stars?\b|sky|rainbow|landscape|pattern|fractal|particle|mov(?:e|ing)|getContext)/i;
@@ -229,7 +248,14 @@ const PROMPT_RULES: ReadonlyArray<{ text: string; when?: { test(request: string)
   { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations. For motion, keep each thing\'s position and speed in variables, and move and redraw it in one requestAnimationFrame loop.', when: DRAWING_REQUEST },
   { text: '- For 3D, THREE (three.js) is ready to use: render with a THREE.WebGLRenderer, whose canvas you add to document.body.', when: THREE_D_REQUEST },
   { text: '- <svg> works for diagrams and icons.', when: DIAGRAM_REQUEST },
-  { text: "- Sound: music and instruments play through Web MIDI. Get an output with const midi = await navigator.requestMIDIAccess() and const output = [...midi.outputs.values()][0]. Choose a General MIDI instrument for a channel with output.send([0xC0 + channel, program]) (0 piano, 19 organ, 24 guitar, 32 bass, 40 violin, 48 strings, 56 trumpet, 65 sax, 73 flute). Play a note with output.send([0x90 + channel, note, velocity], time) and end it with output.send([0x80 + channel, note, 0], time + length) (note 60 is middle C; times are performance.now() ms). Drums are channel 9: note 36 kick, 38 snare, 42 hi-hat. At the top, declare const bpm (beats per minute: 60 to 180), beat = 60000 / bpm (one beat in ms) and start = performance.now() + 100. To loop, put one pass of notes in a function that schedules them from a start time, call it, then call it again with setInterval every pass, moving the start time on by the pass length. Beeps, tones and sound effects use Web Audio (new AudioContext(), oscillators, gain, each connected to its destination).", when: SOUND_REQUEST },
+  {
+    text: '- For music, Tone (Tone.js) is ready to use. Instruments are synths, each connected with .toDestination(): Tone.PolySynth for chords and melodies, Tone.PluckSynth for plucked strings, and for drums Tone.MembraneSynth (kick), Tone.NoiseSynth (snare) and Tone.MetalSynth (hi-hat). Play a note with synth.triggerAttackRelease(note, duration, time), using note names like "C4" and lengths like "8n" (an eighth note) or "1m" (a measure), and the time that a Tone.Loop or Tone.Part callback receives (a NoiseSynth takes only duration and time). Set the tempo with Tone.Transport.bpm.value. To repeat, put the notes in a Tone.Loop or Tone.Part, call .start(0) on it, then call Tone.Transport.start().',
+    when: { test: (request: string) => soundKinds(request).music },
+  },
+  {
+    text: '- Beeps, tones and sound effects use Web Audio (new AudioContext(), oscillators, gain, each connected to its destination).',
+    when: { test: (request: string) => soundKinds(request).effects },
+  },
   { text: '- Answer what you know directly. For facts you lack, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it.', when: FACTS_REQUEST },
 ];
 
@@ -452,7 +478,7 @@ const CAPABILITIES: ReadonlyArray<{ name: string; asks: (request: string) => boo
   {
     name: 'sound',
     asks: (r) => SOUND_WORDS_REQUEST.test(r),
-    calls: /\.send\s*\(|\bAudioContext\b|\.createOscillator\s*\(|\brequestMIDIAccess\b|\bplayNotes\s*\(|\.play\s*\(|\bnew\s+Audio\s*\(|\bspeechSynthesis\b/,
+    calls: /\.send\s*\(|\bAudioContext\b|\.createOscillator\s*\(|\brequestMIDIAccess\b|\bTone\s*\.|\bplayNotes\s*\(|\.play\s*\(|\bnew\s+Audio\s*\(|\bspeechSynthesis\b/,
   },
   {
     name: 'drawing',
@@ -1487,7 +1513,7 @@ export class ConversationOrchestrator {
             const three = provideThree(executableCode);
             if (three.changed) {
               executableCode = three.code;
-              appendRunLog('imagined', "import from 'three' → the ready-made THREE: corrected before running");
+              for (const name of three.provided) appendRunLog('imagined', `import from '${name === 'THREE' ? 'three' : 'tone'}' → the ready-made ${name}: corrected before running`);
             }
             // Packages the browser doesn't have, loaded and never used: taken out
             const packages = dropUnusedPackages(executableCode);
@@ -2451,11 +2477,15 @@ export class ConversationOrchestrator {
     const noNoteStarted = !!midi && midi.sent > 0 && midi.noteOns === 0;
     const missing = [
       wantsSound && !asked()
-        ? 'The program played nothing: notes play through a Web MIDI output (output.send([0x90 + channel, note, velocity], time)) or Web Audio oscillators.'
+        ? soundKinds(request).music
+          ? 'The program played nothing: notes play through Tone synths (Tone.PolySynth, connected with .toDestination(), played with triggerAttackRelease(note, duration, time)) or Web Audio oscillators.'
+          : 'The program played nothing: sounds play through Web Audio oscillators, each connected to the audio context\'s destination.'
         : wantsSound && silent()
           ? noNoteStarted
             ? `No note was started: every MIDI message was something else${midi.others.length ? ` (${midi.others.join('; ')})` : ''}. A note starts with output.send([0x90 + channel, note, velocity]) where channel is 0 to 15 and velocity 1 to 127, and ends with 0x80 + channel.`
-            : "The program's sound never reached the speakers: connect each sound to the audio context's destination (node.connect(audioContext.destination))."
+            : /\bTone\s*\./.test(code)
+              ? "The program's sound never reached the speakers: connect each Tone synth to the output with .toDestination(), and play notes with triggerAttackRelease(note, duration, time)."
+              : "The program's sound never reached the speakers: connect each sound to the audio context's destination (node.connect(audioContext.destination))."
           : '',
       wantsVisual && !shown() ? 'The program showed nothing: what it adds to document.body appears in the card on screen.' : '',
     ].filter(Boolean);

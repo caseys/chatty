@@ -47,6 +47,16 @@ describe('running code the model wrapped or forgot to call', () => {
     expect(out.code).toContain('new THREE.Scene()');
   });
 
+  it('does not fetch Tone.js, which comes with Chatty, but still fetches other libraries', () => {
+    for (const src of ['https://unpkg.com/tone', 'https://cdn.jsdelivr.net/npm/tone@14.7.77/build/Tone.js', 'https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js']) {
+      const out = inspectExecutableCode(`\`\`\`html\n<script src="${src}"></script>\n<script>const synth = new Tone.Synth().toDestination();</script>\n\`\`\``);
+      expect(out.code, src).not.toContain('script.src');
+      expect(out.code, src).toContain('new Tone.Synth()');
+    }
+    const other = inspectExecutableCode('```html\n<script src="https://cdn.example.com/chart.js"></script>\n<script>new Chart();</script>\n```');
+    expect(other.code).toContain('script.src');
+  });
+
   it('runs a speak() written after the closing </script> instead of showing it', () => {
     const out = inspectExecutableCode('<canvas id="c"></canvas>\n<script>\nconst a = 1;\n</script>\n\nspeak("Here it is.");');
     expect(out.code).toBe('document.body.insertAdjacentHTML("beforeend", "<canvas id=\\"c\\"></canvas>");\n\nconst a = 1;\n\nspeak("Here it is.");');

@@ -30,11 +30,30 @@ export function oncePerFrame(fn: () => void, raf: (callback: () => void) => unkn
 }
 
 /**
+ * Adds a bundle of Chatty's (three.js, Tone.js) to a program's page as a module script, and waits
+ * for it: its load event comes after it ran, so what it defines exists before the program does. A
+ * module, so the bundle's own names stay out of the program's global scope.
+ */
+async function loadBundle(win: Window, bundleUrl: string, name: string): Promise<void> {
+  const doc = win.document;
+  await new Promise<void>((resolve) => {
+    const script = doc.createElement('script');
+    script.type = 'module';
+    script.src = new URL(bundleUrl, window.location.href).href;
+    script.addEventListener('load', () => resolve());
+    script.addEventListener('error', () => {
+      console.warn(`${name} could not load`);
+      resolve();
+    });
+    (doc.head ?? doc.documentElement).appendChild(script);
+  });
+}
+
+/**
  * three.js for 3D programs: a program that uses THREE finds it ready, as a global in its page.
  * It's bundled with Chatty (works offline, same file as a downloaded program's) and loads into the
  * program's own page, only for a program that uses THREE, so it goes with that page: the page
- * itself never holds it. A module script, so the bundle's own names stay out of the program's
- * global scope; its load event comes after it ran, so THREE exists before the program does.
+ * itself never holds it.
  */
 async function withThree(code: string, win: Window | null, live: () => boolean = () => true): Promise<void> {
   if (!win || !/\bTHREE\b/.test(code)) return;
@@ -44,21 +63,32 @@ async function withThree(code: string, win: Window | null, live: () => boolean =
     if (!live()) return;
     // The page already has it (a program run again in the same page)
     if ((win as unknown as { THREE?: unknown }).THREE) return;
-    const doc = win.document;
-    await new Promise<void>((resolve) => {
-      const script = doc.createElement('script');
-      script.type = 'module';
-      script.src = new URL(bundleUrl, window.location.href).href;
-      script.addEventListener('load', () => resolve());
-      script.addEventListener('error', () => {
-        console.warn('three.js could not load');
-        resolve();
-      });
-      (doc.head ?? doc.documentElement).appendChild(script);
-    });
+    await loadBundle(win, bundleUrl, 'three.js');
   } catch (err) {
     console.warn('three.js could not load:', err);
   }
+}
+
+/**
+ * Tone.js for music programs: a program that uses Tone finds it ready, as a global in its page,
+ * playing through the app's shared audio (see standalone/tone-realm.ts). Loaded the way three.js
+ * is (withThree).
+ */
+async function withTone(code: string, win: Window | null, live: () => boolean = () => true): Promise<void> {
+  if (!win || !/\bTone\b/.test(code)) return;
+  try {
+    const { default: bundleUrl } = await import('../standalone/tone-global.ts?worker&url');
+    if (!live()) return;
+    if ((win as unknown as { Tone?: unknown }).Tone) return;
+    await loadBundle(win, bundleUrl, 'Tone.js');
+  } catch (err) {
+    console.warn('Tone.js could not load:', err);
+  }
+}
+
+/** The libraries a program's page gets before it runs (each only for a program that uses it) */
+async function withLibraries(code: string, win: Window | null, live?: () => boolean): Promise<void> {
+  await Promise.all([withThree(code, win, live), withTone(code, win, live)]);
 }
 import { withActivity } from '../core/activity-breadcrumbs.ts';
 import { midiSummary as softwareMidiSummary, resetMidiSummary, silenceSoftwareMidi, softwareMidiAccess, type MidiSummary } from '../audio/software-midi.ts';
@@ -275,6 +305,9 @@ function parsesAsJs(code: string): boolean {
   }
 }
 
+/** The script URLs of the libraries Chatty bundles: three.js (three.min.js, three.module.js), Tone.js (…/tone@14/build/Tone.js, …/libs/tone/14.8.49/Tone.js) */
+const PROVIDED_LIBRARY_SRC = /\bthree(?:\.module)?(?:\.min)?\.js\b|\/tone(?:@[^/?#]*)?(?:[?#].*)?$|\/Tone(?:\.min)?\.js\b/i;
+
 /** An ```html block as code: its markup goes on screen, then its inline scripts run. */
 function htmlToCode(html: string): string {
   // Each <script> in order: inline code runs as is, one with a src is loaded first (awaited, so
@@ -290,8 +323,8 @@ function htmlToCode(html: string): string {
       continue;
     }
     const src = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(attrs)?.[1];
-    // three.js comes with Chatty (see withThree): no need to fetch it
-    if (src && !/\bthree(?:\.module)?(?:\.min)?\.js\b/i.test(src)) scripts.push(loadScriptCode(src));
+    // three.js and Tone.js come with Chatty (see withThree, withTone): no need to fetch them
+    if (src && !PROVIDED_LIBRARY_SRC.test(src)) scripts.push(loadScriptCode(src));
     if (m[2].trim()) scripts.push(m[2]);
   }
   // JavaScript lines written outside the <script> (small models put a speak() after it) run too,
@@ -1078,6 +1111,8 @@ export function prepareExecutableCode(rawText: string): string {
  */
 export function detectRecommendedMode(code: string): JavascriptExecutionMode {
   // 1. Audio, visual, DOM, interactive widgets, timers, MIDI, storage, or host helpers require sandboxed iframe
+  // (Tone.js, which a page gets only there, is named with its capital: "tone" is also a word)
+  if (/\bTone\s*\./.test(code)) return 'iframe';
   if (
     /\b(document|window|canvas|getContext|Audio|AudioContext|webkitAudioContext|OscillatorNode|GainNode|requestMIDIAccess|out|clear|svg|innerHTML|appendChild|addEventListener|setInterval|setTimeout|requestAnimationFrame|createElement|getElementById|querySelector|classList|style|onclick|root|playNotes|speak|searchWikipedia|localStorage|sessionStorage|alert|prompt|confirm|location|navigator)\b/i.test(
       code
@@ -3323,7 +3358,7 @@ export class JavascriptRuntime {
 
   /**
    * The program in the card as one self-contained HTML file: the same page it runs in here, with
-   * Chatty's part (sound, MIDI, notes, Wikipedia, speech) and three.js, when it uses THREE, inlined.
+   * Chatty's part (sound, MIDI, notes, Wikipedia, speech) and three.js (when it uses THREE) and Tone.js (when it uses Tone), inlined.
    */
   async standaloneHtml(): Promise<string | null> {
     const code = this.downloadReady ? this.downloadable?.code : null;
@@ -3333,11 +3368,13 @@ export class JavascriptRuntime {
       // In a function: the bundle's top-level names stay out of the program's global scope
       return `<script>(function () {\n${text.replace(/<\/script/gi, '<\\/script')}\n})();</script>`;
     };
-    const [{ default: hostUrl }, three] = await Promise.all([
+    const [{ default: hostUrl }, three, tone] = await Promise.all([
       import('../standalone/host.ts?worker&url'),
       /\bTHREE\b/.test(code) ? import('../standalone/three-global.ts?worker&url') : null,
+      /\bTone\b/.test(code) ? import('../standalone/tone-global.ts?worker&url') : null,
     ]);
-    const head = [await scriptOf(hostUrl), three ? await scriptOf(three.default) : ''].join('\n');
+    // (host first: Tone's bundle asks it for the page's audio as it loads)
+    const head = [await scriptOf(hostUrl), three ? await scriptOf(three.default) : '', tone ? await scriptOf(tone.default) : ''].join('\n');
     const json = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c');
     const start = `<script>window.postMessage({ type: 'execute', id: 'standalone', code: ${json(code)}, idKinds: ${json(elementKinds(code))}, idChecked: ${json(checkedIds(code))} }, '*');</script>`;
     return this.buildRunnerHtml(false, 'window.__chattyStandaloneHost')
@@ -3570,7 +3607,7 @@ export class JavascriptRuntime {
 
       this.pendingRuns.set(reqId, { options, spokenTexts, timer, finish: settle });
       this.trackDownload(code);
-      void withThree(code, iframe.contentWindow).then(() =>
+      void withLibraries(code, iframe.contentWindow).then(() =>
         iframe.contentWindow?.postMessage({ type: 'execute', id: reqId, code, idKinds: elementKinds(code), idChecked: checkedIds(code), valuesExpected: VALUES_ASKED_ABOUT.test(options?.request ?? '') }, '*')
       );
     });
@@ -3639,8 +3676,8 @@ export class JavascriptRuntime {
         clearTimeout(readyTimer);
         stopTimer = setTimeout(() => finish(null), ms);
         try {
-          // Not if the trial ended while three.js loaded: the frame is the next trial's by then
-          void withThree(code, iframe.contentWindow, () => !finished).then(() => {
+          // Not if the trial ended while a library loaded: the frame is the next trial's by then
+          void withLibraries(code, iframe.contentWindow, () => !finished).then(() => {
             if (!finished) iframe.contentWindow?.postMessage({ type: 'execute', id, code, idKinds: elementKinds(code), idChecked: checkedIds(code) }, '*');
           });
         } catch (err) {

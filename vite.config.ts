@@ -47,7 +47,7 @@ function standaloneBundlesArePlain(): Plugin {
     closeBundle() {
       const assets = resolve(outDir, 'assets');
       for (const name of readdirSync(assets)) {
-        if (!/^(host|three-global)-.*\.js$/.test(name)) continue;
+        if (!/^(host|three-global|tone-global)-.*\.js$/.test(name)) continue;
         const code = readFileSync(resolve(assets, name), 'utf8');
         if (code.length < 1000) continue; // the small module that gives the bundle's URL
         try {

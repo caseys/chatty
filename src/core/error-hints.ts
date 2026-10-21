@@ -428,11 +428,11 @@ const HELPERS = ['out', 'speak', 'clear', 'root'];
 /** Names the sandbox provides besides the browser's own */
 const SANDBOX_NAMES = [...HELPERS, 'playNotes', 'searchWikipedia'];
 /**
- * Every name the sandbox gives a program (javascript-runtime.ts): the helpers, three.js, and the
- * music rule's defaults. None is in this window's globalThis, so a rename of one of them would be
+ * Every name the sandbox gives a program (javascript-runtime.ts): the helpers, three.js, Tone.js, and
+ * the Web MIDI program's defaults. None is in this window's globalThis, so a rename of one of them would be
  * a rename of something that exists.
  */
-const PROVIDED_NAMES = [...SANDBOX_NAMES, 'THREE', 'bpm', 'beat', 'start'];
+const PROVIDED_NAMES = [...SANDBOX_NAMES, 'THREE', 'Tone', 'bpm', 'beat', 'start'];
 
 /**
  * Before a program runs: a name used but declared nowhere it can be seen from, that differs from
@@ -627,33 +627,38 @@ function isRequire(node: AnyNode | null | undefined): boolean {
   return false;
 }
 
+/** The libraries Chatty provides in a program's page, by the package name a program imports them by */
+const PROVIDED_LIBRARIES: Record<string, string> = { three: 'THREE', tone: 'Tone' };
+
 /**
- * Imports of three.js, which Chatty provides as THREE (javascript-runtime.ts): `import * as T
- * from 'three'` becomes `const T = THREE;`, `import { Scene, Mesh as M } from 'three'` becomes
- * `const { Scene, Mesh: M } = THREE;`. Programs run as scripts, where an import can't stand.
+ * Imports of a library Chatty provides (three.js as THREE, Tone.js as Tone: javascript-runtime.ts):
+ * `import * as T from 'three'` becomes `const T = THREE;`, `import { Scene, Mesh as M } from
+ * 'three'` becomes `const { Scene, Mesh: M } = THREE;`, and the same for 'tone'. Programs run as
+ * scripts, where an import can't stand. `provided` lists the globals they now read.
  */
-export function provideThree(code: string): { code: string; changed: boolean } {
-  let changed = false;
-  const out = code.replace(/^[ \t]*import\s+([^;\n]+?)\s+from\s+(['"])three\2[ \t]*;?[ \t]*$/gm, (line, clause: string) => {
+export function provideThree(code: string): { code: string; changed: boolean; provided: string[] } {
+  const provided = new Set<string>();
+  const out = code.replace(/^[ \t]*import\s+([^;\n]+?)\s+from\s+(['"])(three|tone)\2[ \t]*;?[ \t]*$/gm, (line, clause: string, _q: string, pkg: string) => {
+    const global = PROVIDED_LIBRARIES[pkg];
     const star = clause.match(/^\*\s+as\s+([A-Za-z_$][\w$]*)$/);
     if (star) {
-      changed = true;
-      return star[1] === 'THREE' ? '' : `const ${star[1]} = THREE;`;
+      provided.add(global);
+      return star[1] === global ? '' : `const ${star[1]} = ${global};`;
     }
     const named = clause.match(/^\{([^}]*)\}$/);
     if (named) {
-      changed = true;
+      provided.add(global);
       const parts = named[1].split(',').map((p) => p.trim()).filter(Boolean).map((p) => p.replace(/\s+as\s+/, ': '));
-      return `const { ${parts.join(', ')} } = THREE;`;
+      return `const { ${parts.join(', ')} } = ${global};`;
     }
     const def = clause.match(/^([A-Za-z_$][\w$]*)$/);
     if (def) {
-      changed = true;
-      return def[1] === 'THREE' ? '' : `const ${def[1]} = THREE;`;
+      provided.add(global);
+      return def[1] === global ? '' : `const ${def[1]} = ${global};`;
     }
     return line;
   });
-  return { code: out, changed };
+  return { code: out, changed: provided.size > 0, provided: [...provided] };
 }
 
 /**
@@ -929,7 +934,7 @@ function standInElement(code: string, error: string, errorLine: number | undefin
       return { text: `${missing} ${uses[0].text}` };
     }
     let text = `${missing} Create the element it needs with document.createElement and give it id "${id}".`;
-    if (member && SOUND_MEMBER.test(member)) text += ' Notes play through a Web MIDI output: output.send([0x90 + channel, note, velocity], time), from (await navigator.requestMIDIAccess()).outputs.';
+    if (member && SOUND_MEMBER.test(member)) text += ' Notes play through Tone: a synth such as Tone.PolySynth connected with .toDestination(), played with synth.triggerAttackRelease(note, duration, time).';
     return { text };
   }
   return null;
