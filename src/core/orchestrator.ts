@@ -309,15 +309,16 @@ export function promptRules(request = '', filter = false): string {
 
 
 /**
- * One real chat exchange before the conversation, there only to show the reply format (a
- * JavaScript program, no prose): without it small models answer like a chat assistant offering
- * code ("you can use the following code: …"). It holds nothing worth copying.
+ * The example exchange once sent before the conversation to show the reply format. None now: the
+ * system prompt's Output section states the format, and the example's speak-only reply ("Hi!" →
+ * speak("Hi! What would you like me to make?")) had small models answer music requests with a
+ * speak() line alone (Qwen3 0.6B, Twinkle and a drum beat: speak-only every time with it, programs
+ * without it) and copy its question into programs.
  */
-export const FORMAT_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content: string }> = [
-  { role: 'user', content: 'Hi!' },
-  // Only speech: small models copied a drawn "Hi!" heading into every program
-  { role: 'assistant', content: 'speak("Hi! What would you like me to make?");' },
-];
+export const FORMAT_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content: string }> = [];
+
+/** The example reply's question, still recognised when a model or an older chat repeats it */
+const EXAMPLE_QUESTION = 'Hi! What would you like me to make?';
 
 /** What the app says as it greets (the first time, and after): in the chat, so a small model copies them into its program */
 export const WELCOME_MESSAGE = 'Welcome to Chatty, I can do anything your browser can do.';
@@ -325,7 +326,7 @@ export const WELCOME_BACK_MESSAGE = 'Welcome back, what would you like to do wit
 
 /** What the example reply says (FORMAT_TURNS) and the app's greetings: a program that copies one into itself doesn't mean it */
 const EXAMPLE_SPOKEN = [
-  ...FORMAT_TURNS.flatMap((t) => (t.role === 'assistant' ? [...t.content.matchAll(/speak\((["'`])(.*?)\1\)/g)].map((m) => m[2]) : [])),
+  EXAMPLE_QUESTION,
   WELCOME_MESSAGE,
   WELCOME_BACK_MESSAGE,
 ];
