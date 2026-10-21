@@ -18,34 +18,21 @@ export function isTalkOnly(code: string): boolean {
 }
 
 /**
- * One line describing a past program for the system prompt, or null for replies that only talk
- * (those stay in the message history as they were). Programs are described instead of shown:
- * small models copy whatever their past replies look like, so a summary line in the history
- * teaches them to reply with a summary line instead of a program.
+ * A past program as the model sees it in the chat history: what it said (as a speak() call, in the
+ * reply format), then what happened when it ran: shown on screen, played sound, ran cleanly or
+ * failed with which error. The code itself stays out (only a program being edited is shown).
  */
-export function describePastProgram(msg: ConversationMessage, userAsk: string): string | null {
+export function pastProgramResult(msg: ConversationMessage): string {
   const code = msg.rawCode || msg.rawLlmOutput || '';
-  if (!code || isTalkOnly(code)) return null;
   const said = (msg.canonicalContent || '').trim();
-  // Short programs that don't draw stay in the history as they were (they are good examples)
-  if (!programDraws(code) && code.length <= Math.max(200, said.length * 2 + 20)) return null;
-  const did = programDraws(code) ? 'built something on screen' : 'ran a program';
-  const ask = userAsk ? `"${userAsk.slice(0, 120)}"` : 'a request';
-  return `- ${ask}: you ${did} (${code.split('\n').length} lines)${said ? ` and said "${said.slice(0, 120)}"` : ''}.`;
+  if (!code || isTalkOnly(code)) return code || said;
+  const result = (msg.toolCall?.result ?? {}) as { error?: string; hasVisualOutput?: boolean; success?: boolean };
+  const did: string[] = [];
+  if (programDraws(code) || result.hasVisualOutput) did.push('showed something on screen');
+  if (/\bout\s*\.\s*send\b|AudioContext|requestMIDIAccess|playNotes|\.play\(/.test(code)) did.push('played sound');
+  const error = msg.toolCall?.error || result.error;
+  const outcome = error ? `it failed: ${String(error).slice(0, 140)}` : msg.toolCall ? 'it ran without an error' : 'it ran';
+  const speakLine = said ? `speak(${JSON.stringify(said.slice(0, 300))});\n` : '';
+  return `${speakLine}// (Your program ${did.length ? did.join(' and ') : 'ran'}, ${code.split('\n').length} lines; ${outcome}.)`;
 }
 
-/**
- * A past assistant reply as the code-writing model should see it: what it said, as a speak()
- * call (keeping the code-only reply format), plus a summary line instead of any program body.
- */
-export function compactAssistantContent(msg: ConversationMessage): string {
-  const code = msg.rawCode || msg.rawLlmOutput || '';
-  const said = (msg.canonicalContent || '').trim();
-  if (!code) return said;
-  const speakLine = said ? `speak(${JSON.stringify(said)});` : '';
-  // Talk-only replies are already short: keep them as they were
-  if (!programDraws(code) && code.length <= Math.max(200, speakLine.length * 2)) return code;
-  const lines = code.split('\n').length;
-  const did = programDraws(code) ? 'built something on screen' : 'ran a program';
-  return `${speakLine}\n// (Earlier program omitted: ${did}, ${lines} lines.)`.trim();
-}

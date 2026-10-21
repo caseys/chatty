@@ -23,8 +23,9 @@ import {
   normalizeUserTranscript,
 } from './speech-normalizer.ts';
 import { StateMachineCoordinator } from './state-machine.ts';
-import { describePastProgram, isTalkOnly, programDraws } from './history-format.ts';
+import { isTalkOnly, pastProgramResult, programDraws } from './history-format.ts';
 import {
+  isComplaint,
   isFollowUpEdit,
   runReadyTool,
   type LastAction,
@@ -39,8 +40,8 @@ import {
 } from '../tools/javascript-runtime.ts';
 import { appendRunLog } from './run-log.ts';
 import { blankChoices, blankRequest, choiceRequest, fillBlank, findBlank, type Blank } from './blank-fix.ts';
-import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest } from './line-fix.ts';
-import { dropHelperCopies, dropUnusedPackages, errorHint, fixCaseSlips } from './error-hints.ts';
+import { applyFixReply, brokenLines, enclosingFunction, FIX_SYSTEM_PROMPT, fixRequest, restoreDeclarations } from './line-fix.ts';
+import { dropHelperCopies, dropStrayQuote, dropUnusedPackages, errorHint, fixCaseSlips, provideThree } from './error-hints.ts';
 import { applyAssignmentFixes, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { LOCAL_CHAT_MODELS } from './settings.ts';
@@ -186,15 +187,19 @@ const SOUND_REQUEST =
   /\b(?:play|music|song|sing|sound|beat|groove|drum|piano|bass|guitar|organ|violin|strings|trumpet|sax|flute|chord|melod|tune|notes?\b|midi|rhythm|jam|music loop|loop(?:ed)? (?:the )?(?:song|beat|music|melody)|tempo|bpm|beep|\btone\b.*\bplay|\bplay\b.*\btone\b|audio|instrument|\b[a-g][#b]? (?:major|minor|pentatonic)|(?:major|minor|pentatonic) scale|scale (?:in|of) [a-g]|requestMIDIAccess|AudioContext)/i;
 const DRAWING_REQUEST =
   /\b(?:draw|paint|sketch|picture|image|art\b|animat|game|simulat|bounc|canvas|scene|shape|circle|square|triangle|stars?\b|sky|rainbow|landscape|pattern|fractal|particle|mov(?:e|ing)|getContext)/i;
-const THREE_D_REQUEST = /(?:\b3d\b|\bthree[- ]?d\b|\bcube|\bsphere|\bwebgl|\brotat|\bspin|\borbit|\bplanet|THREE\.)/i;
+const THREE_D_REQUEST = /(?:\b3d\b|\bthree[- ]?d\b|\bgames?\b|\brender|\bscene|\bcube|\bsphere|\bwebgl|\brotat|\bspin|\borbit|\bplanet|THREE\.)/i;
 const DIAGRAM_REQUEST = /\b(?:svg|diagram|icon|chart|graph|logo|vector|flowchart|map)/i;
 /** Something to see or use on screen: an app, a form, a list, a timer */
 const INTERFACE_REQUEST =
-  /\b(?:app|calculator|converter|form|button|input|slider|list|todo|to-do|table|timer|stopwatch|count ?down|clock|dashboard|widget|tracker|quiz|counter|picker|toggle|checklist|planner|calendar|scoreboard|editor|menu|interface|ui|page|show|display|game)s?\b/i;
+  /\b(?:app|calculator|converter|form|button|input|slider|list|todo|to-do|table|timer|stopwatch|count ?down|clock|dashboard|widget|tracker|quiz|counter|picker|toggle|checklist|planner|calendar|scoreboard|editor|menu|interface|ui|page|show|display)s?\b/i;
 /** Anything shown on screen, which goes in the card */
 const VISUAL_REQUEST = new RegExp([INTERFACE_REQUEST, DRAWING_REQUEST, THREE_D_REQUEST, DIAGRAM_REQUEST].map((r) => r.source).join('|'), 'i');
-const FACTS_REQUEST =
-  /\b(?:who (?:was|is)|what (?:is|was|are) (?:a|an|the)|when|where|why|which|how (?:many|much|old|tall|far|big|long)|tell me about|look up|search|find out|history|define|meaning|capital|population|weather|news|facts?|wiki|fetch)\b/i;
+/** A question or a look-up: asked as one ("Who was…", "…?"), or a look-up named outright */
+/** Arithmetic ("15 percent of 84", "3 times 4"): worked out, not looked up */
+const MATH_REQUEST = /\d\s*(?:%|percent|times|plus|minus|divided|squared|\*|\+|\/|x\s*\d)|\b(?:sum|average|square root) of\b/i;
+const FACTS_WORDS =
+  /^\s*(?:who|what|when|where|why|which|how (?:many|much|old|tall|far|big|long))\b|\?\s*$|\b(?:tell me about|look up|search for|find out|define|meaning of|capital of|population of|weather|news|wiki(?:pedia)?)\b/i;
+const FACTS_REQUEST = { test: (request: string) => FACTS_WORDS.test(request) && !MATH_REQUEST.test(request) };
 
 /**
  * The rules, as bullets (small models copy numbering into their replies). A rule with `when` is
@@ -202,15 +207,15 @@ const FACTS_REQUEST =
  * only when the request, or the program it changes, matches. Bigger models get every rule, the
  * same prompt each turn.
  */
-const PROMPT_RULES: ReadonlyArray<{ text: string; when?: RegExp }> = [
+const PROMPT_RULES: ReadonlyArray<{ text: string; when?: { test(request: string): boolean } }> = [
   { text: '- ONLY return executable JavaScript: the shortest program that fully does what was asked (draw, build, play, compute, look up).' },
   { text: '- All messages to the user go through speak(text). Calculate all results using JavaScript logic and put them in its template string.' },
   { text: '- What you add to document.body appears in a card on screen.', when: VISUAL_REQUEST },
   { text: '- Use HTML and CSS for interfaces: buttons, forms, tables, dashboards and widgets.', when: INTERFACE_REQUEST },
   { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations.', when: DRAWING_REQUEST },
-  { text: '- For 3D, use WebGL on a <canvas>.', when: THREE_D_REQUEST },
+  { text: '- For 3D, THREE (three.js) is ready to use: render with a THREE.WebGLRenderer, whose canvas you add to document.body.', when: THREE_D_REQUEST },
   { text: '- <svg> works for diagrams and icons.', when: DIAGRAM_REQUEST },
-  { text: "- Sound: music and instruments: out is ready to use. Call out.send once per note, chord or drum hit, with named values (durations and times in ms), like out.send({ instrument: 'piano', notes: 'G major', loudness: 80, duration: 4 * beat, time: start + 2 * beat }). Only notes is needed: the rest default to piano, loudness 100, half a second and now. Instruments: piano, bass, organ, guitar, strings, violin, trumpet, sax, flute, drums. Notes: a note ('G3'), a chord ('G major', 'Am7'), a scale ('G pentatonic down'), drum hits ('kick', 'snare', 'hihat'), or an array (up to 4 sound together, more play in turn). A beat or groove means drums. Declare const bpm, beat = 60000 / bpm and start = performance.now() at the top. To loop, put the bars in a function ending with start += their length, call it, then setInterval it with that length.", when: SOUND_REQUEST },
+  { text: "- Sound: music and instruments: out is ready to use. Call out.send once per note, chord or drum hit, with named values (durations and times in ms), like out.send({ instrument: 'piano', notes: 'G major', loudness: 80, duration: 4 * beat, time: start + 2 * beat }). Only notes is needed: the rest default to piano, loudness 100, half a second and now. Instruments: piano, bass, organ, guitar, strings, violin, trumpet, sax, flute, drums. Notes: a note ('G3'), a chord ('G major', 'Am7'), a scale ('G pentatonic down'), drum hits ('kick', 'snare', 'hihat'), or an array (up to 4 sound together, more play in turn). A beat or groove means drums. At the top, declare const bpm (beats per minute: 60 to 180), beat = 60000 / bpm (one beat in ms) and start = performance.now(). To loop, put the bars in a function ending with start += their length, call it, then setInterval it with that length.", when: SOUND_REQUEST },
   { text: '- Answer what you know directly. For facts you lack, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it.', when: FACTS_REQUEST },
 ];
 
@@ -239,6 +244,8 @@ export const FORMAT_TURNS: ReadonlyArray<{ role: 'user' | 'assistant'; content: 
 export const CONCISE_VOICE_SYSTEM_PROMPT = promptRules();
 
 /** A line of a streaming reply that starts code: the reply isn't prose (shown and spoken as it comes) */
+/** A line that builds a program (not talk, a fence or a comment): "Generating." is said for it */
+const CODING_LINE = /^\s*(?:const|let|var|function|class|for|while|if|root\.|document\.|window\.|out\.send|setInterval|requestAnimationFrame)\b/m;
 const STREAM_CODE_LINE = /^(?:const|let|var|function|class|import|MODE:|```|\/\/|\/\*|root\.|document\.|window\.)\b/m;
 /** What the code panel shows of a streaming reply: the inside of its code fences, when it has any */
 function codeView(text: string): string {
@@ -386,6 +393,12 @@ export function prefersLineFix(modelId: string): boolean {
 function gaveUpText(error: string): string {
   const short = error.length > 80 ? `${error.slice(0, 77)}…` : error;
   return `I couldn't get this working after ${MAX_FIX_TRIES} tries (the last error: ${short}). You could ask again in other words, or choose a larger model in Settings.`;
+}
+
+/** Whether an error is about the candidate itself (`Cannot access 'notes' before …` for `notes`) */
+function namesCandidate(error: string, expr: string): boolean {
+  const name = /^[A-Za-z_$][\w$]*$/.test(expr.trim()) ? expr.trim() : null;
+  return !!name && new RegExp(`['"\\s(]${name.replace(/\$/g, '\\$')}['"\\s).]`).test(` ${error} `);
 }
 
 /** A run's error history with its own error added */
@@ -788,13 +801,16 @@ export class ConversationOrchestrator {
     // Editing the last program ("make it bigger")? Then the model needs that program's code;
     // otherwise past programs appear only as one-line summaries.
     const lastAction = this.getLastAction(conversationId);
+    // "It didn't work" is about that program too: it goes in full, with a note saying so
+    const complaint = !options?.autoFix && lastAction?.kind === 'code' && isComplaint(normalized);
     const programBeingEdited =
       options?.autoFix ??
-      (lastAction?.kind === 'code' && isFollowUpEdit(normalized) ? lastAction.code : null);
+      (lastAction?.kind === 'code' && (isFollowUpEdit(normalized) || complaint) ? lastAction.code : null);
     let { systemPrompt, promptMessages } = this.buildModelPrompt(
       normalized,
       resolvedContext,
-      programBeingEdited
+      programBeingEdited,
+      complaint
     );
     // A fix turn is its own job: a short prompt about fixing and only the fix request (the
     // rules, examples and history are for writing programs, and small models rewrote the
@@ -1003,6 +1019,7 @@ export class ConversationOrchestrator {
         signal.addEventListener('abort', abortGeneration, { once: true });
         let stoppedRepeating = false;
         let repeatCheckedAt = 0;
+        let announcedCoding = false;
 
         const generateReply = (messages: typeof promptMessages, retry = 0, reask?: { temperature: number; topP: number }) => withActivity('generating a reply', () => generationProvider.generate({
           turnId,
@@ -1038,6 +1055,11 @@ export class ConversationOrchestrator {
             // The code panel shows only code: the fenced part once a fence starts. A fix's reply
             // stays out of it: the panel keeps the program until a fix is used
             if (!options?.autoFix) this.events.onRawOutput?.(turnId, codeView(currentFull));
+            // In speech mode, a reply that turns out to be a program (more than talk) says so once
+            if (!announcedCoding && !options?.autoFix && (CODING_LINE.test(currentFull) || STREAM_MARKUP.test(currentFull))) {
+              announcedCoding = true;
+              void this.speakOutOfTurn('Generating.');
+            }
 
             if (streamMode === 'unknown') {
               // Markup counts as code too: an HTML reply
@@ -1149,7 +1171,9 @@ export class ConversationOrchestrator {
           const failedError = this.lastRun?.error ?? null;
           const unusableWhy = async (raw: string): Promise<string | undefined> => {
             repeatedTrial = false;
-            const program = applyFixReply(original, raw, fixLine, options.fixBlock?.end);
+            const applied = applyFixReply(original, raw, fixLine, options.fixBlock?.end);
+            // (judged as it would run: a whole program with the declarations it dropped put back)
+            const program = options.fixWhole ? restoreDeclarations(original, applied).code : applied;
             const code = inspectExecutableCode(program).code.trim();
             const problem = await unusableFix(original, program, code, options.fixBlock?.name);
             if (problem) return UNUSABLE_WHY[problem];
@@ -1213,7 +1237,15 @@ export class ConversationOrchestrator {
         if (this.scheduler.isTurnValid(turnId)) {
           // A fix reply is search/replace edits to the failed program: they're applied, and the
           // code panel shows the whole program that runs
-          const fixedProgram = options?.autoFix ? applyFixReply(options.autoFix, rawContent, fixLine, options.fixBlock?.end) : rawContent;
+          let fixedProgram = options?.autoFix ? applyFixReply(options.autoFix, rawContent, fixLine, options.fixBlock?.end) : rawContent;
+          // A whole program that dropped declarations it still uses gets them back (line-fix.ts)
+          if (options?.autoFix && options.fixWhole) {
+            const kept = restoreDeclarations(options.autoFix, fixedProgram);
+            if (kept.restored.length) {
+              fixedProgram = kept.code;
+              appendRunLog('imagined', `the fix dropped ${kept.restored.join(', ')} → kept from the program: corrected before running`);
+            }
+          }
           if (fixedProgram !== rawContent && !options?.autoFix) this.events.onRawOutput?.(turnId, fixedProgram);
           const inspected = inspectExecutableCode(fixedProgram);
           // Comments go before it runs (and before it enters the history); a fix's program
@@ -1227,6 +1259,19 @@ export class ConversationOrchestrator {
             if (copies.dropped.length > 0) {
               executableCode = copies.code;
               for (const name of copies.dropped) appendRunLog('imagined', `its own ${name} → the ready-made one: corrected before running`);
+            }
+            // A stray quote or backtick ending a line (markdown's, kept): removed when that alone
+            // makes the program parse
+            const stray = dropStrayQuote(executableCode);
+            if (stray) {
+              executableCode = stray.code;
+              appendRunLog('imagined', `a stray quote at the end of line ${stray.line} → removed: corrected before running`);
+            }
+            // three.js imports: THREE is provided
+            const three = provideThree(executableCode);
+            if (three.changed) {
+              executableCode = three.code;
+              appendRunLog('imagined', "import from 'three' → the ready-made THREE: corrected before running");
             }
             // Packages the browser doesn't have, loaded and never used: taken out
             const packages = dropUnusedPackages(executableCode);
@@ -1355,6 +1400,7 @@ export class ConversationOrchestrator {
               : '';
             const saidBefore = (phrase: string) => !!fixSaid && !!phrase.trim() && fixSaid.includes(phrase.trim());
             const spokenThisRun = new Set<string>();
+            const soundMark = this.javascriptRuntime.soundUseCount?.() ?? 0;
             const execResult = await this.javascriptRuntime.execute(executableCode, undefined, {
               onSpeak: (phrase) => {
                 if (saidBefore(phrase)) return;
@@ -1389,6 +1435,16 @@ export class ConversationOrchestrator {
               execResult.error = notThere[0].error;
               execResult.errorLine = notThere[0].line;
               appendRunLog('error', `line ${notThere[0].line}: ${execResult.error}`);
+            }
+            // It ran, but did nothing the request asked for: no sound at all for a sound request,
+            // nothing on screen for a drawing or an app. What the sandbox saw, not a guess from the
+            // code; a program that starts a moment late gets 1.5 seconds.
+            if (!execResult.error) {
+              const missing = await this.missingOutcome(codeTask, soundMark);
+              if (missing) {
+                execResult.error = missing;
+                appendRunLog('error', missing);
+              }
             }
             this.lastRun = {
               turnId,
@@ -1714,6 +1770,8 @@ export class ConversationOrchestrator {
       this.sayGaveUp(run.turnId, run.error);
       return;
     }
+    // In speech mode, each try says so
+    void this.speakOutOfTurn('Fixing.');
     const key = this.requestKey(run);
     const used = this.fixKindsUsed.get(key) ?? new Set<FixKind>();
     this.fixKindsUsed.set(key, used);
@@ -1845,6 +1903,23 @@ export class ConversationOrchestrator {
    * are tried; the first that passes is run for real. When none does, the line fix follows as the
    * next attempt. Stops at once when the user starts a new turn.
    */
+  /** What a sound or visual request's program never did, after a short wait, or null */
+  private async missingOutcome(request: string, soundMark: number): Promise<string | null> {
+    const wantsSound = SOUND_REQUEST.test(request);
+    const wantsVisual = VISUAL_REQUEST.test(request) && !wantsSound;
+    if (!wantsSound && !wantsVisual) return null;
+    // (a runtime that can't tell, as in tests, is taken at its word)
+    if (wantsSound ? !this.javascriptRuntime.soundUseCount : !this.javascriptRuntime.hasVisualContent) return null;
+    const sounded = () => (this.javascriptRuntime.soundUseCount?.() ?? 0) > soundMark;
+    const shown = () => !!this.javascriptRuntime.hasVisualContent?.();
+    const done = () => (wantsSound ? sounded() : shown());
+    for (let waited = 0; !done() && waited < 1500; waited += 100) await settle(100);
+    if (done()) return null;
+    return wantsSound
+      ? 'The program played nothing: notes, chords and drums play through out.send({ notes, instrument, time, duration }).'
+      : 'The program showed nothing: what it adds to document.body appears in the card on screen.';
+  }
+
   /** A fix's progress note in the chat ("Fixing (3 of 10): …"): added like a fix turn's own */
   private addFixNote(text: string, turnId: string): void {
     const stamp = Date.now();
@@ -1934,11 +2009,13 @@ export class ConversationOrchestrator {
         ? trial.reached === false && probe !== filled
           ? 1
           : 3
-        : trial.error !== error && trial.errorLine !== undefined && trial.errorLine > (run.errorLine ?? blank.line)
-          ? 2
-          : trial.error !== error && !mentions.test(trial.error)
-            ? 1
-            : 0;
+        : namesCandidate(trial.error, expr)
+          ? 0
+          : trial.error !== error && trial.errorLine !== undefined && trial.errorLine > (run.errorLine ?? blank.line)
+            ? 2
+            : trial.error !== error && !mentions.test(trial.error)
+              ? 1
+              : 0;
       appendRunLog('retry', `a test run: \`${expr}\` for \`${blank.text}\` gave ${trial.error ? `${errorText(trial.error, trial.errorLine)}${level ? ' (progress)' : ''}` : trial.reached === false ? 'no error, but the blank never ran' : 'no error'}`);
       if (!level) return;
       const entry = { code: filled, expr, level, rank: rankOf(expr), votes: votes.get(expr) ?? 0 };
@@ -2319,7 +2396,8 @@ export class ConversationOrchestrator {
   private buildModelPrompt(
     userMessage: string,
     context: ReturnType<ConversationMemoryStore['resolveContextForQuery']>,
-    programBeingEdited: string | null = null
+    programBeingEdited: string | null = null,
+    complaint = false
   ): {
     systemPrompt: string;
     promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
@@ -2331,6 +2409,9 @@ export class ConversationOrchestrator {
     // What applies to this request only: memories picked for it, a reference it makes. In the system prompt these would change it on most turns, and the model would
     // have to process the whole prompt again; with the request they stay with it.
     const notes: string[] = [];
+    if (complaint && programBeingEdited) {
+      notes.push('The user says your last program (shown above) did not do what they asked. Write it again so it does.');
+    }
     if (context.relevantMemories.length > 0) {
       const memStr = context.relevantMemories.map((m) => `${m.key}: ${m.value}`).join('; ');
       notes.push(`User approved memory: ${memStr}.`);
@@ -2349,7 +2430,6 @@ export class ConversationOrchestrator {
 
     const promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> =
       this.phonePipeline ? [] : FORMAT_TURNS.map((t) => ({ ...t }));
-    const pastPrograms: string[] = [];
     // Assistant messages before the user's first one are the app's own (the welcome greeting).
     // Sent, they'd merge into the format turn's reply (consecutive turns are joined): left out.
     let userHasSpoken = false;
@@ -2358,8 +2438,6 @@ export class ConversationOrchestrator {
     const fixTurnIds = new Set(
       context.workingMessages.filter((m) => m.role === 'user' && m.autoFix).map((m) => m.turnId)
     );
-    // The request text of the last user message kept, as the user wrote it (for describePastProgram)
-    let lastAsk = '';
 
     // A working fix's program stands for the broken one it fixed (the broken message isn't edited)
     const fixedCode = new Map<string, string>();
@@ -2381,21 +2459,14 @@ export class ConversationOrchestrator {
         // Past programs leave the message history (with the request that asked for them) and are
         // described in the system prompt, except the one being edited, which is shown in full.
         // Phone chat model (split pipeline) sees only what was said.
-        if (!this.phonePipeline && !(programBeingEdited && msg.rawCode === programBeingEdited)) {
-          const prev = promptMessages[promptMessages.length - 1];
-          const described = describePastProgram(msg, prev?.role === 'user' ? lastAsk : '');
-          if (described) {
-            if (prev?.role === 'user') promptMessages.pop();
-            pastPrograms.push(described);
-            continue;
-          }
-        }
+        // Every request and reply stays in the history: a past program as what it said and what
+        // happened when it ran (pastProgramResult), the one being edited in full
         const content = (
           this.phonePipeline
             ? msg.canonicalContent || ''
             : programBeingEdited && msg.rawCode === programBeingEdited
               ? msg.rawCode
-              : msg.rawCode || msg.canonicalContent || ''
+              : pastProgramResult(msg)
         )
           .replace(/\s*\[Interrupted\]\s*$/, '')
           .trim();
@@ -2413,7 +2484,6 @@ export class ConversationOrchestrator {
         if (!cleaned || cleaned === '[Response interrupted]' || cleaned.startsWith('[Error')) {
           continue;
         }
-        lastAsk = cleaned;
         promptMessages.push({
           role: msg.role,
           // As it was sent: with the notes it carried, so the earlier prompt is repeated exactly
@@ -2436,12 +2506,6 @@ export class ConversationOrchestrator {
           : userMessage,
     });
 
-    // Changes only when a program leaves the messages (which changes their start as well)
-    if (pastPrograms.length > 0) {
-      systemParts.push(
-        `Programs you ran earlier in this conversation (write a complete new program for each request):\n${pastPrograms.slice(-8).join('\n')}`
-      );
-    }
     systemParts.push(...tail);
     const systemPrompt = systemParts.join('\n');
     return { systemPrompt, promptMessages };

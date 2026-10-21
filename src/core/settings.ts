@@ -21,6 +21,8 @@ export interface ModelOptionItem {
   description: string;
   /** Small enough for a phone browser tab */
   phone?: boolean;
+  /** Download size, which the picker sorts by */
+  downloadBytes?: number;
 }
 
 /**
@@ -68,6 +70,7 @@ export const LOCAL_CHAT_MODELS: ReadonlyArray<LocalChatModel> = [
     onnx: { repo: 'LiquidAI/LFM2.5-230M-ONNX', dtype: 'q4' },
   },
   local('smollm2-360m', 'SmolLM2 360M', 'SmolLM2-360M-Instruct-q4f16_1-MLC', 204, 376, 'Tiniest download, basic answers', true),
+  local('gemma-3-1b', 'Gemma 3 1B', 'gemma3-1b-it-q4f16_1-MLC', 602, 711, 'Google Gemma 3, small', true),
   local('llama-3.2-1b', 'Llama 3.2 1B', 'Llama-3.2-1B-Instruct-q4f16_1-MLC', 705, 879, 'Meta on-device model', true),
   local('qwen2.5-coder-0.5b', 'Qwen2.5-Coder 0.5B', 'Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC', 290, 945, 'Small model tuned for code', true),
   local('qwen2.5-0.5b', 'Qwen2.5 0.5B', 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC', 290, 945, 'Smallest download', true),
@@ -78,6 +81,7 @@ export const LOCAL_CHAT_MODELS: ReadonlyArray<LocalChatModel> = [
   local('smollm2-1.7b', 'SmolLM2 1.7B', 'SmolLM2-1.7B-Instruct-q4f16_1-MLC', 963, 1774, 'Hugging Face small model', false),
   { ...local('qwen3-1.7b', 'Qwen3 1.7B', 'Qwen3-1.7B-q4f16_1-MLC', 968, 2037, 'General model', false), noThinking: true },
   { ...local('qwen3.5-2b', 'Qwen3.5 2B', 'Qwen3.5-2B-q4f16_1-MLC', 1059, 2245, 'Newest Qwen, small', false), noThinking: true },
+  local('gemma-2-2b', 'Gemma 2 2B', 'gemma-2-2b-it-q4f16_1-MLC', 1493, 1895, 'Google Gemma 2', false),
   local('llama-3.2-3b', 'Llama 3.2 3B', 'Llama-3.2-3B-Instruct-q4f16_1-MLC', 1807, 2264, 'Meta on-device model', false),
   local('qwen2.5-coder-3b', 'Qwen2.5-Coder 3B', 'Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC', 1748, 2505, 'Stronger at JavaScript', false),
   local('ministral-3-3b', 'Ministral 3 3B', 'Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC', 1929, 2864, 'Mistral edge model (Dec 2025)', false),
@@ -127,7 +131,9 @@ export function phoneDefaultChatModelId(
 }
 
 export function resolvePhoneChatModelId(chosen: string | null, fallback = phoneDefaultChatModelId()): string {
-  return chosen && isPhoneChatModel(chosen) ? chosen : fallback;
+  // Every model may be chosen on every device (the picker marks which suit a phone)
+  const allowed = chosen && SUPPORTED_CHAT_MODELS.some((m) => m.id === chosen);
+  return allowed ? chosen : fallback;
 }
 
 export function findLocalChatModel(id: string): LocalChatModel | undefined {
@@ -139,6 +145,7 @@ export const SUPPORTED_CHAT_MODELS: ReadonlyArray<ModelOptionItem> = [
     id: 'gemma-4-e2b-it-web',
     name: 'Gemma 4 E2B (~1.95 GB, Fast, Phone: may crash)',
     description: 'Fast, efficient WebGPU inference',
+    downloadBytes: 1_950_000_000,
     // Same Google LiteRT runtime as desktop; ~2 GB is near a phone tab's memory limit
     phone: true,
   },
@@ -146,8 +153,9 @@ export const SUPPORTED_CHAT_MODELS: ReadonlyArray<ModelOptionItem> = [
     id: 'gemma-4-e4b-it-web',
     name: 'Gemma 4 E4B (~2.89 GB, High Quality)',
     description: 'High quality, larger context reasoning',
+    downloadBytes: 2_890_000_000,
   },
-  ...LOCAL_CHAT_MODELS.map(({ id, name, description, phone }) => ({ id, name, description, phone })),
+  ...LOCAL_CHAT_MODELS.map(({ id, name, description, phone, sizeBytes }) => ({ id, name, description, phone, downloadBytes: sizeBytes })),
 ];
 
 export const SUPPORTED_CODING_MODELS: ReadonlyArray<ModelOptionItem> = [

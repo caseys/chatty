@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
-import { compactAssistantContent, isTalkOnly } from '../src/core/history-format.ts';
+import { isTalkOnly, pastProgramResult } from '../src/core/history-format.ts';
 import { ConversationOrchestrator, FORMAT_TURNS } from '../src/core/orchestrator.ts';
 import { StateMachineCoordinator } from '../src/core/state-machine.ts';
 import type { ConversationMessage, LlmGenerationOptions, LlmGenerationResult, LlmRuntimeProvider } from '../src/types/index.ts';
@@ -23,14 +23,16 @@ const msg = (rawCode: string, said: string): ConversationMessage => ({
   timestamp: 0,
 });
 
-describe('compactAssistantContent', () => {
-  it('summarizes drawing programs instead of replaying them', () => {
-    const out = compactAssistantContent(msg(DRAWING, 'Drawing a red circle.'));
-    expect(out).toBe('speak("Drawing a red circle.");\n// (Earlier program omitted: built something on screen, 6 lines.)');
+describe('pastProgramResult', () => {
+  it('gives what a program said and what happened when it ran, not its code', () => {
+    const out = pastProgramResult(msg(DRAWING, 'Drawing a red circle.'));
+    expect(out).toBe('speak("Drawing a red circle.");\n// (Your program showed something on screen, 6 lines; it ran.)');
+    const failed = pastProgramResult({ ...msg(DRAWING, 'Drawing.'), toolCall: { name: 'javascript_runtime', arguments: {}, error: 'boom is not defined' } });
+    expect(failed).toContain('it failed: boom is not defined');
   });
 
   it('keeps short talk-only replies as they were', () => {
-    expect(compactAssistantContent(msg('speak("Hi there!");', 'Hi there!'))).toBe('speak("Hi there!");');
+    expect(pastProgramResult(msg('speak("Hi there!");', 'Hi there!'))).toBe('speak("Hi there!");');
   });
 
   it('recognizes talk-only programs', () => {
@@ -41,7 +43,7 @@ describe('compactAssistantContent', () => {
   });
 
   it('passes prose replies through', () => {
-    expect(compactAssistantContent({ ...msg('', 'Hello'), rawCode: undefined })).toBe('Hello');
+    expect(pastProgramResult({ ...msg('', 'Hello'), rawCode: undefined })).toBe('Hello');
   });
 });
 
@@ -91,7 +93,7 @@ describe('desktop history with programs', () => {
     expect(conversation).toEqual([{ role: 'user', content: 'Make a tip calculator' }]);
   });
 
-  it('describes past programs in the system prompt and shows the one being edited in full', async () => {
+  it('keeps every request and reply, past programs as their results, and shows the one being edited in full', async () => {
     const llm = new ScriptedLlm();
     const orchestrator = new ConversationOrchestrator({
       stateCoordinator: new StateMachineCoordinator(),
@@ -107,11 +109,10 @@ describe('desktop history with programs', () => {
     // The conversation's own turns, after the format turn
     const assistantSeen = (call: LlmGenerationOptions) =>
       call.messages.slice(FORMAT_TURNS.length).filter((m) => m.role === 'assistant').map((m) => m.content);
-    // Unrelated turn: the drawing leaves the history (so small models can't copy a summary
-    // instead of writing code) and is described in the system prompt
-    expect(assistantSeen(llm.calls[1])).toEqual([]);
-    expect(llm.calls[1].messages.slice(FORMAT_TURNS.length).map((m) => m.content)).not.toContain('draw a red circle');
-    expect(llm.calls[1].systemPrompt).toContain('- "draw a red circle": you built something on screen (6 lines)');
+    // Unrelated turn: the request stays, the drawing as what happened when it ran (no code)
+    expect(llm.calls[1].messages.slice(FORMAT_TURNS.length).map((m) => m.content)).toContain('draw a red circle');
+    expect(assistantSeen(llm.calls[1])).toEqual([expect.stringContaining('(Your program showed something on screen, 6 lines')]);
+    expect(assistantSeen(llm.calls[1]).join('\n')).not.toContain('getContext');
     // Edit turn: the program being changed is shown in full
     expect(assistantSeen(llm.calls[2])).toContain(DRAWING);
   });

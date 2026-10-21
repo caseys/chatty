@@ -331,3 +331,13 @@ describe('blank choices and spans by scope', () => {
     expect(fillBlank(prog, blank, 'amount')).toContain('speak(bill)');
   });
 });
+
+describe('names a destructuring declares', () => {
+  it('are not offered for a blank in their own statement', () => {
+    const prog = "const sounds2 = 1;\nconst play = () => {\n  const { instrument, notes } = sounds.piano || {};\n  return notes;\n};\nplay();";
+    const blank = findBlank(prog, "Can't find variable: sounds", 3)!;
+    const choices = blankChoices(prog, blank, { ids: [], fields: [] });
+    expect(choices).not.toContain('instrument');
+    expect(choices).not.toContain('notes');
+  });
+});

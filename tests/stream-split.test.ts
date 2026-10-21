@@ -92,7 +92,8 @@ describe('voicing a streaming reply', () => {
   it('does not read an explanation aloud when the reply turns out to be code', async () => {
     const { voiced } = await voicedFrom('Here is the code you asked for:\nconst bpm = 90;\nspeak("Here it is.");');
     // Only what the program says, once
-    expect(voiced.map((v) => v.text)).toEqual(['Here it is.']);
+    // (a program says "Generating." first in speech mode; the explanation is never read aloud)
+    expect(voiced.map((v) => v.text)).toEqual(['Generating.', 'Here it is.']);
   });
 
   it('shows and voices a prose reply once, after it is complete', async () => {

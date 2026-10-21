@@ -380,10 +380,16 @@ export class MinimalVoiceApp {
       if (hint) hint.textContent = this.showingRunLog ? 'code' : 'log';
     });
     // Tapping an example sends it as if typed (the tap also unlocks audio for the reply)
-    this.chatExamplesEl?.addEventListener('click', (e) => {
+    // With speech on, it also starts voice mode (listening, no welcome) so the conversation goes on by voice
+    this.chatExamplesEl?.addEventListener('click', async (e) => {
       const example = (e.target as HTMLElement).closest('.chat-example');
       if (!example || !this.chatInput || this.chatInput.disabled) return;
-      this.chatInput.value = (example.textContent ?? '').replace(/[“”]/g, '').trim();
+      const text = (example.textContent ?? '').replace(/[“”]/g, '').trim();
+      if (this.engine.isSpeechEnabled() && !this.engine.getIsListening()) {
+        await this.engine.toggleMicrophone({ greet: false });
+        this.updateUiState();
+      }
+      this.chatInput.value = text;
       this.chatInputForm?.requestSubmit();
     });
 
@@ -1167,7 +1173,9 @@ export class MinimalVoiceApp {
     if (!dialog) return Promise.resolve();
     const warning = document.getElementById('model-load-warning');
     if (warning) {
-      warning.textContent = loadProblem ? `⚠️ ${loadProblem} Choose a smaller model, then save.` : '';
+      // iPhone Safari: quitting it frees the memory a crashed tab left behind
+      const advice = isAppleMobile() ? 'Force quitting Safari may help.' : 'Choose a smaller model, then save.';
+      warning.textContent = loadProblem ? `⚠️ ${loadProblem} ${advice}` : '';
       warning.hidden = !loadProblem;
     }
     const current = this.engine.getSettings();
@@ -1594,8 +1602,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   }
 
   const installField = document.getElementById('settings-install-field');
-  if (isAppleMobile() && installField) {
-    installField.innerHTML = '<p class="settings-safari-warning" role="note">⚠️ Quality degraded on iPhone Safari</p>';
+  // Only in Safari itself: a Home Screen app (standalone) isn't Safari, and needs no workaround
+  if (isAppleMobile() && !isStandalone && installField) {
+    installField.innerHTML =
+      '<p class="settings-safari-warning" role="note">⚠️ Quality degraded on iPhone Safari' +
+      '<span class="settings-safari-hint">Save to Home Screen as a workaround. Website Menu » Share » Scroll Down » Add to Home Screen</span></p>';
     installField.hidden = false;
   }
 

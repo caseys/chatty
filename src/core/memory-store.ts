@@ -9,7 +9,7 @@ import type {
   LongTermMemoryItem,
 } from '../types/index.ts';
 // Size estimates use the same compact form the prompt uses (past programs summarized)
-import { compactAssistantContent } from './history-format.ts';
+import { pastProgramResult } from './history-format.ts';
 
 export interface CandidateMemoryProposal {
   id: string;
@@ -407,7 +407,7 @@ export class ConversationMemoryStore {
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const msg = this.messages[i];
       const textToEstimate =
-        msg.role === 'assistant' ? compactAssistantContent(msg) : msg.canonicalContent;
+        msg.role === 'assistant' ? pastProgramResult(msg) : msg.canonicalContent;
       // Fix turns are left out of prompts, so they take no room in them
       const msgTokens = fixTurns.has(msg.turnId) ? 0 : this.estimateTokens(textToEstimate);
       if (usedTokens + msgTokens > tokenBudget && selectedMessages.length >= 2) {
@@ -499,7 +499,7 @@ export class ConversationMemoryStore {
     for (const msg of this.messages) {
       if (fixTurns.has(msg.turnId)) continue;
       const textToEstimate =
-        msg.role === 'assistant' ? compactAssistantContent(msg) : msg.canonicalContent;
+        msg.role === 'assistant' ? pastProgramResult(msg) : msg.canonicalContent;
       tokens += this.estimateTokens(textToEstimate);
     }
     if (incomingQuery) {

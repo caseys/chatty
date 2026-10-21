@@ -215,7 +215,7 @@ function keepCodeLines(text: string): string[] {
       // Code written as inline markdown (`foo();`) would run as a string that does nothing
       .map((l) => l.replace(/^(\s*)`([^`]+)`\s*$/, '$1$2'))
       // …nor the "// Cause:" line, which explains the fix and isn't part of it
-      .filter((l) => !MARKER_LINE.test(l) && !INSTRUCTION_LINE.test(l) && !/^\s*```/.test(l) && !/^\s*\/\/\s*Cause\b/i.test(l))
+      .filter((l) => !MARKER_LINE.test(l) && !INSTRUCTION_LINE.test(l) && !/^\s*```/.test(l) && !/^\s*(?:\/\/\s*)?Cause\s*:/i.test(l))
   );
 }
 
@@ -371,4 +371,61 @@ export function applyFixReply(program: string, reply: string, line?: number, end
   const indent = lines[line - 1].match(/^\s*/)?.[0] ?? '';
   const fixed = code.map((l) => (l.trim() && !/^\s/.test(l) ? indent + l : l));
   return [...lines.slice(0, line - 1), ...fixed, ...lines.slice(last)].join('\n');
+}
+
+/**
+ * A whole-program fix that still uses names the program declared at its top level but left their
+ * declarations out (`sounds.piano` with `const sounds = …` gone): those declarations come back
+ * from the program, in its order, ahead of the reply. Only names nothing in the reply declares.
+ */
+export function restoreDeclarations(original: string, fixed: string): { code: string; restored: string[] } {
+  type N = { type: string; start: number; end: number; [k: string]: unknown };
+  let before: N;
+  let after: N;
+  try {
+    before = parse(original, STRICT) as unknown as N;
+    after = parse(fixed, STRICT) as unknown as N;
+  } catch {
+    return { code: fixed, restored: [] };
+  }
+  const declared = new Set<string>();
+  const used = new Set<string>();
+  const names = (pattern: N | null | undefined, into: Set<string>) => {
+    if (!pattern) return;
+    if (pattern.type === 'Identifier') into.add(pattern.name as string);
+    else if (pattern.type === 'ObjectPattern') for (const p of pattern.properties as N[]) names((p.value ?? p.argument) as N, into);
+    else if (pattern.type === 'ArrayPattern') for (const e of pattern.elements as N[]) names(e, into);
+    else if (pattern.type === 'RestElement') names(pattern.argument as N, into);
+    else if (pattern.type === 'AssignmentPattern') names(pattern.left as N, into);
+  };
+  const visit = (node: N, parent: N | null) => {
+    if (node.type === 'VariableDeclarator') names(node.id as N, declared);
+    if ((node.type === 'FunctionDeclaration' || node.type === 'ClassDeclaration') && node.id) names(node.id as N, declared);
+    if (/Function/.test(node.type)) for (const p of (node.params as N[]) ?? []) names(p, declared);
+    if (node.type === 'CatchClause' && node.param) names(node.param as N, declared);
+    if (node.type === 'Identifier') {
+      const isProperty =
+        (parent?.type === 'MemberExpression' && parent.property === node && !parent.computed) ||
+        (parent?.type === 'Property' && parent.key === node && !parent.computed && !parent.shorthand);
+      if (!isProperty) used.add(node.name as string);
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && visit(child as N, node);
+      else if (value && typeof value === 'object' && typeof (value as N).type === 'string') visit(value as N, node);
+    }
+  };
+  visit(after, null);
+  const missing = [...used].filter((n) => !declared.has(n));
+  const restored: string[] = [];
+  const parts: string[] = [];
+  for (const statement of before.body as N[]) {
+    const own = new Set<string>();
+    if (statement.type === 'VariableDeclaration') for (const d of statement.declarations as N[]) names(d.id as N, own);
+    if ((statement.type === 'FunctionDeclaration' || statement.type === 'ClassDeclaration') && statement.id) names(statement.id as N, own);
+    const needed = [...own].filter((n) => missing.includes(n));
+    if (needed.length === 0) continue;
+    restored.push(...needed);
+    parts.push(original.slice(statement.start, statement.end));
+  }
+  return restored.length ? { code: `${parts.join('\n')}\n${fixed}`, restored } : { code: fixed, restored };
 }

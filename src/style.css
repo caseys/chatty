@@ -2392,6 +2392,14 @@ body {
   display: block;
 }
 
+/* The way around it, smaller, under the warning */
+.settings-safari-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
 /* iPhone: shown in Settings where installing would be */
 .settings-safari-warning {
   margin: 0;

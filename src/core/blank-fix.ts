@@ -444,9 +444,13 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
         const owner = binding ? tree.parent.get(binding) : undefined;
         // A const/let/class not yet made where the blank is (declared by the failing statement
         // itself, or later): using it there throws
-        if (owner && owner.type !== 'FunctionDeclaration' && owner.end >= blank.spans[0].start && !/Function/.test(owner.type) && owner.type !== 'CatchClause') {
-          const declaration = tree.parent.get(owner);
-          if (owner.type === 'ClassDeclaration' || (declaration?.type === 'VariableDeclaration' && declaration.kind !== 'var')) continue;
+        // (including names a destructuring pattern declares: `const { a } = b`)
+        if (owner?.type === 'ClassDeclaration' && owner.end >= blank.spans[0].start) continue;
+        let declarator: AnyNode | undefined = binding;
+        while (declarator && declarator.type !== 'VariableDeclarator' && !/Function|Program/.test(declarator.type)) declarator = tree.parent.get(declarator);
+        if (declarator?.type === 'VariableDeclarator' && declarator.end >= blank.spans[0].start) {
+          const declaration = tree.parent.get(declarator);
+          if (declaration?.type === 'VariableDeclaration' && declaration.kind !== 'var') continue;
         }
         // Declared by a function or class declaration (its name), not one of its parameters
         const callable = (owner?.type === 'FunctionDeclaration' || owner?.type === 'ClassDeclaration') && owner.id === binding;

@@ -288,6 +288,24 @@ function repairLine(code: string, line: number, repair: (text: string) => string
  * Object and declaration slips small models make, repaired by rule: `{ notes = 'C4' }` (= for :),
  * `{ notes: G major }` (words left unquoted), and a name declared twice
  */
+/**
+ * A program that doesn't parse only because one line ends in a stray quote or backtick (a reply's
+ * `speak("Done.");` with markdown's closing backtick kept): that character goes, when removing it
+ * alone makes the whole program parse. Lines are tried from the end; the first that works wins.
+ */
+export function dropStrayQuote(code: string): { code: string; line: number } | null {
+  if (tryParse(code)) return null;
+  const lines = code.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const text = lines[i].replace(/\s+$/, '');
+    const last = text.slice(-1);
+    if (!/[`'"]/.test(last) || (text.split(last).length - 1) % 2 === 0) continue;
+    const candidate = [...lines.slice(0, i), text.slice(0, -1), ...lines.slice(i + 1)].join('\n');
+    if (tryParse(candidate)) return { code: candidate, line: i + 1 };
+  }
+  return null;
+}
+
 function syntaxSlip(code: string, error: string, errorLine?: number): ErrorHint | null {
   const line = errorLine ?? 0;
   if (/shorthand property initializer|Expected a ':' following the property name/i.test(error)) {
@@ -302,6 +320,8 @@ function syntaxSlip(code: string, error: string, errorLine?: number): ErrorHint 
     );
     if (quoted) return quoted;
   }
+  const stray = dropStrayQuote(code);
+  if (stray) return { correction: { code: stray.code, note: `a stray quote at the end of line ${stray.line} → removed` } };
   const twice = error.match(/Identifier '([^']+)' has already been declared/) ?? error.match(/Cannot declare a (?:const|let) variable twice: '([^']+)'/);
   if (twice) {
     const name = twice[1].replace(/\$/g, '\\$');
@@ -417,6 +437,35 @@ function isRequire(node: AnyNode | null | undefined): boolean {
   }
   if (node.type === 'MemberExpression') return isRequire(node.object as AnyNode);
   return false;
+}
+
+/**
+ * Imports of three.js, which Chatty provides as THREE (javascript-runtime.ts): `import * as T
+ * from 'three'` becomes `const T = THREE;`, `import { Scene, Mesh as M } from 'three'` becomes
+ * `const { Scene, Mesh: M } = THREE;`. Programs run as scripts, where an import can't stand.
+ */
+export function provideThree(code: string): { code: string; changed: boolean } {
+  let changed = false;
+  const out = code.replace(/^[ \t]*import\s+([^;\n]+?)\s+from\s+(['"])three\2[ \t]*;?[ \t]*$/gm, (line, clause: string) => {
+    const star = clause.match(/^\*\s+as\s+([A-Za-z_$][\w$]*)$/);
+    if (star) {
+      changed = true;
+      return star[1] === 'THREE' ? '' : `const ${star[1]} = THREE;`;
+    }
+    const named = clause.match(/^\{([^}]*)\}$/);
+    if (named) {
+      changed = true;
+      const parts = named[1].split(',').map((p) => p.trim()).filter(Boolean).map((p) => p.replace(/\s+as\s+/, ': '));
+      return `const { ${parts.join(', ')} } = THREE;`;
+    }
+    const def = clause.match(/^([A-Za-z_$][\w$]*)$/);
+    if (def) {
+      changed = true;
+      return def[1] === 'THREE' ? '' : `const ${def[1]} = THREE;`;
+    }
+    return line;
+  });
+  return { code: out, changed };
 }
 
 /**

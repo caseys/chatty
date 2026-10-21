@@ -263,3 +263,29 @@ describe("a program that declares one of Chatty's helpers", () => {
     expect(errorHint('const total = 1;\nconst total = 2;', "Identifier 'total' has already been declared", 2)?.text ?? '').not.toContain('ready-made');
   });
 });
+
+describe('a stray quote ending a line', () => {
+  it('is removed when that alone makes the program parse', async () => {
+    const { dropStrayQuote } = await import('../src/core/error-hints.ts');
+    const code = 'const bpm = 60;\nout.send({ notes: "G major" });\nspeak("Playing.");`';
+    expect(dropStrayQuote(code)).toEqual({ code: 'const bpm = 60;\nout.send({ notes: "G major" });\nspeak("Playing.");', line: 3 });
+  });
+
+  it('leaves a program that parses, and one a quote alone can’t fix, alone', async () => {
+    const { dropStrayQuote } = await import('../src/core/error-hints.ts');
+    expect(dropStrayQuote('const s = `a`;')).toBeNull();
+    expect(dropStrayQuote('const a = (1;\nspeak("x");`')).toBeNull();
+  });
+});
+
+describe('markdown left on code lines', () => {
+  it('is removed only when that makes the program parse', async () => {
+    const { inspectExecutableCode, withoutMarkdownLeftovers } = await import('../src/tools/javascript-runtime.ts');
+    // As in a real reply: the program fenced, then the speak line glued to the closing fence
+    const reply = '```javascript\nconst bpm = 60;\nout.send({ notes: "G major" });\n```speak("Playing.");`';
+    expect(inspectExecutableCode(reply).code).toBe('const bpm = 60;\nout.send({ notes: "G major" });\nspeak("Playing.");');
+    expect(withoutMarkdownLeftovers('## Music\n**Code:**\n`out.send({ notes: "C4" });`')).toBe('out.send({ notes: "C4" });');
+    // A template literal that parses is left alone
+    expect(inspectExecutableCode('const s = `a`;\nspeak(s);').code).toContain('const s = `a`;');
+  });
+});

@@ -240,6 +240,18 @@ export type LastAction =
  * "make it bigger", "add a sun", "change the color to blue": a change to what the last
  * program made, rather than a new request.
  */
+/**
+ * The user says the last program didn't do it ("it didn't work", "no sound", "still the same",
+ * "nothing happened"): the program it is about goes with the request, like an edit's
+ */
+export function isComplaint(text: string): boolean {
+  const t = text.toLowerCase().replace(/[’']/g, "'").trim();
+  return (
+    /\b(?:didn't|did not|doesn't|does not|isn't|is not|wasn't|won't|can't|cannot|not|never|still|no)\b[^.?!]{0,30}\b(?:work|working|play|playing|sound|hear|show|showing|happen|happening|load|loop|looping|move|moving|change|changing|run|running|start|right|correct|fixed)\b/.test(t) ||
+    /^(?:nothing (?:happen(?:ed|s)?|plays?|played|shows?|showed)|no sound|it's broken|broken|wrong|that's wrong|same thing|still the same|try again|fix it)\b/.test(t)
+  );
+}
+
 export function isFollowUpEdit(text: string): boolean {
   const t = text.toLowerCase().trim();
   // Questions about it ("tell me more about it", "why is it red?") are conversation, not edits

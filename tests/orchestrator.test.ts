@@ -983,6 +983,7 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         'gemma-4-e4b-it-web',
         'lfm2.5-230m',
         'smollm2-360m',
+        'gemma-3-1b',
         'llama-3.2-1b',
         'qwen2.5-coder-0.5b',
         'qwen2.5-0.5b',
@@ -992,6 +993,7 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         'smollm2-1.7b',
         'qwen3-1.7b',
         'qwen3.5-2b',
+        'gemma-2-2b',
         'llama-3.2-3b',
         'qwen2.5-coder-3b',
         'ministral-3-3b',
@@ -1335,7 +1337,9 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         .slice(FORMAT_TURNS.length)
         .find((m: { role: string }) => m.role === 'assistant');
       expect(assistantPromptTurn).toBeDefined();
-      expect(assistantPromptTurn.content).toBe(jsCodeFromModel);
+      // A past program is in the history as what it said and what happened, not as its code
+      expect(assistantPromptTurn.content).toContain('speak("Playing a melodic chord for you.");');
+      expect(assistantPromptTurn.content).toContain('(Your program played sound');
     });
 
     it('handles iframe execution timeout safely without falling back to main-thread eval', async () => {
@@ -1756,7 +1760,8 @@ describe('Orchestrator turn-lifecycle regressions', () => {
       },
     });
     await orchestrator.submitUserInput('Say total');
-    expect(spoken).toEqual(['The total is 42 today.']);
+    // (a program says "Generating." first in speech mode)
+    expect(spoken).toEqual(['Generating.', 'The total is 42 today.']);
   });
 
   it('turn finalizes when speech output is disabled mid-playback', async () => {

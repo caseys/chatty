@@ -244,7 +244,13 @@ describe('a fix that loses the program', () => {
     const later = llm.turns.at(-1)!;
     const seen = later.messages.map((m) => m.content).join('\n');
     expect(seen).not.toMatch(/Your last program failed|Sorry about that|corrected program|let me fix/i);
-    expect(later.messages.slice(FORMAT_TURNS.length)).toEqual([{ role: 'user', content: 'how are you?' }]);
+    // The request stays, its program as what happened when it ran (not its code)
+    const kept = later.messages.slice(FORMAT_TURNS.length);
+    expect(kept[0]).toEqual({ role: 'user', content: 'draw a red circle' });
+    expect(kept[1].role).toBe('assistant');
+    expect(kept[1].content).toContain('it failed: boom is not defined');
+    expect(kept[1].content).not.toContain('getContext');
+    expect(kept.at(-1)).toEqual({ role: 'user', content: 'how are you?' });
   });
 
   it('lets a fix that still draws run, and makes it the current program', async () => {
@@ -349,9 +355,11 @@ describe('what a follow-up turn sends the desktop model', () => {
     await orchestrator.submitUserInput('what is one plus two?');
     await orchestrator.submitUserInput('and two plus two?');
 
-    // The turn after a program moves it into the system prompt (once); from then on, turns append
-    const [, b, c, d] = llm.turns;
-    expect(b.systemPrompt).toContain('you built something on screen');
+    // The program stays in the history as what happened when it ran; the system prompt never
+    // changes, and each turn only appends
+    const [a, b, c, d] = llm.turns;
+    expect(b.systemPrompt).toBe(a.systemPrompt);
+    expect(b.messages.map((m) => m.content).join('\n')).toContain('(Your program showed something on screen');
     expect(c.systemPrompt).toBe(b.systemPrompt);
     expect(d.systemPrompt).toBe(b.systemPrompt);
     expect(c.messages).toEqual([...b.messages, reply('speak("I am well.");'), { role: 'user', content: 'what is one plus two?' }]);
@@ -1217,4 +1225,83 @@ describe('the blank stage', () => {
     expect(trialled.length).toBe(1); // only the fix's own test run: no blank candidates
     expect(llm.turns[1].fixShape).toBe('function'); // the lines that don't parse, as before
   });
+});
+
+describe('which turns are about the last program, and which rules a request gets', () => {
+  it('counts complaints as about the last program, and ordinary chat not', async () => {
+    const { isComplaint } = await import('../src/core/phone-pipeline.ts');
+    for (const t of ["it didn't work", 'no sound', 'still the same', 'nothing happened', "it doesn't loop", 'the car won’t move']) expect(isComplaint(t), t).toBe(true);
+    for (const t of ['how are you?', 'draw a cat', 'thanks, that works', 'play it again']) expect(isComplaint(t), t).toBe(false);
+  });
+
+  it('sends the last program with a complaint, with a note saying so', async () => {
+    const llm = new QueueLlm([DRAWING, 'speak("Fixed.");']);
+    const orchestrator = orchestratorFor(llm);
+    await orchestrator.submitUserInput('draw a red circle');
+    await orchestrator.submitUserInput("it didn't work");
+    const sent = llm.turns[1].messages;
+    expect(sent.some((m) => m.role === 'assistant' && m.content === DRAWING)).toBe(true);
+    expect(sent.at(-1)!.content).toContain('did not do what they asked');
+  });
+
+  it('gives three.js to games and 3D, and the facts rule to questions but not arithmetic', () => {
+    const three = 'THREE (three.js) is ready to use';
+    expect(promptRules('Build a racing game', true)).toContain(three);
+    expect(promptRules('render a scene with a 3D cube', true)).toContain(three);
+    expect(promptRules('Draw a cat', true)).not.toContain(three);
+    const facts = 'For facts you lack';
+    expect(promptRules('Who was Ada Lovelace?', true)).toContain(facts);
+    expect(promptRules("What's 15 percent of 84?", true)).not.toContain(facts);
+    expect(promptRules('Build a game where the car is steered by arrow keys', true)).not.toContain(facts);
+    expect(promptRules('Build a racing game', true)).not.toContain('Use HTML and CSS for interfaces');
+  });
+});
+
+describe('a program that does nothing the request asked for', () => {
+  it('playing nothing for a sound request is its error, and a fix follows', async () => {
+    const silent = 'const sounds = {};\nfunction playNote(n) { sounds[n] = 1; }\nplayNote("G");\nspeak("Playing.");';
+    const llm = new QueueLlm([silent, '// Cause: never played\nout.send({ notes: "G major" });']);
+    const { runtime } = fakeRuntime([{}, {}]);
+    let uses = 0;
+    Object.assign(runtime, { soundUseCount: () => uses });
+    const statuses: string[] = [];
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime, events: { onRunStatus: (_id, s) => statuses.push(s.text) } });
+    await orchestrator.submitUserInput('Play a G major chord');
+    await vi.waitFor(() => expect(llm.turns.length).toBe(2), { timeout: 10000 });
+    expect(statuses.some((t) => t.includes('The program played nothing'))).toBe(true);
+    expect(llm.turns[1].messages.at(-1)!.content).toContain('out.send');
+    uses = 1;
+  }, 20000);
+
+  it('a program that sounds is left alone', async () => {
+    const llm = new QueueLlm(['out.send({ notes: "G major" });\nspeak("Playing.");']);
+    const { runtime } = fakeRuntime([{}]);
+    let uses = 0;
+    Object.assign(runtime, {
+      soundUseCount: () => uses,
+      execute: async () => {
+        uses++;
+        return { success: true, logs: [], executionTimeMs: 1, mode: 'iframe' };
+      },
+    });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Play a G major chord');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(llm.turns.length).toBe(1);
+  });
+});
+
+describe('speech mode says what is happening', () => {
+  it('says "Generating." for a program and "Fixing." for each fix try, and nothing for a talk-only answer', async () => {
+    const spoken: string[] = [];
+    const llm = new QueueLlm(['speak("Hello!");', DRAWING, '// Cause: x\n  ctx.fill();']);
+    const { runtime } = fakeRuntime([{}, { error: 'boom is not defined', errorLine: 3 }, {}]);
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, enableSpeechOutput: true, ttsProvider: countingTts(spoken), javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('hi');
+    expect(spoken.join(' ')).not.toContain('Generating');
+    await orchestrator.submitUserInput('draw a red circle');
+    await vi.waitFor(() => expect(llm.turns.length).toBe(3), { timeout: 10000 });
+    await vi.waitFor(() => expect(spoken.join(' ')).toContain('Fixing'), { timeout: 5000 });
+    expect(spoken.join(' ')).toContain('Generating');
+  }, 20000);
 });

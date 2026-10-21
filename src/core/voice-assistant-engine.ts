@@ -45,8 +45,7 @@ import {
   saveSettingsToStorage,
   loadSpeechChoice,
   loadChatModelChoice,
-  resolvePhoneChatModelId,
-} from './settings.ts';
+  resolvePhoneChatModelId } from './settings.ts';
 import type {
   BrowserCapabilities,
   ConversationMessage,
@@ -243,6 +242,10 @@ export class VoiceAssistantEngine {
 
     // The run log is kept per chat
     setRunLogChat(() => this.activeConversationId);
+    // A welcome asked for during loading is written and spoken once loading is done
+    this.stateCoordinator.subscribe(() => {
+      if (this.greetWhenLoaded && this.modelsLoaded()) queueMicrotask(() => this.greetWhenLoaded && this.greet());
+    });
     // The audio session follows the mic and what plays (see updateAudioSession)
     this.stateCoordinator.subscribe((snap) => {
       if (snap.microphone === this.lastSessionMic && snap.playback === this.lastSessionPlayback) return;
@@ -260,7 +263,12 @@ export class VoiceAssistantEngine {
     }
     this.jsRuntime = new JavascriptRuntime({
       mode: 'iframe',
-      getSharedAudioContext: () => this.audioSubsystem.getAudioContext(),
+      // A program that asks for audio before the first tap gets the one shared context too (made
+      // now, paused until a tap), never one of its own
+      getSharedAudioContext: () => {
+        if (!this.audioSubsystem.getAudioContext()) void this.audioSubsystem.ensureAudioContext().catch(() => {});
+        return this.audioSubsystem.getAudioContext();
+      },
       onProgramError: (message, line) => this.orchestrator.reportProgramError(message, line),
       onProgramAudio: (sounding) => {
         this.programSounding = sounding;
@@ -787,9 +795,23 @@ export class VoiceAssistantEngine {
     this.greetWithoutSpeech();
   }
 
-  /** Adds the welcome message to an empty chat, spoken too when speech is on. */
+  /** A greeting asked for while models load waits here until they're done */
+  private greetWhenLoaded = false;
+
+  /** The chat model is ready and, with speech on, the voice has finished loading (or failed) */
+  private modelsLoaded(): boolean {
+    const { llm, tts } = this.stateCoordinator.getSnapshot().models;
+    return llm === 'ready' && (!this.speechEnabled || (tts !== 'downloading' && tts !== 'initializing'));
+  }
+
+  /** Adds the welcome message to an empty chat, spoken too when speech is on, once models are loaded. */
   private greet(): void {
     if (this.hasHistory()) return;
+    if (!this.modelsLoaded()) {
+      this.greetWhenLoaded = true;
+      return;
+    }
+    this.greetWhenLoaded = false;
     const turnId = `welcome_${Date.now()}`;
     const greeting = takeWelcomeMessage();
     const welcomeMsg: ConversationMessage = {
@@ -880,7 +902,8 @@ export class VoiceAssistantEngine {
     return this.chatModelId.includes('e4b') ? 'Gemma 4 E4B' : 'Gemma 4 E2B';
   }
 
-  async toggleMicrophone(): Promise<void> {
+  /** Start/Stop. `greet: false` starts listening without the welcome (a suggestion was tapped) */
+  async toggleMicrophone(options?: { greet?: boolean }): Promise<void> {
     const snapshot = this.stateCoordinator.getSnapshot();
     const isBusy =
       snapshot.interaction === 'generating' ||
@@ -944,7 +967,7 @@ export class VoiceAssistantEngine {
       this.events.onStatusChange?.(this.nativeStt ? 'Listening…' : this.listeningStatus());
 
       // Greet on Start when the chat is empty (audio system is now set up)
-      this.greet();
+      if (options?.greet !== false) this.greet();
     } catch {
       this.isListening = false;
       this.stateCoordinator.setMicrophoneState('unavailable');
@@ -1509,9 +1532,9 @@ export class VoiceAssistantEngine {
     this.jsRuntime.setLlmProvider(this.chatLlm);
   }
 
-  /** Chat models the settings picker offers on this device (phones get phone-sized ones only). */
+  /** Every chat model, on every device, smallest download first (names mark the phone-sized ones) */
   getChatModelOptions(): ModelOptionItem[] {
-    return SUPPORTED_CHAT_MODELS.filter((m) => !this.isPhone || m.phone);
+    return [...SUPPORTED_CHAT_MODELS].sort((a, b) => (a.downloadBytes ?? Infinity) - (b.downloadBytes ?? Infinity));
   }
 
   async setChatModelId(modelId: string): Promise<void> {

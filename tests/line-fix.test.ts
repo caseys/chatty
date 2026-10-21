@@ -226,3 +226,21 @@ describe('fix requests for long programs show a short context', () => {
     expect(fixed[0]).toBe('const rate = 0.2;');
   });
 });
+
+describe('a whole-program fix that drops declarations it still uses', () => {
+  it('gets them back from the program, and leaves alone what the reply declares itself', async () => {
+    const { restoreDeclarations } = await import('../src/core/line-fix.ts');
+    const original = "const bpm = 100;\nconst sounds = { piano: { notes: [] } };\nconst play = () => sounds.piano.notes.length;\nplay();";
+    const fixed = "const play = () => sounds.piano.notes.length + bpm;\nconst bpm = 120;\nplay();";
+    const out = restoreDeclarations(original, fixed);
+    expect(out.restored).toEqual(['sounds']);
+    expect(out.code.startsWith('const sounds = { piano: { notes: [] } };\n')).toBe(true);
+    expect(out.code).not.toContain('const bpm = 100');
+  });
+
+  it('drops a stray "Cause:" line without the comment marks', () => {
+    const fixed = applyFixReply('const a = 1;\nboom();', '// Cause: x\nCause: the call is wrong\nbang();', 2);
+    expect(fixed).not.toContain('Cause');
+    expect(fixed).toContain('bang();');
+  });
+});

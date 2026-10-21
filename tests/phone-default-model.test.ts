@@ -40,10 +40,11 @@ describe('phone default chat model', () => {
     expect(resolvePhoneChatModelId(loadChatModelChoice())).toBe('llama-3.2-1b');
   });
 
-  it('replaces a saved model the phone cannot run', () => {
+  it('keeps any model the user chose (every model is offered on every device), and replaces an unknown one', () => {
     saveSettingsToStorage({ chatModelId: 'qwen3-4b' });
-    expect(resolvePhoneChatModelId(loadChatModelChoice())).toBe('qwen3-0.6b');
-    expect(resolvePhoneChatModelId('gemma-4-e4b-it-web')).toBe('qwen3-0.6b');
+    expect(resolvePhoneChatModelId(loadChatModelChoice())).toBe('qwen3-4b');
+    expect(resolvePhoneChatModelId('gemma-4-e4b-it-web')).toBe('gemma-4-e4b-it-web');
+    expect(resolvePhoneChatModelId('no-such-model')).toBe('qwen3-0.6b');
   });
 
   it('reads a model from settings saved before choices were recorded', () => {

@@ -11,6 +11,20 @@ import { playNotesHelper } from './music-tool.ts';
 import { fetchWikipediaSummary } from './web-tools.ts';
 import type { StandIn } from '../core/error-hints.ts';
 import { elementKinds } from './element-kinds.ts';
+
+/**
+ * three.js for 3D programs: a program that uses THREE finds it ready, as a global in its page.
+ * It's bundled with Chatty (works offline) and loads only the first time a program uses it.
+ */
+async function withThree(code: string, win: Window | null): Promise<void> {
+  if (!win || !/\bTHREE\b/.test(code)) return;
+  try {
+    const THREE = await import('three');
+    (win as unknown as { THREE?: unknown }).THREE = THREE;
+  } catch (err) {
+    console.warn('three.js could not load:', err);
+  }
+}
 import { withActivity } from '../core/activity-breadcrumbs.ts';
 import { silenceSoftwareMidi, softwareMidiAccess } from '../audio/software-midi.ts';
 
@@ -603,6 +617,23 @@ function normalizeFences(text: string): string {
 const HTML_START =
   /^<(?:!doctype\b|!--|(?:html|head|body|div|span|p|h[1-6]|canvas|svg|style|script|button|input|form|label|section|main|header|footer|nav|article|ul|ol|li|table|img|a|pre|br|hr|center|select|textarea|video|audio|b|i|strong|em|small)[\s>/])/i;
 
+/** Markdown on code lines, removed line by line (see inspectExecutableCode, step 2b) */
+export function withoutMarkdownLeftovers(text: string): string {
+  return text
+    .split('\n')
+    .filter((line) => !/^\s*(?:#{1,6}\s|\*\*[^*]+\*\*:?\s*$|>\s)/.test(line))
+    .map((line) =>
+      line
+        // ```speak("Done."); → speak("Done.");
+        .replace(/^(\s*)```(?:(?:javascript|js|typescript|ts|html|css)(?![\w$]))?\s*(?=\S)/i, '$1')
+        // `speak("Done.");` → speak("Done.");
+        .replace(/^(\s*)`([^`]+)`\s*$/, '$1$2')
+        // speak("Done.");` → speak("Done.");
+        .replace(/([;)}\]])\s*`+\s*$/, '$1')
+    )
+    .join('\n');
+}
+
 export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
   let cleaned = normalizeFences((rawText || '').trim());
 
@@ -624,6 +655,14 @@ export function inspectExecutableCode(rawText: string): PreparedExecutableCode {
 
   // 2. Remove any rogue <|...|> or <tool_call> tags
   cleaned = cleaned.replace(/<\|[a-z0-9_]+\|?>/gi, '').replace(/<\/?\|?tool_call\|?>/gi, '').trim();
+
+  // 2b. Markdown left on code lines (a fence glued to code, a line in `backticks`, a closing
+  // backtick, a heading or **bold** line): removed only when the program doesn't parse as it is
+  // and does without them
+  if (!parsesAsJs(cleaned)) {
+    const tidy = withoutMarkdownLeftovers(cleaned);
+    if (tidy !== cleaned && parsesAsJs(tidy)) cleaned = tidy;
+  }
 
   // 3. If empty, speak a polite ready message
   if (!cleaned) {
@@ -794,6 +833,7 @@ export class JavascriptRuntime {
    * same document). Programs play into a gain node that the next screen wipe disconnects.
    */
   private programAudio(): { context: AudioContext; output: AudioNode } | null {
+    this.soundUses++;
     const context = this.getSharedAudioContext?.();
     if (!context) {
       this.onRunLog?.('error', 'sound: no audio yet (it starts with a tap or the Start button)');
@@ -1045,6 +1085,12 @@ export class JavascriptRuntime {
       return [];
     }
   }
+
+  /** How many times programs have asked for sound (Web Audio, MIDI, out, playNotes) so far */
+  soundUseCount(): number {
+    return this.soundUses;
+  }
+  private soundUses = 0;
 
   hasVisualContent(): boolean {
     try {
@@ -1616,7 +1662,12 @@ export class JavascriptRuntime {
       try {
         shared = __chattyHost.__chattySharedAudio ? __chattyHost.__chattySharedAudio() : null;
       } catch {}
-      if (!shared) return new NativeAudioContext(options);
+      // No shared audio at all (no Web Audio in the host): one real context for the whole page,
+      // however many times the program asks
+      if (!shared) {
+        if (!window.__chattyOwnAudio) window.__chattyOwnAudio = new NativeAudioContext(options);
+        return window.__chattyOwnAudio;
+      }
       const local = {};
       const contextProxy = new Proxy(shared.context, {
         get(target, prop) {
@@ -2424,6 +2475,7 @@ export class JavascriptRuntime {
     let result: unknown;
     try {
       if (data.type === 'playNotes') {
+        this.soundUses++;
         result = await playNotesHelper(
           String(data.notes ?? ''),
           data.tempo,
@@ -2516,7 +2568,9 @@ export class JavascriptRuntime {
       }, this.timeoutMs);
 
       this.pendingRuns.set(reqId, { options, spokenTexts, timer, finish: settle });
-      iframe.contentWindow?.postMessage({ type: 'execute', id: reqId, code, idKinds: elementKinds(code) }, '*');
+      void withThree(code, iframe.contentWindow).then(() =>
+        iframe.contentWindow?.postMessage({ type: 'execute', id: reqId, code, idKinds: elementKinds(code) }, '*')
+      );
     });
   }
 
@@ -2581,7 +2635,9 @@ export class JavascriptRuntime {
         clearTimeout(readyTimer);
         stopTimer = setTimeout(() => finish(null), ms);
         try {
-          iframe.contentWindow?.postMessage({ type: 'execute', id, code, idKinds: elementKinds(code) }, '*');
+          void withThree(code, iframe.contentWindow).then(() =>
+            iframe.contentWindow?.postMessage({ type: 'execute', id, code, idKinds: elementKinds(code) }, '*')
+          );
         } catch (err) {
           finish(err instanceof Error ? err.message : String(err));
         }
