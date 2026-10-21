@@ -689,8 +689,9 @@ export class SharedAudioSubsystem {
       // At once (the next block the context renders), unless one is still sounding: no delay of its
       // own on top of the context's 'balanced' output latency
       const at = Math.max(context.currentTime, this.nextSoundAt);
-      // Sounds piling up (a burst of events): drop this one rather than play it long after
-      if (at - context.currentTime > 1) return;
+      // Sounds piling up (a burst of events: a button, a program ending and the next starting):
+      // one that would wait behind more than a quarter second of others is dropped, not stacked
+      if (at - context.currentTime > 0.25) return;
       try {
         const { next, end } = playInterfaceSound(context, context.destination, sound, at);
         this.nextSoundAt = next;

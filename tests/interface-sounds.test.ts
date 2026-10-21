@@ -121,9 +121,9 @@ describe('SharedAudioSubsystem interface sounds', () => {
     expect(Math.min(...starts.slice(1))).toBeGreaterThan(starts[0]);
     const before = ctx.oscillators.length;
     for (let i = 0; i < 20; i++) audio.playInterfaceSound('chat');
-    // A backlog of more than a second is dropped
+    // A backlog of more than a quarter second is dropped
     const latest = Math.max(...ctx.oscillators.map((o) => o.start.mock.calls[0][0] as number));
-    expect(latest).toBeLessThanOrEqual(1.2);
+    expect(latest).toBeLessThanOrEqual(0.4);
     expect(ctx.oscillators.length).toBeLessThan(before + 20);
   });
 

@@ -292,11 +292,14 @@ export class VoiceAssistantEngine {
         this.updateAudioSession();
         this.events.onProgramSound?.(sounding);
       },
-      onProgramActivity: (active) => {
+      onProgramActivity: (active, cleared) => {
         this.programRunning = active;
         this.updateAudioSession();
         this.events.onProgramActivity?.(active);
-        if (!active && this.programReturned) this.programEnded();
+        if (active) this.programKeptRunning = true;
+        // Cleared for a new run or by Stop: it didn't end by itself (the button has its own sound)
+        if (!active && cleared) this.programEnded(false);
+        else if (!active && this.programReturned) this.programEnded();
       },
       onDownloadableChange: (ready) => this.events.onProgramDownloadable?.(ready),
       onRunLog: (kind, text) => {
@@ -1014,10 +1017,12 @@ export class VoiceAssistantEngine {
   private lastSessionMic: string | null = null;
   private lastSessionPlayback: string | null = null;
   private lastSessionWorking = false;
-  // A program's run, for its start and end sounds: it started, its top level has finished, and
-  // the check for an end once its pending work is reported
+  // A program's run, for its start and end sounds: it started, its top level has finished, it
+  // kept running past its top level (timers, frames, a loop), and the check for an end once its
+  // pending work is reported
   private programLive = false;
   private programReturned = false;
+  private programKeptRunning = false;
   private programEndCheck: ReturnType<typeof setTimeout> | null = null;
 
   /** A short, quiet interface sound (interface-sounds.ts). Never throws: no sound when the audio isn't ready */
@@ -1034,6 +1039,7 @@ export class VoiceAssistantEngine {
     this.programEndCheck = null;
     this.programLive = true;
     this.programReturned = false;
+    this.programKeptRunning = false;
     this.playInterfaceSound('start');
   }
 
@@ -1051,13 +1057,20 @@ export class VoiceAssistantEngine {
     }, 400);
   }
 
-  private programEnded(): void {
+  /**
+   * The program is over. Its end sound plays only when it kept running (an animation, a loop,
+   * timers) and then stopped by itself: a drawing done at once has nothing to end, and one
+   * cleared away (a new run, Replay, Stop) is followed by its own sounds
+   */
+  private programEnded(sound = true): void {
     if (this.programEndCheck) clearTimeout(this.programEndCheck);
     this.programEndCheck = null;
     if (!this.programLive) return;
+    const keptRunning = this.programKeptRunning;
     this.programLive = false;
     this.programReturned = false;
-    this.playInterfaceSound('end');
+    this.programKeptRunning = false;
+    if (sound && keptRunning) this.playInterfaceSound('end');
   }
 
   /**

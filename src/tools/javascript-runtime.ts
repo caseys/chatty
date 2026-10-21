@@ -100,7 +100,8 @@ export interface JavascriptRuntimeOptions {
   /** Everything programs do that can be overwritten later: each program run, speak(), clear(), errors */
   onRunLog?: (kind: RunLogKind, text: string) => void;
   /** A program has timers or async code pending (true), or its last one ended (false) */
-  onProgramActivity?: (active: boolean) => void;
+  /** Whether the program has work pending; `cleared` when it ended because the card was cleared (a new run, Stop), not by itself */
+  onProgramActivity?: (active: boolean, cleared?: boolean) => void;
   /** The program in the card can be downloaded (it ran 2.5 s without an error), or no longer can */
   onDownloadableChange?: (ready: boolean) => void;
 }
@@ -1066,7 +1067,7 @@ export class JavascriptRuntime {
   private getSharedAudioContext?: () => AudioContext | null;
   private onProgramError?: (message: string, line?: number) => void;
   private onProgramAudio?: (sounding: boolean) => void;
-  private onProgramActivity?: (active: boolean) => void;
+  private onProgramActivity?: (active: boolean, cleared?: boolean) => void;
   private onDownloadableChange?: (ready: boolean) => void;
   /** The program in the card, and whether it has run cleanly long enough to download */
   private downloadable: { code: string; timer: ReturnType<typeof setTimeout> | null } | null = null;
@@ -1346,7 +1347,7 @@ export class JavascriptRuntime {
     this.silenceProgramAudio();
     // The program's timers go with its page
     this.programActive = false;
-    this.onProgramActivity?.(false);
+    this.onProgramActivity?.(false, true);
     this.cardShadow?.remove();
     this.cardShadow = null;
     if (this.activeIframe) {
