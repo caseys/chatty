@@ -349,3 +349,28 @@ describe('a ; written inside a color', () => {
     expect(unusableAssignments(ctx("ctx.font = '12px serif;';"), scope)).toEqual([]);
   });
 });
+
+describe('a bare number written as text for a length', () => {
+  // The real lines from Qwen2.5 0.5B's tic-tac-toe: grid.style.width = "200", which the browser ignores
+  const CSS = {
+    supports: (property: string, value: string) => {
+      if (value === 'inherit') return property === 'width' || property === 'line-height' || property === 'z-index';
+      if (property === 'width') return /^(?:0|-?\d+(?:\.\d+)?(?:px|em|%))$/.test(value);
+      return /^\d+(?:\.\d+)?$/.test(value);
+    },
+  };
+  const scope = { CSS, document: { createElement: () => ({ style: {} }) } } as unknown as Record<string, unknown>;
+
+  it('gets px as a correction, in the quote it was written with', () => {
+    const code = 'const grid = document.createElement("div");\ngrid.style.width = "200";';
+    const [issue] = unusableAssignments(code, scope);
+    expect(issue.fix?.text).toBe('"200px"');
+    expect(applyAssignmentFixes(code, [issue])).toContain('grid.style.width = "200px";');
+  });
+
+  it('leaves 0, a unit already there, a number that is the value (line-height, z-index) and a number given as a number alone', () => {
+    for (const body of ['grid.style.width = "0";', 'grid.style.width = "200px";', 'grid.style.lineHeight = "1.5";', 'grid.style.zIndex = "10";', 'grid.style.width = 200;']) {
+      expect(unusableAssignments(`const grid = document.createElement("div");\n${body}`, scope), body).toEqual([]);
+    }
+  });
+});

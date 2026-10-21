@@ -561,6 +561,20 @@ export function unusableAssignments(code: string, scope: Record<string, unknown>
     try {
       // The property must be one the browser knows (anything else is an unknown member's business)
       if (!supports(kebab(member), 'inherit') || supports(kebab(member), value)) continue;
+      // A bare number in text for a length ("200"): the browser ignores it, and px is what it surely meant (the page
+      // adds it as the program runs; said here so the program reads right and no fix is asked for)
+      if (/^-?\d+(?:\.\d+)?$/.test(value) && Number(value) !== 0 && supports(kebab(member), `${value}px`)) {
+        const quote = right.type === 'TemplateLiteral' ? '`' : code[right.start];
+        issues.push({
+          line,
+          object,
+          member,
+          kind: 'invalid-value',
+          message: `'${value}' is a number with no unit (${object}.${member}), so the browser ignores it. '${value}px' is a length.`,
+          fix: { start: right.start, end: right.end, text: `${quote}${value}px${quote}`, note: `${object}.${member} = '${value}' → '${value}px': a length needs its unit` },
+        });
+        continue;
+      }
       const candidates = (STYLE_KEYWORDS[member] ?? []).filter((candidate) => supports(kebab(member), candidate));
       // (a color property: backgroundColor, fill, stroke, and background when it is a single word)
       const colored = /(?:color|^fill|^stroke)$/i.test(member) || (member === 'background' && /^[A-Za-z]+$/.test(value));

@@ -1844,9 +1844,9 @@ export class JavascriptRuntime {
   }
 
   /** Whether a canvas was cleared after its last drawing call, or cleared and never drawn on: the function of the program the clear ran in (null when the stack names none) */
-  clearedWithoutDrawing(): { fn: string | null } | null {
+  clearedWithoutDrawing(): { fn: string | null; covered?: boolean } | null {
     try {
-      const own = (this.activeIframe?.contentWindow as unknown as { __chattyClearedLast?: () => { fn: string | null } | null } | null | undefined)?.__chattyClearedLast;
+      const own = (this.activeIframe?.contentWindow as unknown as { __chattyClearedLast?: () => { fn: string | null; covered?: boolean } | null } | null | undefined)?.__chattyClearedLast;
       return typeof own === 'function' ? own() : null;
     } catch {
       return null;
@@ -3237,6 +3237,18 @@ export class JavascriptRuntime {
     let __chattyOps = 0;
     const __chattyLastDraw = new WeakMap();
     const __chattyLastClear = new WeakMap();
+    // The last full-canvas opaque fill (a background painted over everything) and the last drawing that is not one
+    const __chattyLastFull = new WeakMap();
+    const __chattyLastPart = new WeakMap();
+    function __chattyCovers(canvas, args) {
+      return Number(args[0]) <= 0 && Number(args[1]) <= 0 && Number(args[2]) >= canvas.width && Number(args[3]) >= canvas.height;
+    }
+    function __chattyOpaque(ctx) {
+      try {
+        const style = ctx.fillStyle;
+        return !(ctx.globalAlpha < 1) && !(typeof style === 'string' && /transparent|hsla|rgba\\([^)]*,\\s*(?:0|0?\\.\\d+)\\s*\\)/i.test(style));
+      } catch { return false; }
+    }
     function __chattyCallerName() {
       try {
         for (const frame of String(new Error().stack || '').split('\\n')) {
@@ -3301,7 +3313,12 @@ export class JavascriptRuntime {
         proto[key] = function () {
           if (checking) checkCall(label, key, fn.length, Array.prototype.slice.call(arguments));
           if (draws && this && this.canvas) __chattyDrawn.set(this.canvas, (__chattyDrawn.get(this.canvas) || 0) + 1);
-          if (draws && this && this.canvas) __chattyLastDraw.set(this.canvas, ++__chattyOps);
+          if (draws && this && this.canvas) {
+            const op = ++__chattyOps;
+            __chattyLastDraw.set(this.canvas, op);
+            if (checking && key === 'fillRect' && __chattyCovers(this.canvas, arguments) && __chattyOpaque(this)) __chattyLastFull.set(this.canvas, { op, fn: __chattyCallerName() });
+            else __chattyLastPart.set(this.canvas, op);
+          }
           else if (checking && key === 'clearRect' && label === 'ctx' && this && this.canvas && Number(arguments[0]) <= 0 && Number(arguments[1]) <= 0 && Number(arguments[2]) >= this.canvas.width && Number(arguments[3]) >= this.canvas.height) {
             __chattyLastClear.set(this.canvas, { op: ++__chattyOps, fn: __chattyCallerName() });
           }
@@ -4260,6 +4277,10 @@ export class JavascriptRuntime {
         for (const canvas of document.querySelectorAll('canvas')) {
           const clear = __chattyLastClear.get(canvas);
           if (clear && (__chattyLastDraw.get(canvas) || 0) < clear.op) return { fn: clear.fn || null };
+          // (or painted over: its last drawing came before a fill of the whole canvas, and nothing after)
+          const full = __chattyLastFull.get(canvas);
+          const part = __chattyLastPart.get(canvas);
+          if (full && part && part < full.op) return { fn: full.fn || null, covered: true };
         }
       } catch {}
       return null;

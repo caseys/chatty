@@ -270,6 +270,23 @@ describe('the sandbox runner says whether the card holds more than text', () => 
     part.close();
   });
 
+  it('says when the whole canvas was filled after the last drawing, and not for a background painted first', async () => {
+    const setup = 'const c = document.createElement("canvas"); c.width = 50; c.height = 50; document.body.append(c); const ctx = c.getContext("2d");';
+    const covered = await page(`${setup}\nctx.fillStyle = "navy";\nfunction sky() { ctx.fillRect(0, 0, 50, 50); }\nctx.fillRect(5, 5, 9, 9);\nsky();`);
+    expect(covered.__chattyClearedLast()).toMatchObject({ covered: true });
+    covered.close();
+    const background = await page(`${setup}\nctx.fillStyle = "navy";\nctx.fillRect(0, 0, 50, 50);\nctx.fillRect(5, 5, 9, 9);`);
+    expect(background.__chattyClearedLast()).toBeNull();
+    background.close();
+    // (a fill that lets the picture show through, and a fill with nothing drawn before it)
+    const faint = await page(`${setup}\nctx.fillRect(5, 5, 9, 9);\nctx.fillStyle = "rgba(0, 0, 0, 0.1)";\nctx.fillRect(0, 0, 50, 50);`);
+    expect(faint.__chattyClearedLast()).toBeNull();
+    faint.close();
+    const alone = await page(`${setup}\nctx.fillRect(0, 0, 50, 50);`);
+    expect(alone.__chattyClearedLast()).toBeNull();
+    alone.close();
+  });
+
   it('cannot say for a page with no layout, and says false for an empty one', async () => {
     const hidden = await page('document.body.innerHTML = "<div>text</div>";', false);
     expect(hidden.__chattyGraphic()).toBeNull();

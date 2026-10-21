@@ -3114,7 +3114,8 @@ export class ConversationOrchestrator {
     const drawingFacts: string[] = [];
     if (failedDrawing && (DRAW_REQUEST.test(request) || DRAWING_REQUEST.test(request))) {
       const cleared = this.javascriptRuntime.clearedWithoutDrawing?.();
-      if (cleared) drawingFacts.push(cleared.fn ? `${cleared.fn}() clears the canvas and then draws nothing.` : 'The canvas is cleared after the last drawing.');
+      if (cleared?.covered) drawingFacts.push(cleared.fn ? `${cleared.fn}() paints over the whole canvas after the last drawing.` : 'The whole canvas is painted over after the last drawing.');
+      else if (cleared) drawingFacts.push(cleared.fn ? `${cleared.fn}() clears the canvas and then draws nothing.` : 'The canvas is cleared after the last drawing.');
       const supports = (globalThis as { CSS?: { supports?: (property: string, value: string) => boolean } }).CSS?.supports;
       const unused = code ? unusedDrawingValues(code, (value) => { try { return !!supports && supports('color', value); } catch { return false; } }) : [];
       if (unused.length > 0) drawingFacts.push(`${unused.join(', ')} ${unused.length === 1 ? 'is' : 'are'} set but never used.`);

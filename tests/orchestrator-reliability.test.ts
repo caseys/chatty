@@ -537,6 +537,12 @@ describe('the outcome check on a drawing that shows nothing: why, from the page 
     }
   }, 30000);
 
+  it('says the canvas is painted over when the last thing it did was fill all of it', async () => {
+    const said = await outcome(request, nothingShown({ fn: 'paintSky', covered: true } as never), beach);
+    expect(said ?? '').toContain('paintSky() paints over the whole canvas after the last drawing.');
+    expect((await outcome(request, nothingShown({ fn: null, covered: true } as never), beach)) ?? '').toContain('The whole canvas is painted over after the last drawing.');
+  }, 30000);
+
   it('says neither on a drawing that shows, nor for a request that is not a drawing', async () => {
     const real = (globalThis as { CSS?: unknown }).CSS;
     (globalThis as { CSS?: unknown }).CSS = { supports: (_property: string, value: string) => color.test(value) };
