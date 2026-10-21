@@ -1091,10 +1091,10 @@ describe('the blank stage', () => {
       [{ error: 'bill is not defined', errorLine: 2 }, { error: 'tip is not defined', errorLine: 2 }, {}],
       {
         trials: (code) =>
-          /\bbill\b(?!Input)/.test(code.split('\n')[1])
+          !/const bill\b/.test(code) && /\bbill\b(?!Input)/.test(code)
             ? { error: 'bill is not defined', errorLine: 2 }
-            : /\btip\b(?!Input)/.test(code.split('\n')[1])
-              ? { error: 'tip is not defined', errorLine: 2 }
+            : !/const tip\b/.test(code) && /\btip\b(?!Input)/.test(code)
+              ? { error: 'tip is not defined', errorLine: 3 }
               : { error: null },
         ids: ['billInput', 'tipInput', 'out'],
         fields: ['billInput', 'tipInput'],
@@ -1103,8 +1103,11 @@ describe('the blank stage', () => {
     const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
     await orchestrator.submitUserInput('Code a tip calculator');
     await vi.waitFor(() => expect(executed.length).toBe(2), { timeout: 20000 });
-    const line = executed[1].split('\n')[1];
-    expect(line).toBe("const total = Number(document.getElementById('billInput').value) + Number(document.getElementById('billInput').value) * tip / 100;");
+    // Declared once, after the page made its fields and before the line that uses it
+    expect(executed[1].split('\n').slice(1, 3)).toEqual([
+      "const bill = Number(document.getElementById('billInput').value);",
+      'const total = bill + bill * tip / 100;',
+    ]);
   }, 30000);
 
   it('falls back to the line fix as the next attempt when no candidate passes', async () => {

@@ -159,17 +159,18 @@ describe('errors that name nothing', () => {
 
 describe('fillBlank', () => {
   const blank = findBlank(form, 'bill is not defined', 3)!;
-  it('replaces every span and nothing else', () => {
+  it('declares an undeclared name used more than once, once, and leaves its uses as they are', () => {
+    expect(blank.spans.length).toBeGreaterThan(1);
     const filled = fillBlank(form, blank, "Number(document.getElementById('billInput').value)")!;
-    expect(filled).toBe(form.replace(/\bbill\b/g, "Number(document.getElementById('billInput').value)"));
-    let rest = form;
-    for (const s of [...blank.spans].reverse()) rest = rest.slice(0, s.start) + '\u0000' + rest.slice(s.end);
-    expect(filled.length).toBeGreaterThan(form.length);
-    expect(filled.split("Number(document.getElementById('billInput').value)").join('\u0000')).toBe(rest);
+    expect(filled).toContain("const bill = Number(document.getElementById('billInput').value);");
+    expect(filled.match(/getElementById\('billInput'\)/g)).toHaveLength(1);
+    // Nothing else changed: without the declaration line, it is the program as it was
+    expect(filled.replace(/\n[ \t]*const bill = [^\n]*;|^const bill = [^\n]*;\n/, '')).toBe(form);
   });
   it('brackets an expression that could change meaning, keeps plain ones bare', () => {
-    expect(fillBlank(form, blank, 'a || b')).toContain('(a || b) * 0.15');
-    expect(fillBlank(form, blank, 'amount')).toContain('amount * 0.15');
+    const b = findBlank(canvas, 'ctx.fillCircle is not a function', 5)!;
+    expect(fillBlank(canvas, b, 'a || b')).toContain('(a || b).beginPath()');
+    expect(fillBlank(canvas, b, 'pen')).toContain('pen.beginPath()');
   });
   it('is null for something that is not one expression, or does not parse', () => {
     expect(fillBlank(form, blank, 'a; b')).toBeNull();

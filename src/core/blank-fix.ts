@@ -19,6 +19,11 @@ export interface Blank {
   spans: Array<{ start: number; end: number }>;
   /** Short plain description: "bill is not declared", "this has no play()" */
   why: string;
+  /**
+   * An undeclared name used more than once: filled by declaring it once here (a char offset, the
+   * start of the statement holding its first use), not by writing the expression at every use
+   */
+  declareAt?: { offset: number; indent: string };
 }
 
 type AnyNode = Node & Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -233,11 +238,28 @@ function undeclared(tree: Tree, code: string, name: string, errorLine?: number):
     return null;
   };
   const home = fnOf(sorted[0]);
+  const uses = reads.filter((n) => fnOf(n) === home).sort((a, b) => a.start - b.start);
+  // Where a declaration of it goes: just before the statement holding its first use, in the
+  // innermost block that holds every use (so what the uses need, made by earlier statements,
+  // is there: the elements a page builds first)
+  const blocks = (n: AnyNode) => {
+    const out: AnyNode[] = [];
+    for (let at = tree.parent.get(n); at; at = tree.parent.get(at)) if (at.type === 'BlockStatement' || at.type === 'Program') out.unshift(at);
+    return out;
+  };
+  const chains = uses.map(blocks);
+  let shared: AnyNode | undefined;
+  for (let i = 0; chains.every((c) => c[i] && c[i] === chains[0][i]); i++) shared = chains[0][i];
+  let statement: AnyNode | undefined = uses[0];
+  while (statement && tree.parent.get(statement) !== shared) statement = tree.parent.get(statement);
+  const lineStart = statement ? code.lastIndexOf('\n', statement.start - 1) + 1 : 0;
+  const indent = statement ? code.slice(lineStart, statement.start) : '';
   return {
     line: startLine(sorted[0]),
     text: name,
-    spans: reads.filter((n) => fnOf(n) === home).sort((a, b) => a.start - b.start).map((n) => ({ start: n.start, end: n.end })),
+    spans: uses.map((n) => ({ start: n.start, end: n.end })),
     why: `${name} is not declared`,
+    ...(uses.length > 1 && statement && /^\s*$/.test(indent) ? { declareAt: { offset: statement.start, indent } } : {}),
   };
 }
 
@@ -489,6 +511,19 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
     }
   }
 
+  // Something the program never made: a new one of the browser type its uses need (every member
+  // the program uses on it is one that type has), elements added to the page
+  if (tree && blank.spans.length > 0) {
+    const used = new Set<string>();
+    for (const span of blank.spans) {
+      const at = nodeAt(tree, span);
+      const up = at ? tree.parent.get(at) : undefined;
+      if (up?.type === 'MemberExpression' && tree.key.get(at!) === 'object') used.add(up.computed ? '[index]' : (up.property.name as string));
+    }
+    const made = used.size > 0 ? MAKEABLE.find(({ type }) => [...used].every((m) => (m === '[index]' ? type === 'Array' : typeHas(type, m)))) : undefined;
+    if (made) add(made.make, 0.6);
+  }
+
   // Chatty's helpers
   if (role !== 'iterable') {
     for (const helper of HELPERS) {
@@ -504,6 +539,46 @@ export function blankChoices(code: string, blank: Blank, page: { ids: string[]; 
   for (const { expr } of scored) if (expr !== blank.text && !result.includes(expr)) result.push(expr);
   return result.slice(0, 6);
 }
+
+/**
+ * Browser types a missing name could be a new one of, and how to make one: the first whose type has
+ * every member the program uses on it is offered (elements go on the page)
+ */
+const MAKEABLE: ReadonlyArray<{ type: string; make: string }> = [
+  // A plain element first: the others have everything it has, and are chosen only for their own
+  // members (getContext, play, value)
+  { type: 'HTMLDivElement', make: 'document.body.appendChild(document.createElement("div"))' },
+  { type: 'CanvasRenderingContext2D', make: 'document.body.appendChild(document.createElement("canvas")).getContext("2d")' },
+  { type: 'HTMLCanvasElement', make: 'document.body.appendChild(document.createElement("canvas"))' },
+  { type: 'AudioContext', make: 'new AudioContext()' },
+  { type: 'HTMLAudioElement', make: 'new Audio()' },
+  { type: 'HTMLVideoElement', make: 'document.body.appendChild(document.createElement("video"))' },
+  { type: 'HTMLInputElement', make: 'document.body.appendChild(document.createElement("input"))' },
+  { type: 'HTMLSelectElement', make: 'document.body.appendChild(document.createElement("select"))' },
+  { type: 'HTMLTextAreaElement', make: 'document.body.appendChild(document.createElement("textarea"))' },
+  { type: 'HTMLImageElement', make: 'document.body.appendChild(new Image())' },
+  { type: 'Map', make: 'new Map()' },
+  { type: 'Set', make: 'new Set()' },
+  { type: 'Date', make: 'new Date()' },
+  { type: 'Array', make: '[]' },
+];
+
+/** Whether the browser's type has the member (its prototype chain; a list where the type is missing) */
+function typeHas(type: string, member: string): boolean {
+  const proto = (globalThis as unknown as Record<string, { prototype?: object } | undefined>)[type]?.prototype;
+  if (proto) return member in proto;
+  return type === 'CanvasRenderingContext2D' && CONTEXT_2D.has(member);
+}
+
+/** Members of the browser's CanvasRenderingContext2D (for where the browser's own type isn't there) */
+const CONTEXT_2D = new Set([
+  'arc', 'arcTo', 'beginPath', 'bezierCurveTo', 'clearRect', 'clip', 'closePath', 'createLinearGradient',
+  'createPattern', 'createRadialGradient', 'drawImage', 'ellipse', 'fill', 'fillRect', 'fillStyle', 'fillText',
+  'font', 'getImageData', 'globalAlpha', 'lineCap', 'lineJoin', 'lineTo', 'lineWidth', 'measureText', 'moveTo',
+  'putImageData', 'quadraticCurveTo', 'rect', 'restore', 'rotate', 'roundRect', 'save', 'scale', 'setTransform',
+  'shadowBlur', 'shadowColor', 'stroke', 'strokeRect', 'strokeStyle', 'strokeText', 'textAlign', 'textBaseline',
+  'transform', 'translate',
+]);
 
 /** Types that read the same with or without brackets around them when put in place of another expression */
 const PLAIN = new Set(['Identifier', 'MemberExpression', 'CallExpression', 'ThisExpression', 'Literal', 'TemplateLiteral', 'ArrayExpression', 'ChainExpression']);
@@ -523,6 +598,22 @@ export function fillBlank(code: string, blank: Blank, expr: string): string | nu
   }
   if (body.length !== 1 || body[0].type !== 'ExpressionStatement') return null;
   const inner = body[0].expression as AnyNode;
+  if (blank.declareAt) {
+    if (blank.spans.some((span) => code.slice(span.start, span.end) !== blank.text)) return null;
+    // Declared once (`name = value` offered for the name declares it with that value)
+    const value =
+      inner.type === 'AssignmentExpression' && inner.operator === '=' && inner.left.type === 'Identifier' && inner.left.name === blank.text
+        ? text.slice(inner.right.start - 2, inner.right.end - 2)
+        : text;
+    const { offset, indent } = blank.declareAt;
+    const declared = `${code.slice(0, offset)}const ${blank.text} = ${value};\n${indent}${code.slice(offset)}`;
+    try {
+      parse(declared, OPTIONS);
+    } catch {
+      return null;
+    }
+    return declared;
+  }
   // A negative number or a comma sequence needs its brackets too
   const plain = PLAIN.has(inner.type) && !(inner.type === 'Literal' && /^[-+]/.test(text)) && !/^\s*\{/.test(text);
   const replacement = plain ? text : `(${text})`;

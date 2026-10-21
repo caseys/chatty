@@ -97,3 +97,35 @@ describe('the repetition stop', async () => {
     expect(text.slice(0, cut).split('function bounceBall').length - 1).toBe(1);
   });
 });
+
+describe('an undeclared name the program uses again and again', () => {
+  const program = [
+    'function animate() {',
+    '  for (let i = 0; i < 3; i++) {',
+    '    ctx.beginPath();',
+    '    ctx.arc(10, 10, 5, 0, 7);',
+    "    ctx.fillStyle = 'red';",
+    '    ctx.fill();',
+    '  }',
+    '}',
+    'animate();',
+  ].join('\n');
+
+  it('is offered a new canvas on the page, by its real 2D context', () => {
+    const blank = findBlank(program, "Can't find variable: ctx", 3)!;
+    expect(blankChoices(program, blank, { ids: [] })).toContain('document.body.appendChild(document.createElement("canvas")).getContext("2d")');
+  });
+
+  it('is declared once, just before its first use, not written at every use', async () => {
+    const { fillBlank } = await import('../src/core/blank-fix.ts');
+    const blank = findBlank(program, "Can't find variable: ctx", 3)!;
+    const filled = fillBlank(program, blank, 'document.body.appendChild(document.createElement("canvas")).getContext("2d")')!;
+    expect(filled.split('\n')[2]).toBe('    const ctx = document.body.appendChild(document.createElement("canvas")).getContext("2d");');
+    expect(filled.match(/getContext/g)).toHaveLength(1);
+    expect(filled).toContain('    ctx.beginPath();');
+    // `name = value` offered for the name declares it with that value
+    const assigned = fillBlank(program, blank, 'ctx = canvas.getContext("2d")')!;
+    expect(assigned.split('\n')[2]).toBe('    const ctx = canvas.getContext("2d");');
+  });
+});
+

@@ -2164,7 +2164,7 @@ export class ConversationOrchestrator {
           : 3
         : namesCandidate(trial.error, expr) || trial.errorLine === undefined
           ? 0
-          : trial.error !== error && trial.errorLine !== undefined && trial.errorLine > (run.errorLine ?? blank.line)
+          : trial.error !== error && trial.errorLine !== undefined && trial.errorLine > (run.errorLine ?? blank.line) + (blank.declareAt ? 1 : 0)
             ? 2
             : trial.error !== error && !mentions.test(trial.error)
               ? 1
