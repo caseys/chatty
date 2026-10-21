@@ -605,7 +605,7 @@ describe('the optional rules follow the request', () => {
   const cases: Array<[string, { canvas?: boolean; sound?: boolean; facts?: boolean }]> = [
     ['Draw a beach sunset with rainbow sky and deep purple ocean', { canvas: true }],
     ['Play a music loop with a G major chord on piano, a walking bass line and a boom-chuck drum track', { sound: true }],
-    ['Animate a ball bouncing around the screen', { canvas: true }],
+    ['Animate 10 colored balls bouncing around the screen', { canvas: true }],
     ['Code a tip calculator app with a UI for the bill and tip %', {}],
     ['Show a big ten second countdown on screen', {}],
     ['Who was Ada Lovelace?', { facts: true }],
