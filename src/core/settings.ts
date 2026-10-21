@@ -60,16 +60,6 @@ const local = (
 
 export const LOCAL_CHAT_MODELS: ReadonlyArray<LocalChatModel> = [
   // Phone-sized (smallest memory first)
-  {
-    // Not on phones: Transformers.js (ONNX) crashes the iPhone tab while loading
-    ...local('lfm2.5-230m', 'LFM2.5 230M', '', 200, 450, 'Liquid AI, tiniest and fastest (experimental)', false),
-    // Too small to follow the full prompt: a phone-sized context makes the orchestrator treat it as
-    // a small model, though it stays off phones
-    contextLimit: 4096,
-    maxOutputTokens: 2048,
-    onnx: { repo: 'LiquidAI/LFM2.5-230M-ONNX', dtype: 'q4' },
-  },
-  local('smollm2-360m', 'SmolLM2 360M', 'SmolLM2-360M-Instruct-q4f16_1-MLC', 204, 376, 'Tiniest download, basic answers', true),
   local('gemma-3-1b', 'Gemma 3 1B', 'gemma3-1b-it-q4f16_1-MLC', 602, 711, 'Google Gemma 3, small', true),
   local('llama-3.2-1b', 'Llama 3.2 1B', 'Llama-3.2-1B-Instruct-q4f16_1-MLC', 705, 879, 'Meta on-device model', true),
   local('qwen2.5-coder-0.5b', 'Qwen2.5-Coder 0.5B', 'Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC', 290, 945, 'Small model tuned for code', true),
@@ -78,7 +68,6 @@ export const LOCAL_CHAT_MODELS: ReadonlyArray<LocalChatModel> = [
   { ...local('qwen3.5-0.8b', 'Qwen3.5 0.8B', 'Qwen3.5-0.8B-q4f16_1-MLC', 424, 1629, 'Newest small Qwen', true), noThinking: true },
   // Desktop (smallest memory first)
   local('qwen2.5-coder-1.5b', 'Qwen2.5-Coder 1.5B', 'Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC', 880, 1630, 'Strong at JavaScript', false),
-  local('smollm2-1.7b', 'SmolLM2 1.7B', 'SmolLM2-1.7B-Instruct-q4f16_1-MLC', 963, 1774, 'Hugging Face small model', false),
   { ...local('qwen3-1.7b', 'Qwen3 1.7B', 'Qwen3-1.7B-q4f16_1-MLC', 968, 2037, 'General model', false), noThinking: true },
   { ...local('qwen3.5-2b', 'Qwen3.5 2B', 'Qwen3.5-2B-q4f16_1-MLC', 1059, 2245, 'Newest Qwen, small', false), noThinking: true },
   local('gemma-2-2b', 'Gemma 2 2B', 'gemma-2-2b-it-q4f16_1-MLC', 1493, 1895, 'Google Gemma 2', false),
@@ -108,8 +97,8 @@ export function isPhoneChatModel(id: string): boolean {
  * it, otherwise the phone default. Phones don't follow the desktop default or recommendation:
  * Gemma 4 E2B is phone-capable, but a phone only gets it when the user chose it.
  */
-/** Phone memory (navigator.deviceMemory, GB) that runs Gemma 4 E2B: Chrome on Android handles it */
-const GEMMA_PHONE_MEMORY_GB = 4;
+/** The default on other phones (Chrome on Android): Qwen3 1.7B */
+export const ANDROID_PHONE_CHAT_MODEL_ID = 'qwen3-1.7b';
 
 /** iPhone or iPad: every browser there is Safari underneath, which crashes on Gemma */
 export function isAppleMobile(
@@ -119,15 +108,9 @@ export function isAppleMobile(
   return /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && touchPoints > 1);
 }
 
-/**
- * The phone default: Gemma 4 E2B where the browser says there's enough memory (Chrome reports
- * navigator.deviceMemory; Safari doesn't), Qwen3 0.6B on iPhone and low-memory phones
- */
-export function phoneDefaultChatModelId(
-  deviceMemory = typeof navigator !== 'undefined' ? (navigator as { deviceMemory?: number }).deviceMemory : undefined,
-  appleMobile = isAppleMobile()
-): string {
-  return !appleMobile && (deviceMemory ?? 0) >= GEMMA_PHONE_MEMORY_GB ? 'gemma-4-e2b-it-web' : DEFAULT_PHONE_CHAT_MODEL_ID;
+/** The phone default: Qwen3 0.6B on iPhone and iPad (Safari), Qwen3 1.7B on other phones (Chrome) */
+export function phoneDefaultChatModelId(appleMobile = isAppleMobile()): string {
+  return appleMobile ? DEFAULT_PHONE_CHAT_MODEL_ID : ANDROID_PHONE_CHAT_MODEL_ID;
 }
 
 export function resolvePhoneChatModelId(chosen: string | null, fallback = phoneDefaultChatModelId()): string {

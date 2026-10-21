@@ -603,7 +603,7 @@ describe('the optional rules follow the request', () => {
   const sound = 'Sound: music and instruments play through Web MIDI';
   const facts = 'en.wikipedia.org/api/rest_v1';
   const cases: Array<[string, { canvas?: boolean; sound?: boolean; facts?: boolean }]> = [
-    ['Draw a rainbow over green hills on a canvas', { canvas: true }],
+    ['Draw a beach sunset with rainbow sky and deep purple ocean', { canvas: true }],
     ['Play a music loop with a G major chord on piano, a walking bass line and a boom-chuck drum track', { sound: true }],
     ['Animate a ball bouncing around the screen', { canvas: true }],
     ['Code a tip calculator app with a UI for the bill and tip %', {}],
@@ -1225,7 +1225,7 @@ describe('the blank stage', () => {
 
   it('knows which models are large', () => {
     for (const id of ['gemma-4-e2b-it-web', 'gemma-4-e4b-it-web', 'qwen2.5-coder-1.5b', 'qwen3-4b', 'qwen3.5-9b']) expect(prefersLineFix(id)).toBe(true);
-    for (const id of ['qwen3-0.6b', 'llama-3.2-1b', 'smollm2-360m', 'qwen3.5-0.8b', 'queue']) expect(prefersLineFix(id)).toBe(false);
+    for (const id of ['qwen3-0.6b', 'llama-3.2-1b', 'qwen3.5-0.8b', 'queue']) expect(prefersLineFix(id)).toBe(false);
   });
 
   it('does nothing after it has given up, not even a sure correction', async () => {

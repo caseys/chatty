@@ -15,11 +15,12 @@ describe('phone default chat model', () => {
     localStorage.clear();
   });
 
-  it('gives a phone that never chose a model Qwen3 0.6B, not the Gemma default', () => {
+  it('gives a phone that never chose a model its phone default, not the Gemma default', () => {
     expect(DEFAULT_SETTINGS.chatModelId).toBe(GEMMA); // desktop default is unchanged
     expect(loadChatModelChoice()).toBeNull();
-    expect(resolvePhoneChatModelId(loadChatModelChoice())).toBe(DEFAULT_PHONE_CHAT_MODEL_ID);
-    expect(DEFAULT_PHONE_CHAT_MODEL_ID).toBe('qwen3-0.6b');
+    // (this test browser is no iPhone: the default for other phones, Chrome on Android)
+    expect(resolvePhoneChatModelId(loadChatModelChoice())).toBe('qwen3-1.7b');
+    expect(resolvePhoneChatModelId(loadChatModelChoice(), DEFAULT_PHONE_CHAT_MODEL_ID)).toBe('qwen3-0.6b');
   });
 
   it('does not count saving other settings as choosing a model', () => {
@@ -29,7 +30,7 @@ describe('phone default chat model', () => {
     saveSettingsToStorage({ voiceId: 'en_US-hfc_male-medium' });
     expect(JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY)!).chatModelId).toBe(GEMMA);
     expect(loadChatModelChoice()).toBeNull();
-    expect(resolvePhoneChatModelId(loadChatModelChoice())).toBe('qwen3-0.6b');
+    expect(resolvePhoneChatModelId(loadChatModelChoice(), DEFAULT_PHONE_CHAT_MODEL_ID)).toBe('qwen3-0.6b');
   });
 
   it('keeps a phone-capable model the user picked, Gemma included', () => {
@@ -44,12 +45,12 @@ describe('phone default chat model', () => {
     saveSettingsToStorage({ chatModelId: 'qwen3-4b' });
     expect(resolvePhoneChatModelId(loadChatModelChoice())).toBe('qwen3-4b');
     expect(resolvePhoneChatModelId('gemma-4-e4b-it-web')).toBe('gemma-4-e4b-it-web');
-    expect(resolvePhoneChatModelId('no-such-model')).toBe('qwen3-0.6b');
+    expect(resolvePhoneChatModelId('no-such-model', DEFAULT_PHONE_CHAT_MODEL_ID)).toBe('qwen3-0.6b');
   });
 
   it('reads a model from settings saved before choices were recorded', () => {
-    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({ chatModelId: 'smollm2-360m' }));
-    expect(loadChatModelChoice()).toBe('smollm2-360m');
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({ chatModelId: 'llama-3.2-1b' }));
+    expect(loadChatModelChoice()).toBe('llama-3.2-1b');
 
     // The untouched default in an old blob can't be told from a pick, so a phone gets Qwen3
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({ chatModelId: GEMMA }));
@@ -63,13 +64,10 @@ describe('phone default chat model', () => {
 });
 
 describe('phone default by browser', () => {
-  it('uses Gemma where Chrome reports enough memory, and Qwen3 on iPhone or low memory', async () => {
+  it('uses Qwen3 1.7B on Chrome phones and Qwen3 0.6B on iPhone', async () => {
     const { phoneDefaultChatModelId, isAppleMobile, resolvePhoneChatModelId } = await import('../src/core/settings.ts');
-    expect(phoneDefaultChatModelId(8, false)).toBe('gemma-4-e2b-it-web');
-    expect(phoneDefaultChatModelId(4, false)).toBe('gemma-4-e2b-it-web');
-    expect(phoneDefaultChatModelId(2, false)).toBe('qwen3-0.6b');
-    expect(phoneDefaultChatModelId(undefined, false)).toBe('qwen3-0.6b');
-    expect(phoneDefaultChatModelId(8, true)).toBe('qwen3-0.6b');
+    expect(phoneDefaultChatModelId(false)).toBe('qwen3-1.7b');
+    expect(phoneDefaultChatModelId(true)).toBe('qwen3-0.6b');
     expect(isAppleMobile('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', 5)).toBe(true);
     expect(isAppleMobile('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 5)).toBe(true); // iPad
     expect(isAppleMobile('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 0)).toBe(false);
