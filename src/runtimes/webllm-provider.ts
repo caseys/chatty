@@ -4,7 +4,7 @@
 // which is what lets it load in mobile Safari. Downloads are kept in Cache Storage.
 // ============================================================================
 
-import { fixGrammar } from './fix-grammar.ts';
+import { ENGLISH_GRAMMAR, fixGrammar } from './fix-grammar.ts';
 import { retryTemperature } from './retry-temperature.ts';
 import type { WebWorkerMLCEngine } from '@mlc-ai/web-llm';
 import type { LlmGenerationOptions, LlmGenerationResult, LlmRuntimeProvider } from '../types/index.ts';
@@ -28,6 +28,13 @@ const WEBLLM_MIN_TEMPERATURE = 0.6;
 const WEBLLM_EXACT_TEMPERATURE = 0.2;
 
 /**
+ * Every WebLLM reply is held to a grammar (English characters, or a fix's shape). Above this
+ * temperature WebLLM samples tokens the grammar rules out ("Grammar matcher rejected the newly
+ * sampled token"), and the reply fails; up to it, with any top-p, the grammar held in tests.
+ */
+export const WEBLLM_MAX_TEMPERATURE = 1;
+
+/**
  * Sampling fields for a WebLLM request. Code repeats lines and tokens on purpose (`out.send(...)`,
  * `ctx.`), so a repetition or presence penalty hurts it: Qwen3 / Qwen3.5 get presence penalty 0
  * (Qwen's recommended 0.5 targets thinking-mode loops, and these models run without thinking), and
@@ -38,12 +45,15 @@ export function webLlmSampling(
   options: Pick<LlmGenerationOptions, 'temperature' | 'topP' | 'exact' | 'retry' | 'sampling'>,
   spec: Pick<WebLlmModelSpec, 'mlcId' | 'noThinking'>
 ): { temperature: number; top_p: number; repetition_penalty?: number; presence_penalty?: number } {
-  if (options.sampling) return { temperature: options.sampling.temperature, top_p: options.sampling.topP };
+  if (options.sampling) return { temperature: Math.min(options.sampling.temperature, WEBLLM_MAX_TEMPERATURE), top_p: options.sampling.topP };
   const top_p = options.topP ?? 0.8;
   if (options.exact) return { temperature: WEBLLM_EXACT_TEMPERATURE, top_p };
   // Small models get stuck repeating themselves on near-greedy decoding (Chatty asks for 0.1,
   // which LiteRT honours too), so normal turns keep a floor.
-  const temperature = retryTemperature(Math.max(options.temperature ?? WEBLLM_MIN_TEMPERATURE, WEBLLM_MIN_TEMPERATURE), options.retry);
+  const temperature = Math.min(
+    retryTemperature(Math.max(options.temperature ?? WEBLLM_MIN_TEMPERATURE, WEBLLM_MIN_TEMPERATURE), options.retry),
+    WEBLLM_MAX_TEMPERATURE
+  );
   const qwen3 = spec.noThinking || /^qwen3/i.test(spec.mlcId);
   return qwen3
     ? { temperature, top_p, presence_penalty: 0 }
@@ -271,28 +281,38 @@ export class WebLlmProvider implements LlmRuntimeProvider {
           options.onToken?.(fresh, tokens);
         }
       };
-      if (options.fixShape) {
+      // Every reply is held to English characters (ENGLISH_GRAMMAR); a fix turn to its shape too
+      const grammarFormat = {
+        type: 'grammar' as const,
+        grammar: options.fixShape ? fixGrammar(options.fixShape, options.choiceCount) : ENGLISH_GRAMMAR,
+      };
+      {
         try {
-          await consume(
-            await engine.chat.completions.create({
-              ...request,
-              response_format: { type: 'grammar', grammar: fixGrammar(options.fixShape, options.choiceCount) },
-            })
-          );
+          await consume(await engine.chat.completions.create({ ...request, response_format: grammarFormat }));
         } catch (err) {
           // Text already went out (onToken): a second reply would be appended to it
           if (options.signal?.aborted || tokens > 0) throw err;
-          console.warn('Grammar-constrained fix failed; retrying without it', err);
-          // Discard any partial output so the plain retry starts clean
-          raw = '';
-          text = '';
-          emitted = 0;
-          tokens = 0;
-          firstTokenAt = 0;
-          await consume(await engine.chat.completions.create(request));
+          // Discard any partial output so the retry starts clean
+          const restart = () => {
+            raw = '';
+            text = '';
+            emitted = 0;
+            tokens = 0;
+            firstTokenAt = 0;
+          };
+          restart();
+          // Once more with the grammar, cooler (a request without it left WebLLM ignoring
+          // grammars afterwards), and only then without
+          try {
+            console.warn('Grammar-constrained reply failed; retrying cooler', err);
+            await consume(await engine.chat.completions.create({ ...request, temperature: Math.min(request.temperature, 0.5), response_format: grammarFormat }));
+          } catch (again) {
+            if (options.signal?.aborted || tokens > 0) throw again;
+            console.warn('Grammar-constrained reply failed again; retrying without it', again);
+            restart();
+            await consume(await engine.chat.completions.create(request));
+          }
         }
-      } else {
-        await consume(await engine.chat.completions.create(request));
       }
     } finally {
       options.signal?.removeEventListener('abort', onAbort);

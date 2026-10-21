@@ -6,6 +6,27 @@
 
 export type FixShape = 'line' | 'function' | 'program' | 'expression' | 'choice';
 
+/**
+ * The characters a reply may use: English. Printable ASCII and tab, plus what programs often put
+ * in strings: accented Latin letters, °, ×, dashes and curly quotes, arrows, ★, ♪ and smileys.
+ * Other scripts are left out: a small model sampled hot drifts into them mid-name
+ * (outerLeftGlobal彼方形يتها). The ranges are narrow on purpose: WebLLM's XGrammar let Japanese
+ * through a wide one (\u2000-\u2BFF, or all emoji). ch: any of them; nb: but a backtick; nbs:
+ * but a backtick or slash.
+ */
+const EXTRA = String.raw`\u00A0-\u024F\u2010-\u2027\u2030-\u203A\u2190-\u2193\u2605-\u2606\u266A-\u266B\U0001F600-\U0001F64F`;
+const ENGLISH = String.raw`
+ch ::= [\x09\x20-\x7E${EXTRA}]
+nb ::= [\x09\x20-\x5F\x61-\x7E${EXTRA}]
+nbs ::= [\x09\x20-\x2E\x30-\x5F\x61-\x7E${EXTRA}]
+`;
+
+/**
+ * Any reply, in English characters. One character class repeated: XGrammar masks that at full
+ * speed (an alternation of two rules ran 6x slower in WebLLM)
+ */
+export const ENGLISH_GRAMMAR = String.raw`root ::= [\x09\x0A\x0D\x20-\x7E${EXTRA}]*`;
+
 /** Rules shared by every shape. A code line starts with anything but ` or / (or a single /).
  *  The ">>> ERROR" / "<<< ERROR" markers are not blocked here: a model that wants to write one,
  *  held to "<<" plus anything else, wrote "<< << << …" until it ran out of tokens. replyCode
@@ -13,13 +34,13 @@ export type FixShape = 'line' | 'function' | 'program' | 'expression' | 'choice'
  *  Lines after the first in a function or program (bodyline) may be // comments or start with a
  *  template literal's backtick; only a ``` fence is ruled out there. */
 const COMMON = String.raw`
-cause ::= "// Cause: " [^\n]+ "\n"
-start ::= [^\x60/\n] | "/" [^/\x60\n]
-rest ::= [^\n]*
+cause ::= "// Cause: " ch+ "\n"
+start ::= nbs | "/" nbs
+rest ::= ch*
 codeline ::= start rest
-bstart ::= [^\x60\n] | "\x60" [^\x60\n] | "\x60\x60" [^\x60\n]
+bstart ::= nb | "\x60" nb | "\x60\x60" nb
 bodyline ::= bstart rest
-`;
+` + ENGLISH;
 
 const FUNCTION_HEAD = String.raw`
 head ::= ("function " | "async function " | ("const " | "let ") [A-Za-z_$] [A-Za-z0-9_$]* " = " ("async ")? ("function" | "(")) rest

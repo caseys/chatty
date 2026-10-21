@@ -71,3 +71,12 @@ describe('WebLLM Qwen3 penalties', () => {
     expect(s).toEqual({ temperature: 0.7, top_p: 0.9 });
   });
 });
+
+describe('WebLLM temperature limit', async () => {
+  const { webLlmSampling, WEBLLM_MAX_TEMPERATURE } = await import('../src/runtimes/webllm-provider.ts');
+  it('never goes above the temperature its grammars hold at', () => {
+    const spec = { mlcId: 'Qwen3-0.6B-q4f16_1-MLC', noThinking: true };
+    expect(webLlmSampling({ sampling: { temperature: 1.3, topP: 0.95 } }, spec).temperature).toBe(WEBLLM_MAX_TEMPERATURE);
+    expect(webLlmSampling({ temperature: 0.9, retry: 3 }, spec).temperature).toBeLessThanOrEqual(WEBLLM_MAX_TEMPERATURE);
+  });
+});

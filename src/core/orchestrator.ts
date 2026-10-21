@@ -306,15 +306,16 @@ export const SAMPLING_SWINGS: ReadonlyArray<{ temperature: number; topP: number 
   { temperature: 0.8, topP: 0.75 },
 ];
 
-/** Above this, models under about 1.5B parameters write gibberish (mixed scripts, no code) */
+/** Above this, small models write gibberish (mixed scripts, no code), and WebLLM's grammars break */
 const SMALL_MODEL_MAX_TEMPERATURE = 1;
 
 /**
- * A swing as the model can take it: small models' temperatures are scaled down so the hottest is
- * SMALL_MODEL_MAX_TEMPERATURE, and every try still samples differently (see prefersLineFix)
+ * A swing as the model can take it: on WebLLM (every model but Gemma 4 on LiteRT) temperatures are
+ * scaled down so the hottest is SMALL_MODEL_MAX_TEMPERATURE: small models write gibberish above it,
+ * and WebLLM's grammars break there (WEBLLM_MAX_TEMPERATURE). Every try still samples differently.
  */
 export function forModel(sampling: { temperature: number; topP: number }, modelId: string): { temperature: number; topP: number } {
-  if (prefersLineFix(modelId)) return sampling;
+  if (/^gemma-4/i.test(modelId)) return sampling;
   const hottest = Math.max(...SAMPLING_SWINGS.map((s) => s.temperature));
   const scale = Math.min(1, SMALL_MODEL_MAX_TEMPERATURE / hottest);
   return { ...sampling, temperature: Math.round(sampling.temperature * scale * 100) / 100 };
