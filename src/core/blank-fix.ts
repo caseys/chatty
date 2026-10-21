@@ -34,7 +34,7 @@ const OPTIONS = { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutside
 /** How near the reported line a failing node may be (a wrapper can shift lines a little) */
 const NEAR = 3;
 
-interface Tree {
+export interface Tree {
   ast: AnyNode;
   nodes: AnyNode[];
   parent: Map<AnyNode, AnyNode>;
@@ -47,7 +47,8 @@ interface Tree {
 
 const isNode = (v: unknown): v is AnyNode => !!v && typeof v === 'object' && typeof (v as AnyNode).type === 'string';
 
-function analyse(code: string): Tree | null {
+/** The program's scopes: what each declares, and which identifiers declare rather than refer (null if it doesn't parse) */
+export function analyse(code: string): Tree | null {
   let ast: AnyNode;
   try {
     ast = parse(code, OPTIONS) as unknown as AnyNode;
@@ -112,7 +113,7 @@ function analyse(code: string): Tree | null {
 }
 
 /** The scope node that declares `name` as seen from `node`, or null when nothing does */
-function resolve(tree: Tree, node: AnyNode, name: string): AnyNode | null {
+export function resolve(tree: Tree, node: AnyNode, name: string): AnyNode | null {
   let at: AnyNode | undefined = node;
   while (at) {
     if (tree.scopes.get(at)?.has(name)) return at;
@@ -122,7 +123,7 @@ function resolve(tree: Tree, node: AnyNode, name: string): AnyNode | null {
 }
 
 /** An identifier that refers to a binding (not a property name, a declaration or a label) */
-function isReference(tree: Tree, node: AnyNode): boolean {
+export function isReference(tree: Tree, node: AnyNode): boolean {
   if (node.type !== 'Identifier' || tree.bindings.has(node)) return false;
   const parent = tree.parent.get(node);
   const key = tree.key.get(node);

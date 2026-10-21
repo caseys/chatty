@@ -407,6 +407,17 @@ export class MinimalVoiceApp {
       this.chatInputForm?.requestSubmit();
     });
 
+    // A tick for Chatty's own buttons: settings, Start / Stop / Continue, clear the screen. (After
+    // the engine's own listener, which wakes the audio in the same tap)
+    document.addEventListener(
+      'click',
+      (e) => {
+        const button = (e.target as Element | null)?.closest?.('#btn-settings, #settings-dialog button, #btn-mic-toggle, #btn-clear-screen');
+        if (button && !(button as HTMLButtonElement).disabled) this.engine.playInterfaceSound('tap');
+      },
+      true
+    );
+
     this.chatInputForm?.addEventListener('submit', (e) => {
       e.preventDefault();
       const text = this.chatInput?.value.trim();

@@ -1020,9 +1020,13 @@ export class VoiceAssistantEngine {
   private programReturned = false;
   private programEndCheck: ReturnType<typeof setTimeout> | null = null;
 
-  /** A short, quiet interface sound (interface-sounds.ts) */
+  /** A short, quiet interface sound (interface-sounds.ts). Never throws: no sound when the audio isn't ready */
   playInterfaceSound(sound: InterfaceSound): void {
-    this.audioSubsystem?.playInterfaceSound(sound);
+    try {
+      this.audioSubsystem?.playInterfaceSound(sound);
+    } catch {
+      // No sound this time
+    }
   }
 
   private programStarted(): void {

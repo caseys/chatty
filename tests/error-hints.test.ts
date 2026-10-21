@@ -116,8 +116,48 @@ describe("a program's own copy of a helper", () => {
   it('is taken out before running, so the real helper is used', async () => {
     const { dropHelperCopies } = await import('../src/core/error-hints.ts');
     const code = 'speak("Hi.");\nfunction speak(text) {\n  console.log(text);\n}\nspeak("Hi.");';
-    expect(dropHelperCopies(code)).toEqual({ code: 'speak("Hi.");\nspeak("Hi.");', dropped: ['speak'], renamed: [] });
+    expect(dropHelperCopies(code)).toEqual({ code: 'speak("Hi.");\nspeak("Hi.");', dropped: ['speak'], renamed: [], kept: [] });
     expect(dropHelperCopies('const total = 1;\nspeak(total);').dropped).toEqual([]);
+  });
+
+  it("keeps a definition that does something of its own, renamed with its references", async () => {
+    const { dropHelperCopies } = await import('../src/core/error-hints.ts');
+    const canvasClear = dropHelperCopies('function clear(){ ctx.clearRect(0,0,10,10); }\nfunction loop(){ clear(); requestAnimationFrame(loop); }\nloop();');
+    expect(canvasClear.code).toBe('function clear_(){ ctx.clearRect(0,0,10,10); }\nfunction loop(){ clear_(); requestAnimationFrame(loop); }\nloop();');
+    expect(canvasClear.kept).toEqual(['clear → clear_']);
+    const tree = dropHelperCopies('class TreeNode { constructor(v){ this.v = v; } }\nconst root = new TreeNode(50);\nconst o = { root };');
+    expect(tree.code).toBe('class TreeNode { constructor(v){ this.v = v; } }\nconst root_ = new TreeNode(50);\nconst o = { root: root_ };');
+    expect(dropHelperCopies('const out = new Float32Array(8);\nout[0] = 1;').code).toBe('const out_ = new Float32Array(8);\nout_[0] = 1;');
+    // A name of the same spelling inside a function is another variable: left alone
+    expect(dropHelperCopies('function f(){ const clear = 2; return clear; }\nfunction clear(){ ctx.fill(); }\nclear();').code).toBe(
+      'function f(){ const clear = 2; return clear; }\nfunction clear_(){ ctx.fill(); }\nclear_();'
+    );
+  });
+
+  it('still takes out a stand-in: one that only logs, or makes what cannot be made', async () => {
+    const { dropHelperCopies } = await import('../src/core/error-hints.ts');
+    expect(dropHelperCopies('function clear(){ console.log("cleared"); }\nclear();')).toMatchObject({ code: 'clear();', dropped: ['clear'] });
+    expect(dropHelperCopies('const out = new MidiOut();\nout.send([0x90, 60, 100]);')).toMatchObject({ code: 'out.send([0x90, 60, 100]);', dropped: ['out'] });
+  });
+});
+
+describe('letter-case slips, by scope', () => {
+  it('leaves classes, catch parameters and named function expressions alone', async () => {
+    const { fixCaseSlips } = await import('../src/core/error-hints.ts');
+    for (const code of [
+      'class Game { constructor(){ this.x = 1; } }\nconst game = new Game();',
+      'function f(){ const particle = new Particle(); }\nclass Particle {}\nconst particle = 1;',
+      'let E = 2;\ntry { x() } catch (e) { speak(e.message) }',
+      'const fib = function Fib(n){ return n < 2 ? n : Fib(n-1) + fib(n-2) };\nconst FIB = 3;',
+    ]) {
+      expect(fixCaseSlips(code)).toEqual({ code, fixed: [] });
+    }
+  });
+
+  it('still renames a real slip, shorthand keys included', async () => {
+    const { fixCaseSlips } = await import('../src/core/error-hints.ts');
+    expect(fixCaseSlips('let myCount = 0;\nmycount++;\nconst o = { mycount };').code).toBe('let myCount = 0;\nmyCount++;\nconst o = { mycount: myCount };');
+    expect(fixCaseSlips('function drawScene(){}\ndrawscene();').fixed).toEqual([{ from: 'drawscene', to: 'drawScene' }]);
   });
 });
 

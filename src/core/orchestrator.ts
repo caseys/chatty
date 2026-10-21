@@ -188,7 +188,7 @@ export function classifyTranscript(
 
 /** Requests (or the program being changed) that the optional rules are for */
 const SOUND_WORDS =
-  String.raw`\b(?:music|songs?|sing(?:s|ing)?|sound|beats?|groove|drums?|pianos?|bass|guitars?|organ|violins?|trumpets?|sax(?:ophone)?|flutes?|chords?|melod(?:y|ies)|tunes?|midi|rhythm|jam|loop(?:ed)? (?:the )?(?:song|beat|music|melody)|tempo|bpm|beeps?|audio|instruments?|[a-g][#b]? (?:major|minor|pentatonic)|(?:major|minor|pentatonic) scale|scale (?:in|of) [a-g])\b|requestMIDIAccess|AudioContext`;
+  String.raw`\b(?:music|songs?|sing(?:s|ing)?|sound|beats?|groove|drums?|pianos?|bass|guitars?|organ|violins?|trumpets?|sax(?:ophone)?|flutes?|chords?|melod(?:y|ies)|tunes?|midi|rhythm|jam|loop(?:ed)? (?:the )?(?:song|beat|music|melody)|tempo|bpm|beeps?|audio|instruments?|(?:in|key of) [a-g][#b]? (?:major|minor|pentatonic)|[a-g][#b]? (?:major|minor|pentatonic) (?:scales?|chords?|keys?|progressions?|arpeggios?)|(?:major|minor|pentatonic) scale|scale (?:in|of) [a-g])\b|requestMIDIAccess|AudioContext`;
 /** (a bare "play" also asks for games and videos: it chooses the rule, but isn't a sound on its own) */
 const SOUND_REQUEST = new RegExp(String.raw`\bplay(?:s|ing)?\b|${SOUND_WORDS}`, 'i');
 const SOUND_WORDS_REQUEST = new RegExp(SOUND_WORDS, 'i');
@@ -208,8 +208,10 @@ const VISUAL_THING = new RegExp([INTERFACE_THING, DRAWING_REQUEST, THREE_D_REQUE
 /** A question or a look-up: asked as one ("Who was…", "…?"), or a look-up named outright */
 /** Arithmetic ("15 percent of 84", "3 times 4"): worked out, not looked up */
 const MATH_REQUEST = /\d\s*(?:%|percent|times|plus|minus|divided|squared|\*|\+|\/|x\s*\d)|\b(?:sum|average|square root) of\b/i;
-const FACTS_WORDS =
-  /^\s*(?:who|what|when|where|why|which|how (?:many|much|old|tall|far|big|long))\b|\?\s*$|\b(?:tell me about|look up|search for|find out|define|meaning of|capital of|population of|weather|news|wiki(?:pedia)?)\b/i;
+/** Asked as a question ("Who won the game", "Why is the sky blue") or a look-up named outright */
+const QUESTION_WORDS =
+  /^\s*(?:who|what|when|where|why|which|how (?:many|much|old|tall|far|big|long))\b|\b(?:tell me about|look up|search for|find out|define|meaning of|capital of|population of|weather|news|wiki(?:pedia)?)\b/i;
+const FACTS_WORDS = new RegExp(`${QUESTION_WORDS.source}|\\?\\s*$`, 'i');
 const FACTS_REQUEST = { test: (request: string) => FACTS_WORDS.test(request) && !MATH_REQUEST.test(request) };
 
 /**
@@ -282,6 +284,13 @@ function codeView(text: string): string {
 /** Requests to make or do something: a reply that only talks hasn't done it */
 const ACTION_REQUEST =
   /\b(?:play|draw|make|build|create|animate|code|program|design|generate|paint|sketch|render|chart|plot|graph|count ?down|timer|stopwatch|calculator|converter|simulate|game|app)\b/i;
+/**
+ * What the outcome check is for: a request to make or show something, not a question or a phrase
+ * that names one ("who won the game", "speed of sound", "nearest star"), which a spoken answer
+ * completes. "Can you draw a cat?" and "draw a 3x3 grid" are requests.
+ */
+const asksForOutcome = (request: string) =>
+  (ACTION_REQUEST.test(request) || /\b(?:show|display)\b/i.test(request)) && !QUESTION_WORDS.test(request);
 /** Goes with the retry only (not into history) */
 
 /** How many times the model may try to fix one request's program */
@@ -1361,11 +1370,13 @@ export class ConversationOrchestrator {
           // Its own speak()/out/clear: taken out so the real helpers are used (error-hints.ts)
           if (!inspected.isProse) {
             const copies = dropHelperCopies(executableCode);
-            if (copies.dropped.length > 0 || copies.renamed.length > 0) {
+            if (copies.dropped.length > 0 || copies.renamed.length > 0 || copies.kept.length > 0) {
               executableCode = copies.code;
               for (const name of copies.dropped) appendRunLog('imagined', `its own ${name} → the ready-made one: corrected before running`);
               // Its own speak() holding the whole program: renamed, the real speak() kept for what it says
               for (const rename of copies.renamed) appendRunLog('imagined', `its own ${rename}() (it held the program): corrected before running`);
+              // Its own clear(), root, out that does something of its own: kept under another name
+              for (const rename of copies.kept) appendRunLog('imagined', `its own ${rename} (a helper's name, kept as the program's): corrected before running`);
             }
             // The example reply's own words, copied in: taken out
             const example = dropCopiedExample(executableCode);
@@ -2149,6 +2160,7 @@ export class ConversationOrchestrator {
    */
   /** What a sound or visual request's program never did, after a short wait, or null */
   private async missingOutcome(request: string, soundMark: { uses: number; heard: number; silent: number }): Promise<string | null> {
+    if (!asksForOutcome(request)) return null;
     // A request that names something to see as well still gets its visual check; a bare "play"
     // (a game, a video) is not a sound on its own then
     const namesVisual = VISUAL_THING.test(request);

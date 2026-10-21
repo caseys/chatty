@@ -51,7 +51,7 @@ class FakeContext {
   }
 }
 
-const SOUNDS: InterfaceSound[] = ['user', 'chat', 'output', 'fix', 'start', 'end'];
+const SOUNDS: InterfaceSound[] = ['user', 'chat', 'output', 'fix', 'start', 'end', 'tap'];
 
 /** The notes a sound played */
 function notesOf(sound: InterfaceSound): number[] {

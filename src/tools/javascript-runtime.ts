@@ -193,6 +193,35 @@ const trialHost = (token: string) => `(() => {
   };
   try { HTMLMediaElement.prototype.play = () => Promise.resolve(); } catch {}
   try { window.speechSynthesis.speak = () => {}; } catch {}
+  // The page shares the app's origin, and a trial clicks every button ("Clear all", "Save",
+  // "Copy"): nothing it does may reach the user's data. Storage is a copy in memory, and what
+  // would change something elsewhere (a request other than GET or HEAD, a beacon, the clipboard)
+  // goes nowhere and reports success
+  const memoryStorage = (real) => {
+    const items = new Map();
+    try { for (let i = 0; i < real.length; i++) items.set(real.key(i), real.getItem(real.key(i))); } catch {}
+    return {
+      get length() { return items.size; },
+      key: (i) => Array.from(items.keys())[i] ?? null,
+      getItem: (k) => (items.has(String(k)) ? items.get(String(k)) : null),
+      setItem: (k, v) => { items.set(String(k), String(v)); },
+      removeItem: (k) => { items.delete(String(k)); },
+      clear: () => { items.clear(); },
+    };
+  };
+  for (const name of ['localStorage', 'sessionStorage']) {
+    try { Object.defineProperty(window, name, { value: memoryStorage(window[name]), configurable: true }); } catch {}
+  }
+  try {
+    const realFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      const method = String((init && init.method) || (input && typeof input === 'object' && input.method) || 'GET').toUpperCase();
+      if (method === 'GET' || method === 'HEAD') return realFetch(input, init);
+      return Promise.resolve(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    };
+  } catch {}
+  try { navigator.sendBeacon = () => true; } catch {}
+  try { if (navigator.clipboard) navigator.clipboard.writeText = () => Promise.resolve(); } catch {}
   return {
     postMessage: (message) => window.parent.postMessage({ ...message, __trial: window.__chattyTrialToken }, '*'),
     __chattySharedAudio: quiet,

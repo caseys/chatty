@@ -13,6 +13,7 @@
  */
 import { parse, tokenizer, type Node } from 'acorn';
 import { sureMatch } from './fuzzy-match.ts';
+import { analyse, isReference, resolve } from './blank-fix.ts';
 import { applyCorrection, argumentCountFact, methodHint, missingMethod, objectType } from './method-hints.ts';
 
 export interface ErrorHint {
@@ -110,10 +111,10 @@ interface Declaration {
   line: number;
   /** The function it is declared in, or undefined for the program's top level */
   inside?: AnyNode;
-  kind: 'function' | 'variable' | 'parameter';
+  kind: 'function' | 'class' | 'variable' | 'parameter';
 }
 
-/** Every name the program declares: functions, variables and parameters */
+/** Every name the program declares: functions, classes, variables and parameters (catch's too) */
 function declarations(ast: AnyNode): Declaration[] {
   const found: Declaration[] = [];
   const addPattern = (pattern: AnyNode, inside: AnyNode | undefined, kind: Declaration['kind']) => {
@@ -126,8 +127,12 @@ function declarations(ast: AnyNode): Declaration[] {
     if (node.type === 'FunctionDeclaration' && node.id) {
       found.push({ name: (node.id as AnyNode).name as string, line: lineOf(node), inside, kind: 'function' });
     }
+    if (node.type === 'ClassDeclaration' && node.id) {
+      found.push({ name: (node.id as AnyNode).name as string, line: lineOf(node), inside, kind: 'class' });
+    }
     if (node.type === 'VariableDeclarator') addPattern(node.id as AnyNode, inside, 'variable');
     if (/Function/.test(node.type)) for (const param of node.params as AnyNode[]) addPattern(param, node, 'parameter');
+    if (node.type === 'CatchClause' && node.param) addPattern(node.param as AnyNode, inside, 'parameter');
   });
   return found;
 }
@@ -272,7 +277,7 @@ function tooEarly(code: string, error: string, errorLine?: number): ErrorHint | 
   const ast = tryParse(code);
   if (!ast) return null;
   const named = error.match(/access '([^']+)' before initialization/)?.[1];
-  const declared = declarations(ast).filter((d) => d.kind === 'variable');
+  const declared = declarations(ast).filter((d) => d.kind === 'variable' || d.kind === 'class');
   const line = errorLine ? code.split('\n')[errorLine - 1] ?? '' : '';
   const suspects = named ? declared.filter((d) => d.name === named) : declared.filter((d) => errorLine && d.line > errorLine && new RegExp(`\\b${d.name}\\b`).test(line));
   const d = suspects[0];
@@ -358,57 +363,105 @@ const HELPERS = ['out', 'speak', 'clear', 'root'];
 const SANDBOX_NAMES = [...HELPERS, 'playNotes', 'searchWikipedia'];
 
 /**
- * Before a program runs: a name used but never declared, that differs from exactly one declared
- * name (visible from where it is used) only in letter case (`mycount` for `myCount`,
- * `drawscene()` for `drawScene()`), is renamed. The error-time version is notDefined(); both
- * use caseSlip(). Browser globals and the sandbox's own names are never renamed.
+ * Before a program runs: a name used but declared nowhere it can be seen from, that differs from
+ * exactly one name that can (by scope: classes, catch parameters and named function expressions
+ * count) only in letter case (`mycount` for `myCount`, `drawscene()` for `drawScene()`), is
+ * renamed. The error-time version is notDefined(); both use caseSlip(). Browser globals and the
+ * sandbox's own names are never renamed, and a result that doesn't parse is not kept.
  */
 export function fixCaseSlips(code: string): { code: string; fixed: Array<{ from: string; to: string }> } {
-  const ast = tryParse(code);
-  if (!ast) return { code, fixed: [] };
-  const declared = declarations(ast);
-  const declaredNames = new Set(declared.map((d) => d.name));
-  const edits = new Map<number, { end: number; text: string; from: string; to: string }>();
-  const visit = (node: AnyNode, parent: AnyNode | null, functions: AnyNode[]) => {
-    if (node.type === 'Identifier') {
-      const name = node.name as string;
-      const p = parent;
-      const isName =
-        (p?.type === 'MemberExpression' && p.property === node && !p.computed) ||
-        (p?.type === 'Property' && p.key === node && !p.computed && !p.shorthand) ||
-        ((p?.type === 'MethodDefinition' || p?.type === 'PropertyDefinition') && p.key === node && !p.computed) ||
-        ((p?.type === 'LabeledStatement' || p?.type === 'BreakStatement' || p?.type === 'ContinueStatement') && p.label === node) ||
-        (p?.type === 'UnaryExpression' && p.operator === 'typeof');
-      if (!isName && !declaredNames.has(name) && !(name in globalThis) && !SANDBOX_NAMES.includes(name)) {
-        const visible = declared.filter((d) => !d.inside || functions.includes(d.inside)).map((d) => d.name);
-        const to = caseSlip(name, visible);
-        if (to && !edits.has(node.start)) {
-          const shorthand = p?.type === 'Property' && p.shorthand;
-          edits.set(node.start, { end: node.end, text: shorthand ? `${name}: ${to}` : to, from: name, to });
-        }
-      }
-    }
-    const inner = /Function/.test(node.type) ? [...functions, node] : functions;
-    for (const value of Object.values(node)) {
-      if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && visit(child, node, inner);
-      else if (value && typeof value === 'object' && typeof (value as AnyNode).type === 'string') visit(value as AnyNode, node, inner);
-    }
+  const tree = analyse(code);
+  if (!tree) return { code, fixed: [] };
+  /** Every name declared in a scope `node` sees */
+  const visibleFrom = (node: AnyNode): string[] => {
+    const names: string[] = [];
+    for (let at: AnyNode | undefined = node; at; at = tree.parent.get(at)) names.push(...(tree.scopes.get(at) ?? []));
+    return names;
   };
-  visit(ast, null, []);
+  const edits = new Map<number, { end: number; text: string; from: string; to: string }>();
+  for (const node of tree.nodes as AnyNode[]) {
+    // `{ bill }` names its key too: it becomes `{ bill: Bill }`
+    const parent = tree.parent.get(node);
+    const shorthand = parent?.type === 'Property' && parent.shorthand && tree.key.get(node) === 'value' && node.type === 'Identifier' && !tree.bindings.has(node);
+    if (!shorthand && !isReference(tree, node)) continue;
+    // typeof of an undeclared name is allowed (it's how a program asks whether it exists)
+    if (parent?.type === 'UnaryExpression' && parent.operator === 'typeof') continue;
+    if (parent?.type === 'MetaProperty') continue;
+    const name = node.name as string;
+    if (resolve(tree, node, name) || name in globalThis || SANDBOX_NAMES.includes(name)) continue;
+    const to = caseSlip(name, visibleFrom(node));
+    if (to && !edits.has(node.start)) edits.set(node.start, { end: node.end, text: shorthand ? `${name}: ${to}` : to, from: name, to });
+  }
   let out = code;
   for (const [start, edit] of [...edits].sort((a, b) => b[0] - a[0])) out = out.slice(0, start) + edit.text + out.slice(edit.end);
+  if (edits.size > 0 && !tryParse(out)) return { code, fixed: [] };
   const fixed = [...new Map([...edits.values()].map((e) => [`${e.from}→${e.to}`, { from: e.from, to: e.to }])).values()];
   return { code: out, fixed };
 }
 
+/** Web MIDI's interfaces: the spec gives them no constructor (`new MIDIOutput()` throws) */
+const NOT_CONSTRUCTIBLE = new Set(['MIDIAccess', 'MIDIInput', 'MIDIOutput', 'MIDIPort', 'MIDIInputMap', 'MIDIOutputMap']);
+
 /**
- * Before a program runs: its own definitions of a ready-made helper (`function speak(text) {
- * console.log(text) }`, `const out = …`) are taken out, so the real helper is used. A function
- * declaration applies to the whole program, so one such definition silently swallows every call.
+ * A definition that stands in for a helper rather than doing anything of its own: a function
+ * that does nothing or only logs (`function speak(t) { console.log(t) }`), an empty class, or a
+ * `new` of something that can't be made (undeclared, or an interface without a constructor)
  */
-export function dropHelperCopies(code: string): { code: string; dropped: string[]; renamed: string[] } {
+function standsIn(init: AnyNode | null | undefined, declared: Set<string>): boolean {
+  if (!init) return false;
+  if (/Function/.test(init.type)) {
+    const body = init.body as AnyNode;
+    if (body.type !== 'BlockStatement') return isLogCall(body);
+    return (body.body as AnyNode[]).every((st) => (st.type === 'ExpressionStatement' && isLogCall(st.expression as AnyNode)) || (st.type === 'ReturnStatement' && (!st.argument || ['Identifier', 'Literal'].includes((st.argument as AnyNode).type))));
+  }
+  if (init.type === 'ClassDeclaration' || init.type === 'ClassExpression') return ((init.body as AnyNode).body as AnyNode[]).length === 0;
+  if (init.type === 'NewExpression') {
+    const made = init.callee as AnyNode;
+    const name = made.name as string;
+    return made.type === 'Identifier' && !declared.has(name) && (!(name in globalThis) || NOT_CONSTRUCTIBLE.has(name));
+  }
+  return false;
+}
+
+/** console.log(…), console.info(…), alert(…) */
+function isLogCall(node: AnyNode): boolean {
+  if (node.type !== 'CallExpression') return false;
+  const callee = node.callee as AnyNode;
+  return (callee.type === 'Identifier' && callee.name === 'alert') || (callee.type === 'MemberExpression' && (callee.object as AnyNode).type === 'Identifier' && (callee.object as AnyNode).name === 'console');
+}
+
+/** The program with its top-level `name` and every reference to it (by scope) renamed to `to`, or null */
+function renameTopLevel(code: string, name: string, to: string): string | null {
+  const tree = analyse(code);
+  if (!tree) return null;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  for (const node of tree.nodes as AnyNode[]) {
+    if (node.type !== 'Identifier' || node.name !== name) continue;
+    const parent = tree.parent.get(node);
+    const shorthand = parent?.type === 'Property' && parent.shorthand && tree.key.get(node) === 'value' && !tree.bindings.has(node);
+    const declaresIt = tree.bindings.has(node) && resolve(tree, node, name) === tree.ast;
+    if (!declaresIt && !shorthand && !isReference(tree, node)) continue;
+    if (resolve(tree, node, name) !== tree.ast) continue;
+    if (!edits.some((e) => e.start === node.start)) edits.push({ start: node.start, end: node.end, text: shorthand ? `${name}: ${to}` : to });
+  }
+  let out = code;
+  for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + e.text + out.slice(e.end);
+  return tryParse(out) ? out : null;
+}
+
+/**
+ * Before a program runs: its own definitions of a ready-made helper (speak, out, clear, root).
+ *  - A copy of speak() is taken out, so the real one says the words (in the chat and aloud).
+ *  - A stand-in for another helper (one that does nothing, or a `new` of something that can't be
+ *    made: see standsIn) is taken out, so the real helper is used.
+ *  - A definition of its own (`function clear() { ctx.clearRect(…) }`, `const root = new
+ *    TreeNode(50)`, `const out = new Float32Array(n)`) is the program's: it is kept, renamed with
+ *    every reference to it (clear_), so it can't be mistaken for the helper or collide with it.
+ * A real value given to a helper name (const out = a MIDI output) stays as it is.
+ */
+export function dropHelperCopies(code: string): { code: string; dropped: string[]; renamed: string[]; kept: string[] } {
   const ast = tryParse(code);
-  if (!ast) return { code, dropped: [], renamed: [] };
+  if (!ast) return { code, dropped: [], renamed: [], kept: [] };
   // A copy that takes nothing and holds several statements is the program itself, written as
   // `const speak = () => { … }`: it is renamed (and its calls without arguments with it), not
   // dropped; calls that pass something go to the real helper
@@ -431,31 +484,51 @@ export function dropHelperCopies(code: string): { code: string; dropped: string[
     for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + main + out.slice(e.end);
     if (!tryParse(out)) break;
     const rest = dropHelperCopies(out);
-    return { code: rest.code, dropped: rest.dropped, renamed: [`${name} → ${main}`, ...rest.renamed] };
+    return { code: rest.code, dropped: rest.dropped, renamed: [`${name} → ${main}`, ...rest.renamed], kept: rest.kept };
   }
+  const own = new Set(declarations(ast).map((d) => d.name));
   const spans: Array<{ start: number; end: number; name: string }> = [];
+  const keep: string[] = [];
   for (const statement of ast.body as AnyNode[]) {
-    if (statement.type === 'FunctionDeclaration' && HELPERS.includes(((statement.id as AnyNode)?.name as string) ?? '')) {
-      spans.push({ start: statement.start, end: statement.end, name: (statement.id as AnyNode).name as string });
+    let name: string | null = null;
+    let made: AnyNode | null | undefined = null;
+    if ((statement.type === 'FunctionDeclaration' || statement.type === 'ClassDeclaration') && HELPERS.includes(((statement.id as AnyNode)?.name as string) ?? '')) {
+      name = (statement.id as AnyNode).name as string;
+      made = statement;
     }
     if (statement.type === 'VariableDeclaration') {
       const declarations = statement.declarations as AnyNode[];
       const id = declarations[0]?.id as AnyNode | undefined;
       const init = declarations[0]?.init as AnyNode | null | undefined;
-      // Only a stand-in for the helper (a function, a class, a `new …`); a real value it was given
-      // (const out = MIDI output) stays
-      const standIn = !!init && /^(?:FunctionExpression|ArrowFunctionExpression|ClassExpression|NewExpression)$/.test(init.type);
-      if (declarations.length === 1 && standIn && id?.type === 'Identifier' && HELPERS.includes(id.name as string)) {
-        spans.push({ start: statement.start, end: statement.end, name: id.name as string });
+      // Only something made for the name (a function, a class, a `new …`); a real value it was
+      // given (const out = MIDI output) stays
+      const makes = !!init && /^(?:FunctionExpression|ArrowFunctionExpression|ClassExpression|NewExpression)$/.test(init.type);
+      if (declarations.length === 1 && makes && id?.type === 'Identifier' && HELPERS.includes(id.name as string)) {
+        name = id.name as string;
+        made = init;
       }
     }
+    if (!name) continue;
+    const copiesSpeak = name === 'speak' && /Function/.test(made?.type ?? '');
+    if (copiesSpeak || standsIn(made, own)) spans.push({ start: statement.start, end: statement.end, name });
+    else keep.push(name);
   }
   let out = code;
-  for (const { start, end } of spans.reverse()) {
+  for (const { start, end } of [...spans].reverse()) {
     const after = out.slice(end).match(/^[ \t]*\n?/)?.[0].length ?? 0;
     out = out.slice(0, start) + out.slice(end + after);
   }
-  return { code: out, dropped: spans.map((s) => s.name).reverse(), renamed: [] };
+  const kept: string[] = [];
+  for (const name of new Set(keep)) {
+    let to = `${name}_`;
+    while (new RegExp(`(?<![\\w$])${to.replace(/\$/g, '\\$')}(?![\\w$])`).test(out)) to += '_';
+    const renamed = renameTopLevel(out, name, to);
+    if (renamed) {
+      out = renamed;
+      kept.push(`${name} → ${to}`);
+    }
+  }
+  return { code: out, dropped: spans.map((s) => s.name), renamed: [], kept };
 }
 
 /** Names a declaration binds (`x`, `{ a, b: c }` → a, c, `[d, ...e]`) */

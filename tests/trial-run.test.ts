@@ -13,6 +13,28 @@ const fromPage = (frame: HTMLIFrameElement, data: object) =>
   window.dispatchEvent(new MessageEvent('message', { data, source: frame.contentWindow as Window }));
 
 describe('trialRun', () => {
+  it("never reaches the user's storage: a trial gets a copy in memory", async () => {
+    const runtime = new JavascriptRuntime();
+    const trial = (runtime as unknown as Internals).buildRunnerHtml(true, undefined, 'tok_s');
+    let real: Storage | null = null;
+    const dom = new JSDOM(trial, {
+      runScripts: 'dangerously',
+      pretendToBeVisual: true,
+      url: 'http://localhost/',
+      beforeParse(w: Window) {
+        real = w.localStorage;
+        real.setItem('saved', 'yes');
+      },
+    });
+    const win = dom.window as unknown as Window & typeof globalThis;
+    // What a "Clear all" button in a to-do app does, clicked by a trial
+    const seen = win.eval("const before = localStorage.getItem('saved'); localStorage.clear(); localStorage.setItem('x', '1'); [before, localStorage.getItem('x'), localStorage.length]");
+    expect(Array.from(seen as unknown[])).toEqual(['yes', '1', 1]);
+    expect(real!.getItem('saved')).toBe('yes');
+    expect(real!.getItem('x')).toBeNull();
+    dom.window.close();
+  });
+
   it('builds the trial page from the same sandbox, with a quiet host', async () => {
     const runtime = new JavascriptRuntime();
     const real = (runtime as unknown as Internals).buildRunnerHtml(false);
@@ -21,7 +43,7 @@ describe('trialRun', () => {
     expect(trial).not.toContain('const __chattyHost = window.parent;');
     expect(trial).toContain('OfflineAudioContext');
     // Same helpers and watchers
-    expect(trial.length - real.length).toBeLessThan(2500);
+    expect(trial.length - real.length).toBeLessThan(3500);
 
     const posted: unknown[] = [];
     const dom = new JSDOM(trial, { runScripts: 'dangerously', pretendToBeVisual: true, url: 'http://localhost/' });

@@ -27,6 +27,24 @@ describe('the outcome check', () => {
     }
   );
 
+  it.each(['who won the game', 'why is the sky blue', 'speed of sound', 'nearest star', 'square root of 144', 'who invented the piano'])(
+    'does not fire for a question that names something to see or hear: "%s"',
+    async (request) => {
+      expect(await outcome(request, nothing)).toBeNull();
+    }
+  );
+
+  it('still fires for a request asked politely, or one with numbers in it', async () => {
+    expect(await outcome('Can you draw a cat?', nothing)).toContain('showed nothing');
+    expect(await outcome('Draw a 3x3 grid', nothing)).toContain('showed nothing');
+  });
+
+  it('takes "a minor" for music only in a musical phrase', () => {
+    expect(promptRules('Can I sell alcohol to a minor', true)).not.toContain('Sound:');
+    expect(promptRules('Build a blues loop in G minor', true)).toContain('Sound:');
+    expect(promptRules('Play an A minor chord', true)).toContain('Sound:');
+  });
+
   it('still fires for something that must appear', async () => {
     expect(await outcome('Make a timer', nothing)).toContain('showed nothing');
     expect(await outcome('Make a timer', sees)).toBeNull();
