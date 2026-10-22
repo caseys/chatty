@@ -4,7 +4,8 @@
 // webllm-protocol.ts (see runtimes/webllm-client.ts and runtimes/webllm-provider.ts).
 // ============================================================================
 
-import { deleteModelAllInfoInCache, MLCEngine, prebuiltAppConfig } from '@mlc-ai/web-llm';
+import { deleteModelAllInfoInCache, MLCEngine, prebuiltAppConfig, type AppConfig } from '@mlc-ai/web-llm';
+import { customModelRecords } from '../runtimes/custom-models.ts';
 import { createWebLlmHost, type WebLlmEngine } from './webllm-host.ts';
 import type { WebLlmEvent, WebLlmRequest } from './webllm-protocol.ts';
 
@@ -42,11 +43,14 @@ if (Device) {
   };
 }
 
+// WebLLM's own models, and the fine-tunes we converted (runtimes/custom-models.ts)
+const appConfig: AppConfig = { ...prebuiltAppConfig, model_list: [...prebuiltAppConfig.model_list, ...customModelRecords(prebuiltAppConfig.model_list)] };
+
 const host = createWebLlmHost(
   {
-    engine: new MLCEngine() as unknown as WebLlmEngine,
-    modelUrl: (model) => prebuiltAppConfig.model_list.find((record) => record.model_id === model)?.model,
-    deleteCache: (model) => deleteModelAllInfoInCache(model),
+    engine: new MLCEngine({ appConfig }) as unknown as WebLlmEngine,
+    modelUrl: (model) => appConfig.model_list.find((record) => record.model_id === model)?.model,
+    deleteCache: (model) => deleteModelAllInfoInCache(model, appConfig),
   },
   (event: WebLlmEvent) => (self as unknown as Worker).postMessage(event)
 );

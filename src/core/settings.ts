@@ -66,6 +66,8 @@ export const LOCAL_CHAT_MODELS: ReadonlyArray<LocalChatModel> = [
   local('qwen2.5-0.5b', 'Qwen2.5 0.5B', 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC', 290, 945, 'Smallest download', true),
   { ...local('qwen3-0.6b', 'Qwen3 0.6B', 'Qwen3-0.6B-q4f16_1-MLC', 352, 1403, 'Newer general model', true), noThinking: true },
   { ...local('qwen3.5-0.8b', 'Qwen3.5 0.8B', 'Qwen3.5-0.8B-q4f16_1-MLC', 424, 1629, 'Newest small Qwen', true), noThinking: true },
+  // A fine-tune of Qwen3 0.6B, converted and hosted by us (runtimes/custom-models.ts): the same size as its base
+  { ...local('qwen3-0.6b-js12k', 'Qwen3 0.6B JS', 'Qwen3-0.6B-JS12K-q4f16_1-MLC', 352, 1403, 'Fine-tuned on JavaScript: better at drawing, worse at music', true), noThinking: true },
   // Desktop (smallest memory first)
   local('qwen2.5-coder-1.5b', 'Qwen2.5-Coder 1.5B', 'Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC', 880, 1630, 'Strong at JavaScript', false),
   { ...local('qwen3-1.7b', 'Qwen3 1.7B', 'Qwen3-1.7B-q4f16_1-MLC', 968, 2037, 'General model', false), noThinking: true },
