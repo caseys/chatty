@@ -259,6 +259,16 @@ function replyCode(reply: string, wholeFor?: string): string[] {
   // Asked for the whole program, a reply with several code blocks gives the complete one, not the
   // fragment that came first: the block that keeps the most of the program's own lines (then the
   // longer, then the first)
+  // One JavaScript block and HTML blocks that are only <script>s are one program, as a first reply's
+  // would be: a fix reply that wrote the page in ```js and function board() in ```html's <script>
+  // lost its page to the block that kept more of the program's lines
+  const labelled = [...reply.matchAll(/```([\w-]*)[ \t]*\n([\s\S]*?)(?:```|$)/g)].filter((m) => m[2].trim());
+  const ONLY_SCRIPTS = /^(?:\s*<script\b[^>]*>[\s\S]*?<\/script>)+\s*$/i;
+  const scripts = labelled.filter((m) => /^html?$/i.test(m[1]) && ONLY_SCRIPTS.test(m[2]));
+  const js = labelled.filter((m) => /^(?:js|javascript)$/i.test(m[1]));
+  if (wholeFor !== undefined && js.length === 1 && scripts.length > 0 && js.length + scripts.length === labelled.length) {
+    return keepCodeLines(labelled.map((m) => (m === js[0] ? m[2] : m[2].replace(/<\/?script\b[^>]*>/gi, ''))).join('\n'));
+  }
   if (wholeFor !== undefined && fences.length > 1) {
     const own = new Set(wholeFor.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('//')));
     // (a block that is the program itself is "Before it was:", not the fix)
