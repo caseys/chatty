@@ -14,6 +14,20 @@ describe('the kind of element behind each looked-up id', () => {
     expect(elementKinds(code)).toEqual({ board: 'canvas', sound: 'media', amount: 'field', box: 'dialog' });
   });
 
+  it('reads a field from an input or change listener on it, and nothing from key or click listeners', () => {
+    // The pounds converter Qwen3.5 2B wrote: it read this.value, never lbsInput.value
+    const code = [
+      "const lbsInput = document.getElementById('lbsInput');",
+      "lbsInput.addEventListener('input', function () { speak(this.value * 0.45); });",
+      "document.getElementById('celsius').addEventListener('change', function () { speak(this.value); });",
+      "document.getElementById('name').oninput = () => {};",
+      "document.getElementById('board').addEventListener('keydown', () => {});",
+      "document.getElementById('go').addEventListener('click', () => {});",
+      "document.getElementById('note').toString();",
+    ].join('\n');
+    expect(elementKinds(code)).toEqual({ lbsInput: 'field', celsius: 'field', name: 'field' });
+  });
+
   it('leaves out an id used as two kinds, and code that does not parse', () => {
     expect(elementKinds("const x = document.getElementById('x'); x.play(); x.getContext('2d');")).toEqual({});
     expect(elementKinds('const = ;')).toEqual({});

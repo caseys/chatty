@@ -972,6 +972,59 @@ const CONTEXT_2D = new Set([
 /** Types that read the same with or without brackets around them when put in place of another expression */
 const PLAIN = new Set(['Identifier', 'MemberExpression', 'CallExpression', 'ThisExpression', 'Literal', 'TemplateLiteral', 'ArrayExpression', 'ChainExpression']);
 
+/** A name's words, lower case: isValidMove → is, valid, move */
+const wordsOf = (name: string) => name.split(/_+|(?<=[a-z0-9])(?=[A-Z])/).map((word) => word.toLowerCase());
+
+/**
+ * Whether a name chosen for a missing function's name (isValidMove() never declared) can stand for
+ * it: one that shares a word with it (by its first four letters: move, moves), or the one the model
+ * clearly prefers. A tic-tac-toe Qwen2.5 0.5B wrote got isValidMove → nextTurn on scores of 0.52
+ * against 0.48 for changePlayer, names that share nothing with it: a coin flip is no answer, and
+ * the fix turn writes the function instead. Anything but a bare name, and a blank that isn't a
+ * missing function's name, is not judged here.
+ */
+export function standsForMissingFunction(code: string, blank: Blank, error: string, expr: string, clearlyPreferred: boolean): boolean {
+  const name = blank.text.trim();
+  const candidate = expr.trim();
+  if (!/is not defined|Can't find variable/.test(error) || !/^[A-Za-z_$][\w$]*$/.test(name) || !/^[A-Za-z_$][\w$]*$/.test(candidate)) return true;
+  if (!new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\s*\\(`).test(code)) return true;
+  if (clearlyPreferred) return true;
+  const key = (word: string) => word.slice(0, 4);
+  const mine = new Set(wordsOf(name).filter((word) => word.length >= 3).map(key));
+  return wordsOf(candidate).some((word) => word.length >= 3 && mine.has(key(word)));
+}
+
+/**
+ * Whether filling the blank with a function's name makes the function the blank is in call itself
+ * where it didn't (isValidMove() inside nextTurn() filled with nextTurn: the test run then ended in
+ * "Maximum call stack size exceeded")
+ */
+export function fillCallsItself(code: string, blank: Blank, expr: string): boolean {
+  const candidate = expr.trim();
+  if (!/^[A-Za-z_$][\w$]*$/.test(candidate) || blank.spans.length === 0) return false;
+  let ast: AnyNode;
+  try {
+    ast = parse(code, OPTIONS) as unknown as AnyNode;
+  } catch {
+    return false;
+  }
+  const at = blank.spans[0].start;
+  let calls = false;
+  const visit = (node: AnyNode, parent: AnyNode | null) => {
+    if (calls || at < node.start || at >= node.end) return;
+    if (/Function/.test(node.type)) {
+      const own = (node.id as AnyNode | null)?.name ?? (parent?.type === 'VariableDeclarator' && (parent.id as AnyNode).type === 'Identifier' ? (parent.id as AnyNode).name : null);
+      if (own === candidate) calls = true;
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && visit(child, node);
+      else if (value && typeof value === 'object' && typeof (value as AnyNode).type === 'string') visit(value as AnyNode, node);
+    }
+  };
+  visit(ast, null);
+  return calls;
+}
+
 /**
  * The program with every span of the blank replaced by expr, or null if the result doesn't parse or
  * expr is not a single expression. Anything but a plain expression goes in brackets.

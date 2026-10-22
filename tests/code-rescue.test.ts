@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { callUncalledFunctions, exposeFunctionsToInlineHandlers, hoistPageScripts, inspectExecutableCode, stripComments } from '../src/tools/javascript-runtime.ts';
+import { callUncalledFunctions, exposeFunctionsToInlineHandlers, hoistPageScripts, inspectExecutableCode, lookUpUnmadeFields, stripComments } from '../src/tools/javascript-runtime.ts';
 
 describe('running code the model wrapped or forgot to call', () => {
   it('runs a fenced block, saying the talk before and after it with speak()', () => {
@@ -117,6 +117,30 @@ describe('running code the model wrapped or forgot to call', () => {
     // Used as an event handler: left alone
     expect(callUncalledFunctions('function onTap() {}\nroot.onclick = onTap;')).toBe('function onTap() {}\nroot.onclick = onTap;');
     expect(callUncalledFunctions('const start = () => speak("x");')).toBe('const start = () => speak("x");\nawait start();');
+  });
+
+  it('looks up on its first line the fields a program reads and never makes, when it hears typing on the page', () => {
+    // The pounds converter Qwen2.5 0.5B wrote, with the listener Chatty wires: nothing on the page to type in
+    const code = "function poundToKilograms() {\n  let pounds = parseFloat(document.getElementById('pounds').value);\n  document.getElementById('kilos').innerText = `${(pounds * 0.45).toFixed(2)} kg`;\n}";
+    const prepared = inspectExecutableCode('```javascript\n' + code + '\n```');
+    expect(prepared.standInFields).toEqual(['pounds']);
+    expect(prepared.code.startsWith('document.getElementById("pounds"); function poundToKilograms() {')).toBe(true);
+    expect(prepared.code.split('\n').length).toBe(callUncalledFunctions(code).split('\n').length);
+    // Its own listener, through variables, two of them, in the order it names them (the BMI calculator Qwen3.5 2B wrote)
+    const bmi = "const calculateBMI = function () {\n  const w = document.getElementById('weight');\n  const h = document.getElementById('height');\n  speak(w.value / (h.value / 100) ** 2);\n};\ndocument.addEventListener('input', () => calculateBMI());";
+    expect(lookUpUnmadeFields(bmi)).toEqual({ code: `document.getElementById("weight"); document.getElementById("height"); ${bmi}`, ids: ['weight', 'height'] });
+    // Not without a listener for typing on the page (a key listener is none), and not a field it makes itself,
+    // in markup (also escaped), by its id or attribute, or one it looks for itself
+    const listened = `${code}\ndocument.addEventListener('input', () => poundToKilograms());`;
+    expect(lookUpUnmadeFields(code).ids).toEqual([]);
+    expect(lookUpUnmadeFields(`${code}\ndocument.addEventListener('keydown', () => poundToKilograms());`).ids).toEqual([]);
+    expect(lookUpUnmadeFields(`document.body.innerHTML = '<input id="pounds"><div id="kilos"></div>';\n${listened}`).ids).toEqual([]);
+    expect(lookUpUnmadeFields(`document.body.innerHTML = "<input id=\\"pounds\\">";\n${listened}`).ids).toEqual([]);
+    expect(lookUpUnmadeFields(`const box = document.createElement('input');\nbox.id = 'pounds';\ndocument.body.append(box);\n${listened}`).ids).toEqual([]);
+    expect(lookUpUnmadeFields(`const box = document.createElement('input');\nbox.setAttribute('id', 'pounds');\n${listened}`).ids).toEqual([]);
+    expect(lookUpUnmadeFields(`if (!document.getElementById('pounds')) speak('no box');\n${listened}`).ids).toEqual([]);
+    // Nor an element it only writes to
+    expect(lookUpUnmadeFields(listened).ids).toEqual(['pounds']);
   });
 
   it('calls a function that only refers to itself (a loop or timer it never starts)', () => {
@@ -308,6 +332,16 @@ describe('repeat-loop guard', () => {
     expect(text.slice(0, repetitionCutIndex(text))).toBe(
       'const inputTotal = document.getElementById("total");\ninputTotal.addEventListener("input", () => {\n  calculate();\n});\n'
     );
+  });
+
+  it('cuts a block written again inside itself, each copy indented deeper (a fix Qwen2.5 0.5B wrote for 22 seconds)', async () => {
+    const { repetitionCutIndex } = await import('../src/core/orchestrator.ts');
+    let text = 'const ctx = canvas.getContext("2d");\n';
+    for (let depth = 0; depth < 8; depth++) text += `${'  '.repeat(2 * depth)}function drawLoop() {\n${'  '.repeat(2 * depth + 1)}requestAnimationFrame(drawLoop);\n`;
+    expect(text.slice(0, repetitionCutIndex(text + '      fun'))).toBe('const ctx = canvas.getContext("2d");\nfunction drawLoop() {\n  requestAnimationFrame(drawLoop);');
+    // Lines alike but for their numbers are no repeat
+    const rects = 'ctx.fillStyle = "red";\nctx.fillRect(10, 10, 50, 50);\nctx.fillRect(70, 10, 50, 50);\nctx.fillRect(130, 10, 50, 50);\nctx.fillRect(190, 10, 50, 50);\n  ctx.fillRect(250, 10, 50, 50);\nctx.fill';
+    expect(repetitionCutIndex(rects)).toBe(-1);
   });
 
   it('leaves normal code alone', async () => {
