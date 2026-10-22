@@ -333,22 +333,24 @@ describe('a fix that loses the program', () => {
 
 describe('what a follow-up turn sends the desktop model', () => {
   // LiteRtLlmProvider reuses its processed prompt only when a follow-up repeats the last call's
-  // system prompt and messages exactly (plus the reply it got) before the new message
+  // system prompt and messages exactly (plus the reply it got) before the new message. Every model
+  // gets the rules its request needs (one set for all models), so the system prompt is the same
+  // whenever two requests need the same rules, and the messages only ever grow
 
   const reply = (text: string) => ({ role: 'assistant', content: text });
 
-  it('sends the same system prompt and an identical message prefix on consecutive turns', async () => {
+  it('sends the same system prompt for requests that need the same rules, and an identical message prefix on consecutive turns', async () => {
     const llm = new QueueLlm(['speak("Hello there.");', 'speak("I am well.");', 'speak("Three.");']);
     const orchestrator = orchestratorFor(llm);
     await orchestrator.submitUserInput('Hello');
-    await orchestrator.submitUserInput('How are you?');
-    await orchestrator.submitUserInput('What is one plus two?');
+    await orchestrator.submitUserInput('Tell me something nice');
+    await orchestrator.submitUserInput('Say one more thing');
 
     const [a, b, c] = llm.turns;
     expect(b.systemPrompt).toBe(a.systemPrompt);
     expect(c.systemPrompt).toBe(a.systemPrompt);
-    expect(b.messages).toEqual([...a.messages, reply('speak("Hello there.");'), { role: 'user', content: 'How are you?' }]);
-    expect(c.messages).toEqual([...b.messages, reply('speak("I am well.");'), { role: 'user', content: 'What is one plus two?' }]);
+    expect(b.messages).toEqual([...a.messages, reply('speak("Hello there.");'), { role: 'user', content: 'Tell me something nice' }]);
+    expect(c.messages).toEqual([...b.messages, reply('speak("I am well.");'), { role: 'user', content: 'Say one more thing' }]);
   });
 
   it('keeps per-request notes (memories, references, answer style) out of the system prompt and repeats them with their request', async () => {
@@ -361,8 +363,10 @@ describe('what a follow-up turn sends the desktop model', () => {
     await orchestrator.submitUserInput('Thanks');
 
     const [a, b, c, d] = llm.turns;
-    for (const turn of [b, c, d]) expect(turn.systemPrompt).toBe(a.systemPrompt);
-    expect(a.systemPrompt).not.toContain('favorite_color');
+    // (the two questions get the facts rule; the thanks needs the same rules as the greeting)
+    expect(c.systemPrompt).toBe(b.systemPrompt);
+    expect(d.systemPrompt).toBe(a.systemPrompt);
+    for (const turn of [a, b, c, d]) expect(turn.systemPrompt).not.toContain('favorite_color');
 
     // The memory travels with the request that it was picked for
     const asked = b.messages.at(-1)!.content;
@@ -374,7 +378,7 @@ describe('what a follow-up turn sends the desktop model', () => {
     expect(d.messages.slice(0, c.messages.length + 1)).toEqual([...c.messages, reply('speak("Green.");')]);
   });
 
-  it('keeps the system prompt fixed on the turns after a program too', async () => {
+  it('keeps the system prompt the same on the turns after a program when they need the same rules', async () => {
     const llm = new QueueLlm([DRAWING, 'speak("I am well.");', 'speak("Three.");', 'speak("Fine.");']);
     const orchestrator = orchestratorFor(llm);
     await orchestrator.submitUserInput('draw a red circle');
@@ -382,10 +386,11 @@ describe('what a follow-up turn sends the desktop model', () => {
     await orchestrator.submitUserInput('what is one plus two?');
     await orchestrator.submitUserInput('and two plus two?');
 
-    // The program stays in the history as what happened when it ran; the system prompt never
-    // changes, and each turn only appends
+    // The program stays in the history as what happened when it ran; the drawing got the drawing
+    // rules, the talk after it the same core rules each turn, and each turn only appends
     const [a, b, c, d] = llm.turns;
-    expect(b.systemPrompt).toBe(a.systemPrompt);
+    expect(a.systemPrompt).toContain('Use <canvas>');
+    expect(b.systemPrompt).not.toContain('Use <canvas>');
     expect(b.messages.map((m) => m.content).join('\n')).toContain('(Your program showed something on screen');
     expect(c.systemPrompt).toBe(b.systemPrompt);
     expect(d.systemPrompt).toBe(b.systemPrompt);

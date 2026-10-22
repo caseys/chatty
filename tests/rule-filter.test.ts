@@ -161,3 +161,13 @@ describe('data from a web address and the clipboard', () => {
     expect(rules).toContain('button.onclick = () => navigator.clipboard.writeText(""); // the text to copy');
   });
 });
+
+describe('the canvas rule and motion', () => {
+  it('adds the motion sentence only when a drawing request asks for motion', () => {
+    const motion = 'For motion, keep each thing';
+    expect(promptRules('Animate 10 colored balls bouncing around the screen', true)).toContain(motion);
+    expect(promptRules('Make a game where two players take turns tapping squares', true)).not.toContain(motion);
+    expect(promptRules('Draw a red barn with a blue sky behind it.', true)).not.toContain(motion);
+    expect(promptRules('Draw a red barn with a blue sky behind it.', true)).toContain('Use <canvas> for visuals');
+  });
+});

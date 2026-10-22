@@ -484,3 +484,29 @@ describe("the card's speak()", () => {
     expect(said((speak) => speak(undefined))).toEqual(['']);
   });
 });
+
+describe('an inline handler quoted with the quote its own call uses', () => {
+  let win: ReturnType<typeof loadRunner>;
+  afterEach(() => win?.close());
+
+  it("is read as the call with its argument: onclick='tapped('1')' runs tapped(\"1\")", () => {
+    win = loadRunner();
+    const got: string[] = [];
+    (win as unknown as { tapped: (id: string) => void }).tapped = (id) => got.push(id);
+    const board = win.document.createElement('div');
+    win.document.body.appendChild(board);
+    board.innerHTML = "<button id='b1' onclick='tapped('1');'>1</button>";
+    board.insertAdjacentHTML('beforeend', '<button id="b2" onclick="tapped("2")">2</button>');
+    (win.document.getElementById('b1') as HTMLButtonElement).click();
+    (win.document.getElementById('b2') as HTMLButtonElement).click();
+    expect(got).toEqual(['1', '2']);
+  });
+
+  it('leaves handlers that are quoted right alone', () => {
+    win = loadRunner();
+    const board = win.document.createElement('div');
+    win.document.body.appendChild(board);
+    board.innerHTML = `<button id="b" onclick="tapped('1')">1</button>`;
+    expect(win.document.getElementById('b')!.getAttribute('onclick')).toBe("tapped('1')");
+  });
+});

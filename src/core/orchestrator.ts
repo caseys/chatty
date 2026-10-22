@@ -376,7 +376,13 @@ const PROMPT_RULES: ReadonlyArray<{
   { text: '- ONLY chat with user via the speak() function.' },
   { text: '- What you add to document.body appears in a card on screen.', name: 'card', when: CARD_REQUEST },
   { text: '- Use HTML and CSS for interfaces: buttons, forms, tables, dashboards and widgets.', name: 'ui', when: INTERFACE_REQUEST },
-  { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations. For motion, keep each thing\'s position and speed in variables, and move and redraw it in one requestAnimationFrame loop.', name: 'canvas', when: DRAWING_REQUEST },
+  { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations.', name: 'canvas', when: DRAWING_REQUEST },
+  // Only for what moves: a board game or a still drawing given it wrote frame loops, elapsed time and
+  // movement for things that never move (Qwen2.5 0.5B, a two-player game of taps)
+  {
+    text: "- For motion, keep each thing's position and speed in variables, and move and redraw it in one requestAnimationFrame loop.",
+    when: { test: (request: string) => DRAWING_REQUEST.test(request) && MOTION_REQUEST.test(request) },
+  },
   // Steps in words, no code: tested on five 3D requests (Qwen3 0.6B, twice each), every reply put the canvas on the
   // page, added its mesh and rendered, where a code example was copied (its cube) and lost the render loop
   {
@@ -771,11 +777,17 @@ async function unusableFix(
  * How long a fix reply may be: about twice what it replaces, plus room for its Cause line (a
  * small model can otherwise ramble or repeat until the output limit, a minute on a phone)
  */
+/** The least room a whole program asked for again gets (fixReplyTokens) */
+const WHOLE_FIX_MIN_TOKENS = 700;
+
 export function fixReplyTokens(program: string, line: number | undefined, block: { start: number; end: number } | undefined, max: number): number {
   const lines = program.split('\n');
   const replaced = block ? lines.slice(block.start - 1, block.end).join('\n') : line ? (lines[line - 1] ?? '') : program;
-  // About 3 characters a token for code
-  return Math.min(max, Math.max(160, Math.round((replaced.length / 3) * 2) + 120));
+  // About 3 characters a token for code. A whole program asked for again is a new one, whatever the
+  // failed one's length: a 4-line program that did nothing got 290 tokens, and every rewrite of it as
+  // the app asked for was cut off before its end
+  const floor = block || line ? 160 : WHOLE_FIX_MIN_TOKENS;
+  return Math.min(max, Math.max(floor, Math.round((replaced.length / 3) * 2) + 120));
 }
 
 /**
@@ -3836,8 +3848,10 @@ export class ConversationOrchestrator {
   }
 
   private staticPromptParts(request?: string, scored?: ScoredRules, program = ''): { head: string[]; tail: string[] } {
-    // The smallest models get only the rules this request needs
-    const filter = request !== undefined && this.isSmallModel;
+    // Every model gets only the rules this request needs: one set of rules for all of them. (Bigger
+    // models once got every rule, the same prompt each turn for its cache: Qwen3.5 2B, given all of them
+    // for a tip calculator, wrote a 4-line program that made no field)
+    const filter = request !== undefined;
     const rules = filter ? promptRules(`${request}\n${program}`, true, scored, program) : CONCISE_VOICE_SYSTEM_PROMPT;
     const head = this.phonePipeline
       ? [`${this.phonePipeline.chatSystemPrompt} Current date and time: ${new Date().toLocaleString()}.`]
@@ -3858,9 +3872,9 @@ export class ConversationOrchestrator {
 
   /** Estimated tokens of what every prompt carries: the system prompt and the format turns */
   private fixedPromptTokens(): number {
-    // Small models get a prompt with only the rules a request needs, so count the core rules
+    // Every prompt has the core rules and only the rules a request needs, so count the core rules
     // (the format turns are always there)
-    const { head, tail } = this.staticPromptParts(this.isSmallModel ? '' : undefined);
+    const { head, tail } = this.staticPromptParts('');
     // …and every example, which they get only when the request matches (the music one is long)
     let tokens = this.memoryStore.estimateTokens([...head, ...tail].join('\n'));
     if (!this.phonePipeline) {

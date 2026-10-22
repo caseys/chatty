@@ -3783,11 +3783,30 @@ export class JavascriptRuntime {
       } catch {}
     }
     {
+      // An inline handler quoted with the quote its own call uses: onclick='tapped('1')' is read by the
+      // browser as onclick='tapped(' (a handler that can't be parsed, an error with no line when it is
+      // read or the element is tapped). The one reading is the call with its argument: the inner
+      // quotes become the other kind, as the markup's entity (onclick='tapped(&quot;1&quot;)')
+      // (outside <script>s: a script's text is the program's, not markup)
+      const fixHandlerQuotes = (markup) =>
+        typeof markup !== 'string' || !/\\son[a-z]+=/i.test(markup)
+          ? markup
+          : markup
+              .split(/(<script[\\s\\S]*?<\\/script>)/i)
+              .map((part) =>
+                /^<script/i.test(part)
+                  ? part
+                  : part
+                      .replace(/(\\son[a-z]+=')([\\w$.]+)\\('([^'<>]*)'\\)(;?)'/gi, '$1$2(&quot;$3&quot;)$4\\'')
+                      .replace(/(\\son[a-z]+=")([\\w$.]+)\\("([^"<>]*)"\\)(;?)"/gi, '$1$2(&#39;$3&#39;)$4"')
+              )
+              .join('');
       const innerHtml = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
       if (innerHtml && innerHtml.set) {
         Object.defineProperty(Element.prototype, 'innerHTML', {
           ...innerHtml,
           set(value) {
+            value = fixHandlerQuotes(value);
             const scripted = typeof value === 'string' && /<script/i.test(value);
             const before = scripted ? __chattyScriptKeys(this) : null;
             innerHtml.set.call(this, value);
@@ -3797,6 +3816,7 @@ export class JavascriptRuntime {
       }
       const insertAdjacent = Element.prototype.insertAdjacentHTML;
       Element.prototype.insertAdjacentHTML = function (position, text) {
+        text = fixHandlerQuotes(text);
         const scripted = typeof text === 'string' && /<script/i.test(text);
         const container = /^(?:before|after)/i.test(position) && this.parentNode ? this.parentNode : this;
         const before = scripted ? __chattyScriptKeys(container) : null;
