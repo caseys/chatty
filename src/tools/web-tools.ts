@@ -74,6 +74,79 @@ export async function fetchWikipediaSummary(query: string): Promise<{
   }
 }
 
+/** The weather right now somewhere, as getWeather() gives it to a program */
+export interface CurrentWeather {
+  /** The place found, like "Paris" */
+  place: string;
+  /** °C */
+  temperature: number;
+  /** mm of rain (and snow, as water) in the last hour */
+  rain: number;
+  /** The sky in a word or two, like "clear", "cloudy" or "rain" (left out, a program made it up) */
+  sky: string;
+}
+
+/** WMO weather codes (Open-Meteo's weather_code) in words */
+export function skyOf(code: number): string {
+  if (code === 0) return 'clear';
+  if (code === 1) return 'mostly clear';
+  if (code === 2) return 'partly cloudy';
+  if (code === 3) return 'cloudy';
+  if (code === 45 || code === 48) return 'fog';
+  if (code >= 51 && code <= 57) return 'drizzle';
+  if ((code >= 61 && code <= 67) || (code >= 80 && code <= 82)) return 'rain';
+  if ((code >= 71 && code <= 77) || code === 85 || code === 86) return 'snow';
+  if (code >= 95 && code <= 99) return 'thunderstorm';
+  return 'unknown';
+}
+
+/** What a program passes for "where the user is" (models write these as well as leaving the place out) */
+const HERE =
+  /^(?:|here|my (?:location|place|city|area)|(?:current|this|your|the user'?s) location|where (?:i am|the user is|you are)|near me|nearby|local|user|the user)$/i;
+
+type FetchLike = (url: string) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+
+/**
+ * The weather right now for a place by name, or with no place where the visitor is (by IP). Small
+ * models can't know a city's latitude and longitude, and two chained fetches were too much for them,
+ * so the card's getWeather(place) does it: Open-Meteo's geocoding, then its forecast (both keyless and
+ * open to cross-origin requests), and geojs.io for the visitor's location. Throws an Error that says
+ * what went wrong, for the program (and the fix turn) to see.
+ */
+export async function fetchWeather(place?: unknown, fetchFn: FetchLike = (url) => fetch(url, { credentials: 'omit' })): Promise<CurrentWeather> {
+  const getJson = async (url: string, what: string): Promise<any> => {
+    let res: Awaited<ReturnType<FetchLike>>;
+    try {
+      res = await fetchFn(url);
+    } catch (err) {
+      throw new Error(`getWeather: could not reach the ${what} (${err instanceof Error ? err.message : String(err)})`);
+    }
+    if (!res.ok) throw new Error(`getWeather: the ${what} answered ${res.status}`);
+    return res.json();
+  };
+  const asked = typeof place === 'string' && !HERE.test(place.trim()) ? place.trim() : '';
+  let found: { name: string; latitude: number; longitude: number };
+  if (asked) {
+    const search = async (name: string) =>
+      (await getJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=1`, 'place search'))?.results?.[0];
+    // "Paris, France" or "Austin, TX": the city alone when the whole name finds nothing
+    const hit = (await search(asked)) ?? (asked.includes(',') ? await search(asked.split(',')[0].trim()) : undefined);
+    if (!hit) throw new Error(`getWeather: no place called "${asked}" was found`);
+    found = { name: String(hit.name ?? asked), latitude: Number(hit.latitude), longitude: Number(hit.longitude) };
+  } else {
+    const here = await getJson('https://get.geojs.io/v1/ip/geo.json', 'location service');
+    found = { name: String(here?.city || here?.region || here?.country || 'here'), latitude: Number(here?.latitude), longitude: Number(here?.longitude) };
+  }
+  if (!Number.isFinite(found.latitude) || !Number.isFinite(found.longitude)) throw new Error(`getWeather: no location for "${asked || 'here'}"`);
+  const forecast = await getJson(
+    `https://api.open-meteo.com/v1/forecast?latitude=${found.latitude}&longitude=${found.longitude}&current=temperature_2m,precipitation,weather_code`,
+    'weather service'
+  );
+  const temperature = Number(forecast?.current?.temperature_2m);
+  if (!Number.isFinite(temperature)) throw new Error('getWeather: the weather service gave no temperature');
+  return { place: found.name, temperature, rain: Number(forecast?.current?.precipitation) || 0, sky: skyOf(Number(forecast?.current?.weather_code)) };
+}
+
 /**
  * Creates the Wikipedia Search & Summary Tool definition.
  */

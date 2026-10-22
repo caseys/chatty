@@ -1478,7 +1478,7 @@ function syntaxSlip(code: string, error: string, errorLine?: number): ErrorHint 
 /** Helpers every program already has, ready to use */
 const HELPERS = ['out', 'speak', 'clear', 'root'];
 /** Names the sandbox provides besides the browser's own */
-const SANDBOX_NAMES = [...HELPERS, 'playNotes', 'searchWikipedia'];
+const SANDBOX_NAMES = [...HELPERS, 'playNotes', 'searchWikipedia', 'getWeather'];
 /**
  * Every name the sandbox gives a program (javascript-runtime.ts): the helpers, three.js, Tone.js, and
  * the Web MIDI program's defaults. None is in this window's globalThis, so a rename of one of them would be
