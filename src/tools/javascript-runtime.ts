@@ -234,6 +234,8 @@ export interface PreparedExecutableCode {
   called?: string[];
   /** Functions nothing called that work out what the user types, run as they type and when a form is sent (callUncalledFunctions) */
   wired?: string[];
+  /** The ids those functions read as fields that the program never makes, looked up first so each has a stand-in <input> (callUncalledFunctions) */
+  standInFields?: string[];
   /** Names declared again in one block, whose later declarations now set the value (declareOnce) */
   redeclared?: string[];
   /** Code blocks dropped for repeating another (withoutRepeatedBlocks) */
@@ -755,6 +757,32 @@ export function callUncalledFunctions(original: string, awaited = true): string 
   return toCall.length ? `${original}\n${toCall.map(start).join('\n')}` : original;
 }
 
+/** An input or change listener for the whole page (the document, its body or the window): typing in any field reaches it */
+const HEARS_TYPING_ON_PAGE = /\b(?:document|window|document\.body)\s*\.\s*(?:addEventListener\s*\(\s*['"`](?:input|change)['"`]|on(?:input|change)\s*=(?!=))/;
+
+/**
+ * The fields a program reads what is typed in (`.value`), that it never makes and doesn't look
+ * for itself (`if (!el)`), when it listens for typing on the whole page: looked up on its first
+ * line, so the page's stand-in <input> for each is there to type into, in the order it names them.
+ * A pounds converter reading getElementById('pounds').value and a BMI calculator reading 'height'
+ * and 'weight' (Qwen2.5 0.5B, Qwen3.5 2B) listened for typing, their own listener or the one
+ * Chatty wires, on a page with nothing to type in. On the first line, so line numbers stay.
+ */
+export function lookUpUnmadeFields(code: string): { code: string; ids: string[] } {
+  if (!HEARS_TYPING_ON_PAGE.test(code)) return { code, ids: [] };
+  const kinds = elementKinds(code);
+  const checked = new Set(checkedIds(code));
+  const quoted = (id: string) => id.replace(/[-$]/g, '\\$&');
+  // Made by the program: in markup (id="pounds", also escaped in a string), or by its id property or attribute
+  const made = (id: string) => new RegExp(`\\bid\\s*=\\s*\\\\?['"\`]${quoted(id)}\\\\?['"\`]|\\.id\\s*=\\s*['"\`]${quoted(id)}['"\`]|setAttribute\\s*\\(\\s*['"\`]id['"\`]\\s*,\\s*['"\`]${quoted(id)}['"\`]`).test(code);
+  const at = (id: string) => code.search(new RegExp(`['"\`]#?${quoted(id)}['"\`]`));
+  const ids = Object.keys(kinds)
+    .filter((id) => kinds[id] === 'field' && !checked.has(id) && !made(id))
+    .sort((a, b) => at(a) - at(b));
+  if (ids.length === 0) return { code, ids };
+  return { code: `${ids.map((id) => `document.getElementById(${JSON.stringify(id)});`).join(' ')} ${code}`, ids };
+}
+
 /** A program that listens for the user itself (a handler set or added anywhere) */
 const LISTENS_IN_CODE = /\baddEventListener\s*\(\s*['"`](?:click|input|change|submit|key\w*|pointer\w*|mouse\w*|touch\w*)['"`]|\.on(?:click|input|change|submit|key\w+|pointer\w+|mouse\w+|touch\w+)\s*=|\son(?:click|input|change|submit)\s*=/;
 
@@ -1076,6 +1104,88 @@ export async function makeAwaitingFunctionsAsync(code: string): Promise<string> 
 }
 
 /**
+ * prompt() can't open its box in the card: the sandbox has no dialogs, so it answers null at once
+ * and the program goes on with nothing ("Cannot read properties of null (reading 'split')" for
+ * "type my name and show it backwards", "null degrees Celsius" for a temperature converter, both
+ * Qwen3.5 2B; Qwen2.5 0.5B asked inside a click handler). Each call the program can wait for is
+ * asked on the card instead: `(await __chattyAsk(…))`, its question with a box and an OK button,
+ * the answer what was typed. It can wait at the top level, in an async function, and in a
+ * function made async for it whose result nothing uses: one only called as a statement, or handed
+ * over as a callback (a listener, a timer). Same line count. A program with its own prompt is left alone.
+ */
+export function askOnCard(code: string): { code: string; calls: number } | null {
+  if (!/\bprompt\s*\(/.test(code)) return null;
+  type N = { type: string; start: number; end: number; [key: string]: any };
+  let ast: N;
+  try {
+    ast = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true }) as unknown as N;
+  } catch {
+    return null;
+  }
+  const FUNCTION = /^(?:FunctionDeclaration|FunctionExpression|ArrowFunctionExpression)$/;
+  const parents = new Map<N, N>();
+  const nodes: N[] = [];
+  const walk = (node: N, parent: N | null) => {
+    nodes.push(node);
+    if (parent) parents.set(node, parent);
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && walk(child, node);
+      else if (value && typeof value === 'object' && typeof value.type === 'string') walk(value, node);
+    }
+  };
+  walk(ast, null);
+  // Its own prompt (a function, a variable or a parameter by that name)
+  const declares = (n: N) => n.type === 'Identifier' && n.name === 'prompt' && /^(?:FunctionDeclaration|VariableDeclarator|ClassDeclaration)$/.test(parents.get(n)?.type ?? '') && parents.get(n)!.id === n;
+  if (nodes.some((n) => declares(n) || (FUNCTION.test(n.type) && (n.params as N[]).some((p) => p.type === 'Identifier' && p.name === 'prompt')))) return null;
+  const isPrompt = (callee: N) => (callee.type === 'Identifier' && callee.name === 'prompt') || (callee.type === 'MemberExpression' && !callee.computed && callee.object.type === 'Identifier' && callee.object.name === 'window' && callee.property.name === 'prompt');
+  const enclosing = (n: N): N | null => {
+    for (let p = parents.get(n); p; p = parents.get(p)) if (FUNCTION.test(p.type)) return p;
+    return null;
+  };
+  // A use of a function whose result nothing reads: a call as a statement, or the function handed over (a callback, a handler)
+  const resultUnused = (ref: N) => {
+    const parent = parents.get(ref);
+    if (!parent) return false;
+    if (parent.type === 'CallExpression' && parent.callee === ref) return parents.get(parent)?.type === 'ExpressionStatement';
+    if (parent.type === 'CallExpression' || parent.type === 'NewExpression') return parent.callee !== ref;
+    return parent.type === 'AssignmentExpression' && parent.right === ref && parent.left.type === 'MemberExpression' && /^on[a-z]+$/.test(parent.left.property?.name ?? '');
+  };
+  const canWait = (fn: N): boolean => {
+    if (fn.async) return true;
+    const parent = parents.get(fn)!;
+    // (a method or accessor: "async" can't go where its function starts)
+    if (fn.generator || parent.type === 'MethodDefinition' || (parent.type === 'Property' && (parent.method || parent.kind !== 'init'))) return false;
+    // Handed over where it is written (addEventListener('click', () => …), setTimeout(function () {…}))
+    if (fn.type !== 'FunctionDeclaration' && resultUnused(fn)) return true;
+    const name = fn.type === 'FunctionDeclaration' ? fn.id?.name : parent.type === 'VariableDeclarator' && parent.init === fn && parent.id.type === 'Identifier' ? parent.id.name : null;
+    if (!name) return false;
+    const refs = nodes.filter((n) => n.type === 'Identifier' && n.name === name && n !== fn.id && n !== parent.id && !(parents.get(n)?.type === 'MemberExpression' && parents.get(n)!.property === n && !parents.get(n)!.computed));
+    return refs.every(resultUnused);
+  };
+  const edits: Array<{ at: number; text: string; drop?: number }> = [];
+  const madeAsync = new Set<N>();
+  let calls = 0;
+  for (const n of nodes) {
+    if (n.type !== 'CallExpression' || !isPrompt(n.callee)) continue;
+    // (already awaited, or inside a function that can't wait without changing what its callers get)
+    if (parents.get(n)?.type === 'AwaitExpression') continue;
+    const fn = enclosing(n);
+    if (fn && !canWait(fn)) continue;
+    if (fn && !fn.async && !madeAsync.has(fn)) {
+      madeAsync.add(fn);
+      edits.push({ at: fn.start, text: 'async ' });
+    }
+    edits.push({ at: n.start, text: '(await __chattyAsk', drop: n.callee.end - n.callee.start });
+    edits.push({ at: n.end, text: ')' });
+    calls++;
+  }
+  if (calls === 0) return null;
+  let out = code;
+  for (const e of edits.sort((a, b) => b.at - a.at)) out = out.slice(0, e.at) + e.text + out.slice(e.at + (e.drop ?? 0));
+  return { code: out, calls };
+}
+
+/**
  * Small models declare with const and then change the value ("Assignment to constant variable",
  * like a bouncing ball's x += dx): such a const becomes let, which never breaks working code.
  * Names are matched across the whole program, which is fine at this size. Same line count.
@@ -1234,14 +1344,14 @@ export function withoutMarkdownLeftovers(text: string): string {
 }
 
 /** What preparing a reply added, for the run log (see inspectExecutableCode) */
-let preparing: { called: string[]; wired: string[]; exposed: string[]; redeclared: string[]; repeats: number; markup: number; looped: string[]; markupStrings: string[] } | null = null;
+let preparing: { called: string[]; wired: string[]; fields: string[]; exposed: string[]; redeclared: string[]; repeats: number; markup: number; looped: string[]; markupStrings: string[] } | null = null;
 
 /**
  * The reply as the program to run, with what preparing it added: the functions it never called,
  * called at its end, and those its inline handlers (onclick="go()") need, made reachable
  */
 export function inspectExecutableCode(rawText: string, options: { closeCutOff?: boolean; speakComment?: boolean } = {}): PreparedExecutableCode {
-  const added = { called: [] as string[], wired: [] as string[], exposed: [] as string[], redeclared: [] as string[], repeats: 0, markup: 0, looped: [] as string[], markupStrings: [] as string[] };
+  const added = { called: [] as string[], wired: [] as string[], fields: [] as string[], exposed: [] as string[], redeclared: [] as string[], repeats: 0, markup: 0, looped: [] as string[], markupStrings: [] as string[] };
   const outer = preparing;
   preparing = added;
   try {
@@ -1258,11 +1368,16 @@ export function inspectExecutableCode(rawText: string, options: { closeCutOff?: 
       hoisted = page.hoisted;
       // (the program's own rule for functions nothing calls reaches the script's too)
       prepared.code = hoisted ? exposeFunctionsToInlineHandlers(callUncalledFunctions(page.code)) : page.code;
+      // (after the wiring above, whose listener hears typing too)
+      const fields = lookUpUnmadeFields(prepared.code);
+      prepared.code = fields.code;
+      added.fields.push(...fields.ids);
     }
     return {
       ...prepared,
       ...(added.called.length ? { called: [...new Set(added.called)] } : {}),
       ...(added.wired.length ? { wired: [...new Set(added.wired)] } : {}),
+      ...(added.fields.length ? { standInFields: [...new Set(added.fields)] } : {}),
       ...(added.exposed.length ? { exposed: [...new Set(added.exposed)] } : {}),
       ...(added.markupStrings.length ? { markup: added.markupStrings } : {}),
       ...(added.redeclared.length ? { redeclared: [...new Set(added.redeclared)] } : {}),
@@ -1438,6 +1553,8 @@ export function detectRecommendedMode(code: string): JavascriptExecutionMode {
   // 1. Audio, visual, DOM, interactive widgets, timers, MIDI, storage, or host helpers require sandboxed iframe
   // (Tone.js, which a page gets only there, is named with its capital: "tone" is also a word)
   if (/\bTone\s*\./.test(code)) return 'iframe';
+  // (a prompt() asked on the card: see askOnCard)
+  if (/\b__chattyAsk\b/.test(code)) return 'iframe';
   if (
     /\b(document|window|canvas|getContext|Audio|AudioContext|webkitAudioContext|OscillatorNode|GainNode|requestMIDIAccess|out|clear|svg|innerHTML|appendChild|addEventListener|setInterval|setTimeout|requestAnimationFrame|createElement|getElementById|querySelector|classList|style|onclick|root|playNotes|speak|searchWikipedia|getWeather|localStorage|sessionStorage|alert|prompt|confirm|location|navigator)\b/i.test(
       code
@@ -2673,6 +2790,30 @@ export class JavascriptRuntime {
     // program that speaks logs for itself: to the run log only. And a log in a loop isn't read out
     // over and over: the same text again within 2 seconds, or a fourth in one second, stays in the log
     window.alert = (message) => window.speak(message === undefined ? '' : message);
+    // prompt() asked on the card, for a program that waits for the answer (see askOnCard): its
+    // question, a box with the suggested answer in it and an OK button; the answer is what was typed
+    window.__chattyAsk = (message, suggested) => new Promise((resolve) => {
+      // (made with the browser's own createElement: the card's, the program's own, would put the
+      // box back as a control left off the page once it is answered)
+      const make = (tag) => createElementNative.call(document, tag);
+      const form = make('form');
+      const label = make('label');
+      label.textContent = message === undefined || message === null ? '' : String(message) + ' ';
+      const input = make('input');
+      if (suggested !== undefined && suggested !== null) input.value = String(suggested);
+      const ok = make('button');
+      ok.type = 'submit';
+      ok.textContent = 'OK';
+      label.append(input);
+      form.append(label, ' ', ok);
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        form.remove();
+        resolve(input.value);
+      });
+      (window.root || document.body).appendChild(form);
+      try { input.focus(); } catch {}
+    });
     const logText = (args) => args.map((a) => (typeof a === 'object' && a !== null ? JSON.stringify(a) : String(a))).join(' ');
     let logSpeaks = true;
     let lastLog = '';
@@ -3131,6 +3272,8 @@ export class JavascriptRuntime {
     function stackLine(err, programFrameOnly) {
       const m = String((err && err.stack) || '').match(/chatty-program\\.js:(\\d+)/);
       if (m) return Number(m[1]);
+      // (an error a wrapper here explained: the line of the program's call, never the wrapper's)
+      if (err && Object.prototype.hasOwnProperty.call(err, '__chattyProgramLine')) return err.__chattyProgramLine;
       // Safari's stack may not name the program, but its errors carry the line (an Error made
       // here, in a watcher, carries this script's own line instead: no line then)
       // (an error thrown inside a library's bundle carries the bundle's line, not the program's: none then)
@@ -3429,6 +3572,10 @@ export class JavascriptRuntime {
         if (!kind || err.__chattyExplained) return err;
         Object.defineProperty(err, 'message', { value: call + ' failed: ' + err.message, configurable: true, writable: true });
         Object.defineProperty(err, '__chattyExplained', { value: true });
+        // The program's line is where it made the call. Safari's error from the browser's own code
+        // has no stack naming the program, and its line is this wrapper's ("line 1168" for an
+        // 80-line tip calculator): the program's line from here, or none (see stackLine)
+        Object.defineProperty(err, '__chattyProgramLine', { value: stackLine(new Error(), true) });
       } catch {}
       return err;
     }
@@ -3538,6 +3685,8 @@ export class JavascriptRuntime {
           ...d,
           set(value) {
             if (COLOR_PROPS.has(key)) value = withHash(label + '.' + key, value, (v) => CSS.supports('color', v));
+            // (a handler set as a property is called inside a catch too: see guarded)
+            if (typeof value === 'function' && key.length > 2 && key.slice(0, 2) === 'on') value = guarded(value);
             if (checking) {
               if (key === 'textContent' || key === 'innerText' || key === 'innerHTML') noteTextWrite(this, value);
               checkSet(label, key, value);
@@ -4047,12 +4196,33 @@ export class JavascriptRuntime {
     // nothing for seconds is stuck (see slowWork in the host)
     const slowTimers = new Set();
     window.__chattySlowWork = () => slowTimers.size;
+    // An error in a callback (a timer, a frame, a listener) reaches the page's error event, where
+    // Safari hides it as "Script error." with no line (to it this page's scripts, of about:srcdoc,
+    // are another origin's): the fixes of an animation whose frame called
+    // requestAnimationFrame(100) had nothing to go on. Each callback the program hands over is
+    // called inside a catch instead, and its error reported as it is, with the program's line.
+    const guardedOf = new WeakMap();
+    function guarded(fn) {
+      if (typeof fn !== 'function') return fn;
+      let wrapped = guardedOf.get(fn);
+      if (!wrapped) {
+        wrapped = function (...args) {
+          try {
+            return fn.apply(this, args);
+          } catch (err) {
+            __chattyReportCaught(err);
+          }
+        };
+        guardedOf.set(fn, wrapped);
+      }
+      return wrapped;
+    }
     window.setTimeout = (fn, ms, ...args) => {
       if (typeof fn !== 'function') return realSetTimeout(fn, ms, ...args);
       const id = realSetTimeout((...a) => {
         programWork.delete('t' + id);
         slowTimers.delete(id);
-        try { fn(...a); } finally { workChanged(); }
+        try { guarded(fn)(...a); } finally { workChanged(); }
       }, ms, ...args);
       programWork.add('t' + id);
       if (Number(ms) >= 1000) slowTimers.add(id);
@@ -4060,7 +4230,7 @@ export class JavascriptRuntime {
       return id;
     };
     window.setInterval = (fn, ms, ...args) => {
-      const id = realSetInterval(fn, ms, ...args);
+      const id = realSetInterval(guarded(fn), ms, ...args);
       programWork.add('t' + id);
       if (Number(ms) >= 1000) slowTimers.add(id);
       workChanged();
@@ -4078,7 +4248,10 @@ export class JavascriptRuntime {
     const pendingFrames = new Map();
     let doubledFrameNoted = false;
     window.requestAnimationFrame = (fn) => {
-      if (typeof fn === 'function' && pendingFrames.has(fn)) {
+      // Not a function (requestAnimationFrame(100)): the browser's own error, now, at the program's
+      // line, not "fn is not a function" from in here at the next frame
+      if (typeof fn !== 'function') return realRequestFrame(fn);
+      if (pendingFrames.has(fn)) {
         if (!doubledFrameNoted) {
           doubledFrameNoted = true;
           imagined('requestAnimationFrame(' + (fn.name || 'callback') + ') asked for again in the same frame → once a frame');
@@ -4088,9 +4261,9 @@ export class JavascriptRuntime {
       const id = realRequestFrame((time) => {
         programWork.delete('f' + id);
         pendingFrames.delete(fn);
-        try { fn(time); } finally { workChanged(); }
+        try { guarded(fn)(time); } finally { workChanged(); }
       });
-      if (typeof fn === 'function') pendingFrames.set(fn, id);
+      pendingFrames.set(fn, id);
       programWork.add('f' + id);
       workChanged();
       return id;
@@ -4214,10 +4387,14 @@ export class JavascriptRuntime {
     // Programs often wait for the page to load (DOMContentLoaded, load, window.onload), but it
     // already has, so that setup would never run: it runs right away instead
     const LOAD_EVENTS = new Set(['DOMContentLoaded', 'load']);
+    // An input or change listener on the document, the window or the body: typing in any field reaches it
+    let typingHeardOnPage = false;
     for (const target of [document, window]) {
       const addListener = target.addEventListener.bind(target);
       target.addEventListener = (type, listener, options) => {
-        if (!LOAD_EVENTS.has(type) || !listener) return addListener(type, listener, options);
+        // (typing heard here is heard from every field: see hearsTyping)
+        if (type === 'input' || type === 'change') typingHeardOnPage = true;
+        if (!LOAD_EVENTS.has(type) || !listener) return addListener(type, guarded(listener), options);
         setTimeout(() => {
           const event = new Event(type);
           if (typeof listener === 'function') listener.call(target, event);
@@ -4378,6 +4555,9 @@ export class JavascriptRuntime {
         made.setAttribute('width', '400');
         made.setAttribute('height', '300');
       }
+      // A field says which it is by the program's own name for it: a BMI calculator's two boxes
+      // read 'height' and 'weight'
+      if (kind === 'field') made.placeholder = id;
       made.id = id;
       // A sound it never made (an <audio> with no file): play() plays a short note instead of
       // failing, pause() and load() do nothing
@@ -4421,6 +4601,10 @@ export class JavascriptRuntime {
     const HANDLER_PROPS = ['onclick', 'oninput', 'onchange', 'onsubmit', 'onkeyup', 'onkeydown'];
     const FORWARDED_PROPS = ['value', 'checked', 'textContent', 'innerText', 'innerHTML'];
     const wiring = new WeakMap();
+    function hearsTyping(el) {
+      const own = (target) => !!target && (!!target.oninput || !!target.onchange);
+      return typingHeardOnPage || own(el) || own(document) || own(document.body) || own(window) || (wiring.get(el) || []).some((w) => w[0] === 'input' || w[0] === 'change');
+    }
     // An event name written as its handler property ('onclick') or in other letter case or with
     // separators ('keyDown', 'mouse_down') never fires: it becomes the event the target does fire,
     // as the browser lists them (its on… properties). Only the same letters count, so a real
@@ -4451,16 +4635,17 @@ export class JavascriptRuntime {
     }
     const nativeRemoveListener = EventTarget.prototype.removeEventListener;
     EventTarget.prototype.removeEventListener = function (type, listener, options) {
-      return nativeRemoveListener.call(this, eventNameFor(this, type), listener, options);
+      return nativeRemoveListener.call(this, eventNameFor(this, type), (typeof listener === 'function' && guardedOf.get(listener)) || listener, options);
     };
     const nativeAddListener = EventTarget.prototype.addEventListener;
     EventTarget.prototype.addEventListener = function (type, listener, options) {
       type = eventNameFor(this, type);
+      if ((type === 'input' || type === 'change') && this === document.body) typingHeardOnPage = true;
       if (this instanceof Element) {
         if (!wiring.has(this)) wiring.set(this, []);
         wiring.get(this).push([type, listener, options]);
       }
-      return nativeAddListener.call(this, type, listener, options);
+      return nativeAddListener.call(this, type, guarded(listener), options);
     };
     function carryWiring(from, to) {
       // A type the new element was wired for itself (a re-render that re-attaches) isn't doubled
@@ -4512,6 +4697,11 @@ export class JavascriptRuntime {
     function isEmptyStandIn(el) {
       if (!el || !placeholders.has(el.id) || placeholders.get(el.id) !== el) return false;
       if (el.firstChild || (el.textContent || '').trim()) return false;
+      // A text box the program hears typing in (an input or change listener on it, or on the
+      // document or body, where input events arrive too) is something to use, not nothing: a
+      // pounds converter that read its 'lbs-input' and listened for input showed its box and
+      // still failed as "showed nothing". Without a listener, typing there would do nothing.
+      if (el.tagName === 'INPUT' && hearsTyping(el)) return false;
       if (el.tagName !== 'CANVAS') return true;
       try {
         // Compared with a blank canvas of its size (toDataURL leaves the context type free)
@@ -4572,7 +4762,8 @@ export class JavascriptRuntime {
     }
     function __chattyVisualNow(ignoreBlank, ignoreFlat, boxesOnly) {
       const rootEl = document.getElementById('root');
-      const hidden = (n) => isEmptyStandIn(n) || (ignoreBlank && (n.nodeType === 1 && ((!boxesOnly && __chattyBlank(n)) || (ignoreFlat && __chattyFlatDrawn(n)) || __chattyEmptyBox(n) || n.tagName === 'SCRIPT' || n.tagName === 'STYLE')));
+      // (what a canvas holds never shows: only what is drawn on it does)
+      const hidden = (n) => isEmptyStandIn(n) || (n.nodeType === 1 && !!n.parentElement && !!n.parentElement.closest('canvas')) || (ignoreBlank && (n.nodeType === 1 && ((!boxesOnly && __chattyBlank(n)) || (ignoreFlat && __chattyFlatDrawn(n)) || __chattyEmptyBox(n) || n.tagName === 'SCRIPT' || n.tagName === 'STYLE')));
       const shows = (n) => n.nodeType === 3 ? n.textContent.trim().length > 0 : n.nodeType === 1 && !hidden(n);
       return Boolean(rootEl && Array.from(rootEl.childNodes).some(shows)) ||
         Array.from(document.querySelectorAll('canvas, svg, table, img, video, form, button, input, div:not(#root)')).some((el) => !hidden(el)) ||
@@ -4754,6 +4945,11 @@ export class JavascriptRuntime {
     const __chattyLoopTripped = (message) => {
       if (/^Loop exceeded \\d+ms/.test(String(message))) __chattyStopWork();
     };
+    // An error a guarded callback threw (see guarded): reported as the error event would, with its message and line
+    function __chattyReportCaught(err) {
+      __chattyLoopTripped(err ? err.message : String(err));
+      __chattyReportLate(err ? (err.message || String(err)) : String(err), errorLine(err));
+    }
     window.addEventListener('error', (event) => {
       const err = event.error;
       __chattyLoopTripped(err ? err.message : event.message);

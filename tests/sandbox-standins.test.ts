@@ -510,3 +510,144 @@ describe('an inline handler quoted with the quote its own call uses', () => {
     expect(win.document.getElementById('b')!.getAttribute('onclick')).toBe("tapped('1')");
   });
 });
+
+describe('a text box standing in for a field the program never made', () => {
+  let win: any;
+  afterEach(() => win?.close());
+  const run = async (code: string, idKinds: Record<string, string>) => {
+    const runtime = new JavascriptRuntime();
+    const html = (runtime as unknown as { buildRunnerHtml(trial: boolean): string }).buildRunnerHtml(false);
+    const dom = new JSDOM(html, { runScripts: 'dangerously', pretendToBeVisual: true, url: 'http://localhost/page.html' });
+    const posted: any[] = [];
+    dom.window.addEventListener('message', (e: MessageEvent) => posted.push(e.data));
+    win = dom.window;
+    win.postMessage({ type: 'execute', id: 'f', code, idKinds }, '*');
+    await vi.waitFor(() => expect(posted.some((m) => m.type === 'result' && m.id === 'f')).toBe(true), { timeout: 2000 });
+    return posted.find((m) => m.type === 'result' && m.id === 'f');
+  };
+
+  it('is shown, named by its id, when the program hears typing in it: the pounds converter Qwen3.5 2B wrote', async () => {
+    const code = [
+      "const lbsInput = document.getElementById('lbs-input');",
+      "const kgOutput = document.getElementById('kg-output');",
+      "lbsInput.addEventListener('input', () => { kgOutput.textContent = (parseFloat(lbsInput.value) / 2.20462).toFixed(2) + ' kg'; });",
+    ].join('\n');
+    const result = await run(code, { 'lbs-input': 'field' });
+    expect(result.hasVisual).toBe(true);
+    const box = win.document.getElementById('lbs-input');
+    expect(box.tagName).toBe('INPUT');
+    expect(box.placeholder).toBe('lbs-input');
+    box.value = '10';
+    box.dispatchEvent(new win.Event('input', { bubbles: true }));
+    expect(win.document.getElementById('kg-output').textContent).toBe('4.54 kg');
+  });
+
+  it('is shown when the typing is heard on the document, as Chatty wires a function that reads fields', async () => {
+    const result = await run("document.getElementById('pounds');\ndocument.addEventListener('input', () => { document.getElementById('kilos').innerText = document.getElementById('pounds').value * 0.45; });", { pounds: 'field' });
+    expect(result.hasVisual).toBe(true);
+  });
+
+  it('is still nothing when nothing hears typing in it, a key listener included (typing there would do nothing)', async () => {
+    const result = await run("document.addEventListener('keydown', () => {});\nconst name = document.getElementById('name').value;", { name: 'field' });
+    expect(win.document.getElementById('name').tagName).toBe('INPUT');
+    expect(result.hasVisual).toBe(false);
+  });
+});
+
+describe('the card runner’s own calls into the program', () => {
+  let win: any;
+  afterEach(() => win?.close());
+  // (hideErrors: the page's error event says nothing, as Safari's "Script error." does)
+  const load = (hideErrors = false) => {
+    const runtime = new JavascriptRuntime();
+    const html = (runtime as unknown as { buildRunnerHtml(trial: boolean): string }).buildRunnerHtml(false);
+    const dom = new JSDOM(html, {
+      runScripts: 'dangerously',
+      pretendToBeVisual: true,
+      url: 'http://localhost/page.html',
+      beforeParse(w: any) {
+        if (hideErrors) w.addEventListener('error', (event: Event) => event.stopImmediatePropagation());
+      },
+    });
+    const posted: any[] = [];
+    dom.window.addEventListener('message', (e: MessageEvent) => posted.push(e.data));
+    win = dom.window;
+    return posted;
+  };
+  const run = async (posted: any[], code: string, id = 'p') => {
+    win.postMessage({ type: 'execute', id, code }, '*');
+    await vi.waitFor(() => expect(posted.some((m) => m.type === 'result' && m.id === id)).toBe(true), { timeout: 2000 });
+    return posted.find((m) => m.type === 'result' && m.id === id);
+  };
+
+  it('reports an error in a timer, a frame or a listener as it is, with its line, where the error event hides it', async () => {
+    const posted = load(true);
+    await run(posted, "setTimeout(() => {\n  nope();\n}, 5);\nconst b = document.createElement('button');\nb.textContent = 'go';\ndocument.body.append(b);\nb.addEventListener('click', () => { missing(); });\nb.onclick = () => { gone(); };\nrequestAnimationFrame(() => { framed(); });");
+    win.document.querySelector('button').click();
+    await vi.waitFor(() => expect(posted.filter((m) => m.type === 'program_error').length).toBe(4), { timeout: 2000 });
+    const errors = posted.filter((m) => m.type === 'program_error').map((m) => [m.message, m.line]);
+    expect(errors).toEqual(expect.arrayContaining([['nope is not defined', 2], ['missing is not defined', 7], ['gone is not defined', 8], ['framed is not defined', 9]]));
+    // A listener taken away is taken away
+    const seen: string[] = [];
+    const f = () => seen.push('x');
+    win.document.body.addEventListener('ping', f);
+    win.document.body.removeEventListener('ping', f);
+    win.document.body.dispatchEvent(new win.Event('ping'));
+    expect(seen).toEqual([]);
+  });
+
+  it('gives requestAnimationFrame of something not a function the browser’s own error, at the program’s line', async () => {
+    const posted = load();
+    const result = await run(posted, 'function animateLoop() {\n  requestAnimationFrame(100);\n}\nanimateLoop();');
+    expect(result.success).toBe(false);
+    expect(result.errorLine).toBe(2);
+    expect(result.error).not.toMatch(/\bfn\b/);
+  });
+
+  it('gives a browser call’s failure the program’s line, never the runner’s, when the error carries no stack (Safari)', async () => {
+    const runtime = new JavascriptRuntime();
+    const html = (runtime as unknown as { buildRunnerHtml(trial: boolean): string }).buildRunnerHtml(false);
+    const dom = new JSDOM(html, {
+      runScripts: 'dangerously',
+      pretendToBeVisual: true,
+      url: 'http://localhost/page.html',
+      beforeParse(w: any) {
+        // Safari's HierarchyRequestError: no stack naming the program, and the line of the code that called the browser
+        w.Node.prototype.insertBefore = function () {
+          const err = new w.TypeError('The operation would yield an incorrect node tree.');
+          Object.defineProperty(err, 'stack', { value: '' });
+          Object.defineProperty(err, 'line', { value: 1168 });
+          throw err;
+        };
+      },
+    });
+    const posted: any[] = [];
+    dom.window.addEventListener('message', (e: MessageEvent) => posted.push(e.data));
+    win = dom.window;
+    const result = await run(posted, "const table = document.createElement('table');\nconst row = document.createElement('tr');\ndocument.body.insertBefore(row, null);");
+    expect(result.error).toContain('The operation would yield an incorrect node tree.');
+    expect(result.errorLine).toBe(3);
+  });
+
+  it('never counts what a canvas holds as shown: a blank canvas with shapes in it shows nothing drawn', async () => {
+    const posted = load();
+    win.postMessage({ type: 'execute', id: 'k', code: "document.body.innerHTML = '<canvas id=\"scene\" width=\"300\" height=\"150\"><rect width=\"5\"></rect><image src=\"a.png\"/></canvas>';", idKinds: { scene: 'canvas' } }, '*');
+    await vi.waitFor(() => expect(posted.some((m) => m.type === 'result' && m.id === 'k')).toBe(true), { timeout: 2000 });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(win.document.getElementById('scene').localName).toBe('canvas');
+    expect(win.__chattyHasDrawing()).toBe(false);
+  });
+
+  it('asks a prompt on the card: its question, the suggested answer, and what was typed', async () => {
+    const posted = load();
+    win.postMessage({ type: 'execute', id: 'ask', code: 'const name = (await __chattyAsk("Your name?", "Ada"));\nspeak(name.split("").reverse().join(""));' }, '*');
+    await vi.waitFor(() => expect(win.document.querySelector('form')).not.toBeNull(), { timeout: 2000 });
+    const form = win.document.querySelector('form');
+    expect(form.querySelector('label').textContent).toBe('Your name? ');
+    expect(form.querySelector('input').value).toBe('Ada');
+    form.querySelector('input').value = 'Casey';
+    form.querySelector('button').click();
+    await vi.waitFor(() => expect(posted.some((m) => m.type === 'speak' && m.text === 'yesaC')).toBe(true), { timeout: 2000 });
+    expect(win.document.querySelector('form')).toBeNull();
+  });
+});

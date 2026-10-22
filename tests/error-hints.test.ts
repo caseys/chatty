@@ -1170,4 +1170,35 @@ describe('an undefined name matched to a declared one by the start of its words'
     const hint = errorHint(code, 'canvas is not defined', 3);
     expect(hint?.correction?.code).toBe('const myCanvas = document.createElement("canvas");\ndocument.body.appendChild(myCanvas);\nconst ctx = myCanvas.getContext("2d");');
   });
+
+  it('gives a called name only a function: drawSquare() is not the <div> in var square (a tic-tac-toe Qwen2.5 0.5B wrote)', async () => {
+    const { errorHint } = await import('../src/core/error-hints.ts');
+    const board = "var square = document.getElementById('cell-0');\nsquare.onclick = () => drawSquare(0);";
+    expect(errorHint(board, 'drawSquare is not defined', 2)?.correction).toBeUndefined();
+    // A function by that start still is meant, declared or held by a variable
+    const declared = `${board}\nfunction paintSquare(i) { square.textContent = 'X'; }`;
+    expect(errorHint(declared, 'drawSquare is not defined', 2)?.correction?.note).toBe('drawSquare → paintSquare (the declared name its start matches)');
+    const held = `${board}\nconst placeSquare = (i) => { square.textContent = 'X'; };`;
+    expect(errorHint(held, 'drawSquare is not defined', 2)?.correction?.note).toBe('drawSquare → placeSquare (the declared name its start matches)');
+    // A name only read from (a member used) can still be a value
+    expect(errorHint("var square = document.getElementById('cell-0');\nsquareCell.textContent = 'X';", 'squareCell is not defined', 2)?.correction?.note).toBe('squareCell → square (the declared name its start matches)');
+  });
+});
+
+describe('an attribute in a markup string closed with the other quote', () => {
+  it('closes with the quote it opened with: the team picker and times table Qwen2.5 0.5B wrote', async () => {
+    const { closeAttributeQuotes } = await import('../src/core/error-hints.ts');
+    const picker = 'var output = document.createElement("div");\noutput.innerHTML = "<button onclick=\'teamPicker()">Pick Another Team</button>";\ndocument.body.appendChild(output);';
+    expect(closeAttributeQuotes(picker)).toEqual({ code: picker.replace('teamPicker()">', "teamPicker()'>"), lines: [2] });
+    // Two lines, and the other way round
+    const table = 'cell.innerText = "<button onclick=\'show(k, l)">Show</button>";\nrow.innerHTML = \'<td class="big\'>7</td>\';';
+    expect(closeAttributeQuotes(table)).toEqual({ code: 'cell.innerText = "<button onclick=\'show(k, l)\'>Show</button>";\nrow.innerHTML = \'<td class="big">7</td>\';', lines: [1, 2] });
+  });
+
+  it('leaves a program that parses, and quotes it can’t make parse, alone', async () => {
+    const { closeAttributeQuotes } = await import('../src/core/error-hints.ts');
+    expect(closeAttributeQuotes('el.innerHTML = "<a title=\'say \\"hi\\"\'>x</a>";')).toBeNull();
+    expect(closeAttributeQuotes('el.innerHTML = \'<div class="\' + cls + \'">x</div>\';')).toBeNull();
+    expect(closeAttributeQuotes('speak("it is " + x + ")')).toBeNull();
+  });
 });

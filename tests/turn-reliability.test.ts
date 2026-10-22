@@ -1570,6 +1570,37 @@ describe('the blank stage', () => {
     expect(executed.every((code) => code.includes('audio.start();'))).toBe(true);
   }, 20000);
 
+  it('fills a missing function’s name with no unrelated function, and takes no endless recursion for progress', async () => {
+    // A tic-tac-toe Qwen2.5 0.5B wrote: isValidMove → nextTurn (0.52 against 0.48) made nextTurn call
+    // itself, and its "Maximum call stack size exceeded" counted as progress
+    const GAME = [
+      'let player = "X";',
+      'function changePlayer() { player = player === "X" ? "O" : "X"; }',
+      'function nextTurn(i) {',
+      '  if (!isValidMove(i)) return;',
+      '  changePlayer();',
+      '}',
+      'nextTurn(0);',
+    ].join('\n');
+    // (the expression the model writes makes nextTurn call itself too)
+    const recursive = '(i) => nextTurn(i)';
+    const llm = new QueueLlm([GAME, 'A', recursive, recursive, recursive, 'x', 'x', 'x', 'x']);
+    const { executed, runtime } = fakeRuntime([{ error: 'isValidMove is not defined', errorLine: 4 }, {}, {}, {}], {
+      trials: (code) => (code.includes('nextTurn(i))') ? { error: 'Maximum call stack size exceeded', errorLine: 7 } : { error: null }),
+    });
+    const orchestrator = orchestratorFor(llm, { autoFixErrors: true, javascriptRuntime: runtime });
+    await orchestrator.submitUserInput('Make a tic-tac-toe game');
+    // (the log keeps every test's entries: only this request's count)
+    await vi.waitFor(() => expect(runLogText().slice(runLogText().indexOf('Make a tic-tac-toe game'))).toContain('no expression passed a test run'), { timeout: 10000 });
+    const mine = runLogText().slice(runLogText().indexOf('Make a tic-tac-toe game'));
+    expect(mine).toContain('`nextTurn` for `isValidMove`: the function it is in, which would only call itself: not tried');
+    expect(mine).toContain('`changePlayer` for `isValidMove`: shares no word with it, and the model did not clearly choose it: not tried');
+    expect(mine).toContain('for `isValidMove` gave Error at line 7: Maximum call stack size exceeded\n');
+    expect(mine).not.toMatch(/for `isValidMove` gave .*\(progress\)/);
+    expect(mine).not.toMatch(/isValidMove → .*corrected by a test run/);
+    expect(executed.some((code) => /!(?:nextTurn|changePlayer)\(i\)|nextTurn\(i\)\)/.test(code))).toBe(false);
+  }, 20000);
+
   it('tells the same member missing from another one, whatever object was put in front of it', () => {
     expect(sameMissingMember('audio.start is not a function', '(globalThis.__chattyReached , document.getElementById(...)).start is not a function')).toBe(true);
     expect(sameMissingMember('audio.start is not a function', '(globalThis.__chattyReached , canvas).loop is not a function')).toBe(false);
