@@ -12,7 +12,7 @@ const nothing = { soundUseCount: () => 0, hasVisualContent: () => false };
 /** The two sound rules: Tone for music, Web Audio for beeps and sound effects */
 const TONE_RULE = 'For music, this browser has a General MIDI software instrument library';
 // (the music rule: General MIDI through Web MIDI; Tone is no longer advertised)
-const WEB_AUDIO_RULE = 'Sound effects use Web Audio';
+const WEB_AUDIO_RULE = 'Beeps, tones and sound effects use Web Audio (new AudioContext()';
 const hasSoundRule = (rules: string) => rules.includes(TONE_RULE) || rules.includes(WEB_AUDIO_RULE);
 const sees = { soundUseCount: () => 0, hasVisualContent: () => true };
 
@@ -85,7 +85,7 @@ describe('the outcome check', () => {
 
 describe('prompt rules', () => {
   it('teaches real browser interfaces: fetch for facts, General MIDI through Web MIDI for music', () => {
-    expect(promptRules('Who was Ada Lovelace?', true)).toContain('Answer what you know directly');
+    expect(promptRules('Who was Ada Lovelace?', true)).toContain('https://en.wikipedia.org/api/rest_v1/page/summary/');
     const drums = promptRules('Play a drum beat', true);
     expect(drums).toContain(TONE_RULE);
     expect(drums).toContain('navigator.requestMIDIAccess');
