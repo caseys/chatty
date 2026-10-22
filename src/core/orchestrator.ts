@@ -52,7 +52,7 @@ import { isAppleMobile, LOCAL_CHAT_MODELS } from './settings.ts';
 import { redeclaredCut } from './repeat-guard.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 import { MIDI_OUTPUT, MIDI_PLAIN_FORM, MIDI_RULE } from './midi-form.ts';
-import { copiedExampleNotes, emptyExampleNotes, restoreMidiOutputLine, useRequestedInstrument, wrongInstrument } from './example-copy.ts';
+import { copiedExampleNotes, emptyExampleNotes, restoreMidiOutputLine, useRequestedInstrument, useRequestedShape, wrongInstrument } from './example-copy.ts';
 
 /** "Error at line 7: x is not defined" (the line when the browser reported it) */
 function errorText(message: string, line?: number): string {
@@ -284,7 +284,12 @@ const PROMPT_RULES: ReadonlyArray<{ text: string; when?: { test(request: string)
   { text: '- What you add to document.body appears in a card on screen.', when: VISUAL_REQUEST },
   { text: '- Use HTML and CSS for interfaces: buttons, forms, tables, dashboards and widgets.', when: INTERFACE_REQUEST },
   { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations. For motion, keep each thing\'s position and speed in variables, and move and redraw it in one requestAnimationFrame loop.', when: DRAWING_REQUEST },
-  { text: '- For 3D, THREE (three.js) is ready to use: render with a THREE.WebGLRenderer, whose canvas you add to document.body.', when: THREE_D_REQUEST },
+  // Steps in words, no code: tested on five 3D requests (Qwen3 0.6B, twice each), every reply put the canvas on the
+  // page, added its mesh and rendered, where a code example was copied (its cube) and lost the render loop
+  {
+    text: "- For 3D, THREE (three.js) is ready to use: make a THREE.Scene, a THREE.PerspectiveCamera and a THREE.WebGLRenderer, put the renderer's canvas on the page with document.body.appendChild(renderer.domElement), add each object with scene.add(new THREE.Mesh(geometry, material)) using the geometry of the shape asked for, and call renderer.render(scene, camera) in a requestAnimationFrame loop.",
+    when: THREE_D_REQUEST,
+  },
   { text: '- <svg> works for diagrams and icons.', when: DIAGRAM_REQUEST },
   {
     text: MIDI_RULE,
@@ -947,6 +952,12 @@ export function repairBeforeRunning(code: string, isProse: boolean, note: (text:
       if (instrument) {
         executableCode = instrument.code;
         note(`the instrument "${instrument.from}" → "${instrument.to}", the one the request names: corrected before running`);
+      }
+      // The one 3D shape the request names, where the program builds another
+      const shape = useRequestedShape(executableCode, request);
+      if (shape) {
+        executableCode = shape.code;
+        note(`THREE.${shape.from} → THREE.${shape.to}, the shape the request names: corrected before running`);
       }
       // clearRect() with nothing in it throws: it can only mean the whole canvas
       const cleared = wholeCanvasClear(executableCode);

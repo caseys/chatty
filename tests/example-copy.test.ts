@@ -117,3 +117,25 @@ describe('the one instrument the request names', () => {
     expect(useRequestedInstrument('output.send("electric guitar", n, 300);', 'Play an electric guitar riff')).toBeNull();
   });
 });
+
+describe('the one 3D shape the request names', () => {
+  it('replaces another geometry with the named shape', async () => {
+    const { useRequestedShape } = await import('../src/core/example-copy.ts');
+    const cube = 'const geometry = new THREE.BoxGeometry(1, 1, 1);\nconst mesh = new THREE.Mesh(geometry, material);';
+    expect(useRequestedShape(cube, 'Draw a 3D sphere')).toEqual({
+      code: 'const geometry = new THREE.SphereGeometry(1, 32, 16);\nconst mesh = new THREE.Mesh(geometry, material);',
+      from: 'BoxGeometry',
+      to: 'SphereGeometry',
+    });
+    expect(useRequestedShape(cube, 'Show a 3D donut (torus) spinning')?.to).toBe('TorusGeometry');
+  });
+
+  it('leaves it alone with no single answer: the right shape, no shape, two shapes asked or made', async () => {
+    const { useRequestedShape } = await import('../src/core/example-copy.ts');
+    const cube = 'const g = new THREE.BoxGeometry(1, 1, 1);';
+    expect(useRequestedShape(cube, 'Show a spinning 3D cube')).toBeNull();
+    expect(useRequestedShape(cube, 'Make a 3D scene')).toBeNull();
+    expect(useRequestedShape(cube, 'Put a sphere on a cube')).toBeNull();
+    expect(useRequestedShape('new THREE.BoxGeometry(1, 1, 1);\nnew THREE.ConeGeometry(1, 2);', 'Draw a 3D sphere')).toBeNull();
+  });
+});

@@ -122,3 +122,32 @@ export function useRequestedInstrument(code: string, request: string): { code: s
   for (const start of starts) out = out.slice(0, start) + to + out.slice(start + spots.find((s) => s!.start === start)!.text.length);
   return { code: out, from, to };
 }
+
+/** three.js shapes a request can name, each with a plain default the program's camera (z = 5) shows whole */
+const SHAPES: Array<{ words: RegExp; geometry: string; make: string }> = [
+  { words: /\b(?:cube|box)e?s?\b/, geometry: 'BoxGeometry', make: 'new THREE.BoxGeometry(1, 1, 1)' },
+  { words: /\b(?:sphere|ball|globe|planet|orb)s?\b/, geometry: 'SphereGeometry', make: 'new THREE.SphereGeometry(1, 32, 16)' },
+  { words: /\bcones?\b/, geometry: 'ConeGeometry', make: 'new THREE.ConeGeometry(1, 2, 32)' },
+  { words: /\bcylinders?\b/, geometry: 'CylinderGeometry', make: 'new THREE.CylinderGeometry(1, 1, 2, 32)' },
+  { words: /\b(?:torus|toruses|donuts?|doughnuts?|rings?)\b/, geometry: 'TorusGeometry', make: 'new THREE.TorusGeometry(1, 0.4, 16, 64)' },
+];
+
+/**
+ * The shape the request names, where the 3D program builds another: when the request names exactly one shape
+ * and the program makes exactly one kind of geometry, a different one, that geometry is replaced by the named
+ * shape's (with its plain default size). Null when there's no single answer.
+ */
+export function useRequestedShape(code: string, request: string): { code: string; from: string; to: string } | null {
+  const text = request.toLowerCase();
+  const asked = SHAPES.filter((shape) => shape.words.test(text));
+  if (asked.length !== 1) return null;
+  const made = [...code.matchAll(/new\s+THREE\.(\w+Geometry)\s*\(/g)];
+  const kinds = new Set(made.map((m) => m[1]));
+  if (kinds.size !== 1) return null;
+  const [from] = [...kinds];
+  const to = asked[0];
+  if (from === to.geometry) return null;
+  // Each `new THREE.FromGeometry(…)` with its arguments (no nested parentheses in them)
+  const replaced = code.replace(new RegExp(`new\\s+THREE\\.${from}\\s*\\([^()]*\\)`, 'g'), to.make);
+  return replaced === code ? null : { code: replaced, from, to: to.geometry };
+}
