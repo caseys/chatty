@@ -444,3 +444,18 @@ describe('a library class the bundle shortened (Chrome: "Class constructor Cu")'
     expect(libraryClassNamed('now', code, { Tone: { now: function now() { return 0; } } })).toBeNull();
   });
 });
+
+describe('clearRect() with no size', () => {
+  it('clears the whole canvas, for a name or a getContext() call, and leaves a sized clearRect alone', async () => {
+    const { wholeCanvasClear, applyCorrection } = await import('../src/core/method-hints.ts');
+    expect(wholeCanvasClear('ctx.clearRect();').code).toBe('ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);');
+    expect(wholeCanvasClear("canvas.getContext('2d').clearRect();").code).toBe("canvas.getContext('2d').clearRect(0, 0, canvas.getContext('2d').canvas.width, canvas.getContext('2d').canvas.height);");
+    expect(wholeCanvasClear('ctx.clearRect(0, 0, 10, 10);').filled).toBe(0);
+    // From a live run: ctx.clear() corrected to clearRect()
+    const live = "canvas.getContext('2d').clear();";
+    const at = { start: live.indexOf('clear('), end: live.indexOf('clear(') + 'clear'.length };
+    expect(applyCorrection(live, { object: "canvas.getContext('2d')", from: 'clear', to: 'clearRect', at })).toBe(
+      "canvas.getContext('2d').clearRect(0, 0, canvas.getContext('2d').canvas.width, canvas.getContext('2d').canvas.height);"
+    );
+  });
+});

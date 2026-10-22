@@ -994,10 +994,27 @@ export function memberWithMethod(type: string, method: string, scope: Record<str
 
 /** The program with every call of object.from renamed to object.to */
 export function applyCorrection(code: string, correction: { object: string; from: string; to: string; at?: { start: number; end: number } }): string {
-  if (correction.at) return code.slice(0, correction.at.start) + correction.to + code.slice(correction.at.end);
+  if (correction.at) return wholeCanvasClear(code.slice(0, correction.at.start) + correction.to + code.slice(correction.at.end)).code;
   const object = correction.object.replace(/[.$]/g, (c) => `\\${c}`);
   // (the object is the start of the path: `gain` in `gain.gain.setValueAtTime` is not the one to rename)
-  return code.replace(new RegExp(`((?<![\\w$.])${object}\\s*\\.\\s*)${correction.from}\\b`, 'g'), `$1${correction.to}`);
+  return wholeCanvasClear(code.replace(new RegExp(`((?<![\\w$.])${object}\\s*\\.\\s*)${correction.from}\\b`, 'g'), `$1${correction.to}`)).code;
+}
+
+/**
+ * clearRect() with nothing in it (ctx.clear() corrected to it, or written so): it throws, and the only
+ * thing it can mean is the whole canvas, so it gets the canvas's own size. The receiver is a name or a
+ * getContext() call, so repeating it gets the same context.
+ */
+export function wholeCanvasClear(code: string): { code: string; filled: number } {
+  let filled = 0;
+  const out = code.replace(
+    /((?<![\w$.])(?:[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*(?:\.getContext\(\s*(["'])2d\2\s*\))?))\s*\.\s*clearRect\(\s*\)/g,
+    (_, target: string) => {
+      filled++;
+      return `${target}.clearRect(0, 0, ${target}.canvas.width, ${target}.canvas.height)`;
+    }
+  );
+  return { code: out, filled };
 }
 
 /**

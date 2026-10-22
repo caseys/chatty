@@ -373,6 +373,8 @@ function htmlToCode(html: string): string {
     .replace(/<!doctype[^>]*>|<\/?(?:html|head|body)[^>]*>/gi, '')
     .split('\n')
     .filter((line) => {
+      // What's left of a template literal the markup sat in (`;, ");): neither page nor code
+      if (/^\s*[`'";)\]}]+\s*$/.test(line)) return false;
       if (line.includes('<') || !CODE_LINE.test(line)) return true;
       strayCode.push(line);
       return false;

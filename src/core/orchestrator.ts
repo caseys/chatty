@@ -42,7 +42,7 @@ import {
 import { setForRecentRequests } from './recent-requests.ts';
 import { appendRunLog } from './run-log.ts';
 import { memberBlank, fillMember, blankChoices, blankRequest, choiceRequest, declareMissing, fillBlank, findBlank, type Blank } from './blank-fix.ts';
-import { madeAsWrongClass, memberList, withLibraryClassNames, type RealMember } from './method-hints.ts';
+import { madeAsWrongClass, memberList, wholeCanvasClear, withLibraryClassNames, type RealMember } from './method-hints.ts';
 import { applyFixReply, brokenLines, enclosingFunction, failingStatement, FIX_SYSTEM_PROMPT, fixRequest, isBareText, restoreWhole } from './line-fix.ts';
 import { missingStepsError, sameShortfallNote } from './sound-setup.ts';
 import { addNewToClasses, escapeScriptBackticks, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, looksThrown, provideThree, quoteToneTimes, unusedDrawingValues, dropExampleTags } from './error-hints.ts';
@@ -935,6 +935,12 @@ export function repairBeforeRunning(code: string, isProse: boolean, note: (text:
       if (times) {
         executableCode = times.code;
         note(`${times.quoted.join(', ')} written without quotes → ${times.quoted.map((q) => JSON.stringify(q)).join(', ')} (Tone's note values are text): corrected before running`);
+      }
+      // clearRect() with nothing in it throws: it can only mean the whole canvas
+      const cleared = wholeCanvasClear(executableCode);
+      if (cleared.filled > 0) {
+        executableCode = cleared.code;
+        note('clearRect() with no size → the whole canvas: corrected before running');
       }
       // The prompt's example notes, tags and all (<example>C4</example>): the notes without the tags
       const tagged = dropExampleTags(executableCode);

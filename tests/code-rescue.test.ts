@@ -14,6 +14,12 @@ describe('running code the model wrapped or forgot to call', () => {
     expect(out.code).toBe('speak("Done");');
   });
 
+  it("drops what's left of a template literal (`;) from markup put on the page", () => {
+    const out = inspectExecutableCode('```html\n<canvas id="house"></canvas>\n`;\n```');
+    expect(out.code).toContain('<canvas id=\\"house\\"></canvas>');
+    expect(out.code).not.toContain('`;');
+  });
+
   it('turns an html block into markup plus its scripts', () => {
     const out = inspectExecutableCode('```html\n<button id="b">Go</button>\n<script>document.getElementById("b").onclick = () => speak("hi");</script>\n```');
     expect(out.isProse).toBe(false);
