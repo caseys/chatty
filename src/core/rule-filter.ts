@@ -59,16 +59,16 @@ export const RULE_QUESTIONS: Record<RuleName, { note?: string; question?: string
  * or whose question doesn't tell its cases apart (card). A model with no entry goes by keywords.
  */
 export const RULE_CUTOFFS: Readonly<Record<string, Partial<Record<RuleName, number>>>> = {
-  // 34 cases, keywords with these cutoffs: 31 exact. Its card answers don't tell cases apart (AUC 0.5).
-  // Text (AUC 0.82): below every request that needs it; the fitted 0.652 dropped a palindrome and a find-and-replace.
-  // Its CSS answers barely tell cases apart (AUC 0.63, one case either side of the cutoff), so CSS goes by keywords
-  // Saving and weather (AUC 0.9, 0.85): below every request that needs them, where the fitted
-  // cutoffs (0.549, 0.475) dropped a count to keep or sat 0.001 under one
-  'qwen3-0.6b': { ui: 0.902, canvas: 0.733, three: 0.807, text: 0.35, save: 0.3, weather: 0.28 },
-  // 34 cases: 29 exact. Its interface answers don't tell cases apart (AUC 0.48), nor its text answers (AUC 0.33).
-  // CSS motion: AUC 1. Saving and weather (AUC 0.83, 1): halfway between the needed and the not, where the
-  // fitted cutoffs (0.339, 0.49) sat 0.001 under one that needs them
-  'qwen2.5-0.5b': { card: 0.431, canvas: 0.455, three: 0.615, css: 0.415, save: 0.315, weather: 0.415 },
+  // Recalibrated on all 111 cases with every rule merged: a rule keeps a cutoff only where the model's answers
+  // tell the cases its keywords put it forward for apart (AUC 0.75 or more); the rest go by keywords alone.
+  // Card (0.59), interface (0.72), facts (0.32) and CSS (0.63) don't; music, SVG, keys and saving make no wrong
+  // keyword matches in the cases, so there is nothing to turn down. Text and weather sit below every request that
+  // needs them (the fitted 0.652 and 0.475 dropped a palindrome and a weather request)
+  'qwen3-0.6b': { canvas: 0.733, three: 0.807, fx: 0.715, text: 0.35, weather: 0.28 },
+  // Card (0.71), interface (0.62), canvas (0.65), sound effects (0.33), facts (0.05) and text (0.3) don't tell
+  // their cases apart. Saving never: with it Qwen2.5 saved nothing either (0 of 8, as without), so it only costs
+  // room (no answer passes 1). Weather halfway between the needed and the not (fitted 0.49 sat 0.001 under one)
+  'qwen2.5-0.5b': { three: 0.615, css: 0.415, weather: 0.415, save: 1 },
 };
 
 const ANSWERS = '\nA) yes\nB) no\nAnswer:';
