@@ -380,6 +380,7 @@ export class MinimalVoiceApp {
   }
 
   private bindEvents(): void {
+    this.watchCardTaps();
     // Tapping the run status switches the raw panel between the code and the run log
     this.runStatusEl?.addEventListener('click', (event) => {
       const share = (event.target as HTMLElement).closest('.run-share');
@@ -436,6 +437,7 @@ export class MinimalVoiceApp {
     });
     this.chatInput?.addEventListener('focus', () => {
       this.inputFocused = true;
+      this.cardSize = 'auto';
       this.updateCardState();
     });
     this.chatInput?.addEventListener('blur', () => {
@@ -1664,8 +1666,56 @@ export class MinimalVoiceApp {
   private fixingNow = false;
   private cardRelaxTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * What the user chose by tapping: 'big' (they tapped the small card), 'small' (they tapped
+   * somewhere else while it was big), or 'auto' (it follows typing and turns). A new turn, typing
+   * and a cleared screen go back to 'auto'.
+   */
+  private cardSize: 'auto' | 'small' | 'big' = 'auto';
+  /** A tap that grew the card: its click doesn't reach what's under the card */
+  private swallowClickUntil = 0;
+
   private updateCardState(): void {
-    this.screenVisualLayer?.classList.toggle('card-shrunk', this.inputFocused || this.cardWorking || this.fixingNow);
+    const stepsBack = this.inputFocused || this.cardWorking || this.fixingNow;
+    this.screenVisualLayer?.classList.toggle('card-shrunk', this.cardSize === 'small' || (this.cardSize === 'auto' && stepsBack));
+  }
+
+  /** A tap on the small card makes it big; a tap anywhere else while it's big makes it small */
+  private watchCardTaps(): void {
+    document.addEventListener(
+      'pointerdown',
+      (event) => {
+        const layer = this.screenVisualLayer;
+        const card = layer?.querySelector<HTMLElement>('.js-iframe-container > div:not([hidden])');
+        if (!layer || layer.hidden || layer.classList.contains('program-hidden') || !card) return;
+        const r = card.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return;
+        // (taps inside the big card go to the program's own page and never reach this one)
+        const inside = event.clientX >= r.left && event.clientX <= r.right && event.clientY >= r.top && event.clientY <= r.bottom;
+        const small = layer.classList.contains('card-shrunk');
+        if (small && inside) {
+          this.cardSize = 'big';
+          this.updateCardState();
+          event.preventDefault();
+          event.stopPropagation();
+          this.swallowClickUntil = performance.now() + 600;
+        } else if (!small && !inside) {
+          this.cardSize = 'small';
+          this.updateCardState();
+        }
+      },
+      true
+    );
+    document.addEventListener(
+      'click',
+      (event) => {
+        if (performance.now() > this.swallowClickUntil) return;
+        this.swallowClickUntil = 0;
+        event.preventDefault();
+        event.stopPropagation();
+      },
+      true
+    );
   }
 
   /** A turn is working (or not): the card comes back a moment after the last one ends, so it stays back between a turn and the fix that follows */
@@ -1674,6 +1724,8 @@ export class MinimalVoiceApp {
       if (this.cardRelaxTimer !== null) clearTimeout(this.cardRelaxTimer);
       this.cardRelaxTimer = null;
       if (!this.cardWorking) {
+        // A new turn: the card follows it again, whatever was tapped before
+        this.cardSize = 'auto';
         this.cardWorking = true;
         this.updateCardState();
       }
@@ -1690,6 +1742,7 @@ export class MinimalVoiceApp {
   private resetVisualScreen(): void {
     this.screenVisualLayer?.classList.remove('program-hidden', 'program-failed');
     this.fixingNow = false;
+    this.cardSize = 'auto';
     this.updateCardState();
     this.programSounding = false;
     this.programRunning = false;

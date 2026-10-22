@@ -3126,8 +3126,8 @@ body {
   }
 }
 
-/* A failed program's card: hidden when it showed nothing, stepped back while a fix is coming
-   (card-shrunk), and faded once none is */
+/* A failed program's card: hidden when it showed nothing, and stepped back while a fix is coming
+   (card-shrunk); back at full size it is fully opaque again */
 #screen-visual-layer.program-hidden {
   visibility: hidden;
 }
@@ -3143,9 +3143,6 @@ body {
 }
 #screen-visual-layer.card-shrunk iframe {
   pointer-events: none !important;
-}
-#screen-visual-layer.program-failed {
-  opacity: 0.35;
 }
 @media (prefers-reduced-motion: reduce) {
   #screen-visual-layer {
