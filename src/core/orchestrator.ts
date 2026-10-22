@@ -2065,6 +2065,8 @@ export class ConversationOrchestrator {
           });
           if (inspected.spokeComment) appendRunLog('imagined', `its closing comment → speak(${JSON.stringify(inspected.spokeComment.slice(0, 80))}): corrected before running`);
           if (inspected.called?.length) appendRunLog('imagined', `${inspected.called.map((n) => `${n}()`).join(', ')} declared but never called → called at the end: corrected before running`);
+          if (inspected.wired?.length) appendRunLog('imagined', `${inspected.wired.map((n) => `${n}()`).join(', ')} works out what the user types and was never called → runs as they type and when a form is sent: corrected before running`);
+          if (inspected.shownMarkup?.length) appendRunLog('imagined', `the markup in ${inspected.shownMarkup.join(', ')} was never put on the page → added to the card: corrected before running`);
           if (inspected.hoistedScripts) appendRunLog('imagined', `${inspected.hoistedScripts === 1 ? 'a <script>' : `${inspected.hoistedScripts} <script>s`} in markup the program sets never runs in the browser → its code is part of the program: corrected before running`);
           if (inspected.exposed?.length) appendRunLog('imagined', `${inspected.exposed.map((n) => `${n}()`).join(', ')} made reachable from the page's inline handlers: corrected before running`);
           if (inspected.framed?.length) appendRunLog('imagined', `${inspected.framed.join(', ')}: a frame loop that did nothing but ask for the next frame now runs the drawing function nothing called: corrected before running`);

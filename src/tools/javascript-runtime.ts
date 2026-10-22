@@ -232,6 +232,8 @@ export interface PreparedExecutableCode {
   spokeComment?: string;
   /** Functions it declared but never called, called at its end (see callUncalledFunctions) */
   called?: string[];
+  /** Functions nothing called that work out what the user types, run as they type and when a form is sent (callUncalledFunctions) */
+  wired?: string[];
   /** Names declared again in one block, whose later declarations now set the value (declareOnce) */
   redeclared?: string[];
   /** Code blocks dropped for repeating another (withoutRepeatedBlocks) */
@@ -246,6 +248,8 @@ export interface PreparedExecutableCode {
   exposed?: string[];
   /** Scripts in markup it sets through innerHTML, whose code now runs as part of the program (see hoistPageScripts) */
   hoistedScripts?: number;
+  /** Strings of markup it wrote and never used, put on the page (see showUnusedMarkup) */
+  shownMarkup?: string[];
 }
 
 /**
@@ -687,8 +691,56 @@ export function callUncalledFunctions(original: string, awaited = true): string 
     const body = range ? code.slice(range[0], range[1]) : '';
     if (declared.some((other) => other !== roots[0] && new RegExp(`(?<![\\w$.])${other.replace(/\$/g, '\\$')}\\s*\\(`).test(body))) toCall = roots;
   }
-  preparing?.called.push(...toCall);
-  return toCall.length ? `${original}\n${toCall.map((name) => `${awaited ? 'await ' : ''}${name}();`).join('\n')}` : original;
+  // A function that works out what the user typed (it reads fields' values and builds nothing)
+  // has nothing to work with at the start, before anything is typed: it runs as they type, and
+  // when a form is sent (not sent anywhere: the card would reload), as a calculator's would
+  const readsFields = (name: string) => {
+    const range = own.get(name);
+    const body = range ? code.slice(range[0], range[1]) : '';
+    return /\.value\b(?!\s*=(?!=))/.test(body) && !/\b(?:createElement|appendChild|append|insertAdjacentHTML|document\.write)\s*\(|\bdocument\.body\.innerHTML\s*=/.test(body) && !LISTENS_IN_CODE.test(code);
+  };
+  const start = (name: string) =>
+    readsFields(name)
+      ? `document.addEventListener('input', () => ${name}());\ndocument.addEventListener('submit', (event) => { event.preventDefault(); ${name}(); });`
+      : `${awaited ? 'await ' : ''}${name}();`;
+  preparing?.called.push(...toCall.filter((name) => !readsFields(name)));
+  preparing?.wired.push(...toCall.filter(readsFields));
+  return toCall.length ? `${original}\n${toCall.map(start).join('\n')}` : original;
+}
+
+/** A program that listens for the user itself (a handler set or added anywhere) */
+const LISTENS_IN_CODE = /\baddEventListener\s*\(\s*['"`](?:click|input|change|submit|key\w*|pointer\w*|mouse\w*|touch\w*)['"`]|\.on(?:click|input|change|submit|key\w+|pointer\w+|mouse\w+|touch\w+)\s*=|\son(?:click|input|change|submit)\s*=/;
+
+/**
+ * Markup the program writes out in a string of its own (`const HTML = \`<form>…</form>\``) and never
+ * uses: the page it was written for, which nothing puts on the page. Nothing else would make a string
+ * of markup worth writing, so it goes in the card, right after its declaration (where the code after
+ * it finds its elements). Only a top-level const, let or var whose value is a string or a template
+ * literal with no placeholders that starts with a real tag, and whose name the program never uses.
+ */
+export function showUnusedMarkup(code: string): { code: string; names: string[] } {
+  const tree = analyse(code);
+  if (!tree) return { code, names: [] };
+  const found: Array<{ name: string; end: number }> = [];
+  for (const statement of tree.ast.body ?? []) {
+    if (statement.type !== 'VariableDeclaration' || statement.declarations.length !== 1) continue;
+    const { id, init } = statement.declarations[0];
+    if (id?.type !== 'Identifier' || !init) continue;
+    const text =
+      init.type === 'Literal' && typeof init.value === 'string'
+        ? init.value
+        : init.type === 'TemplateLiteral' && init.expressions.length === 0
+          ? String(init.quasis[0]?.value?.cooked ?? '')
+          : null;
+    if (text === null || !HTML_START.test(text.trim())) continue;
+    const used = tree.nodes.some((node) => node.type === 'Identifier' && node.name === id.name && node !== id && isReference(tree, node));
+    if (!used) found.push({ name: id.name, end: statement.end });
+  }
+  let out = code;
+  for (const { name, end } of found.reverse()) {
+    out = `${out.slice(0, end)}\ndocument.body.insertAdjacentHTML('beforeend', ${name});${out.slice(end)}`;
+  }
+  return { code: out, names: found.map((f) => f.name).reverse() };
 }
 
 /**
@@ -1135,21 +1187,26 @@ export function withoutMarkdownLeftovers(text: string): string {
 }
 
 /** What preparing a reply added, for the run log (see inspectExecutableCode) */
-let preparing: { called: string[]; exposed: string[]; redeclared: string[]; repeats: number; markup: number; looped: string[]; markupStrings: string[] } | null = null;
+let preparing: { called: string[]; wired: string[]; exposed: string[]; redeclared: string[]; repeats: number; markup: number; looped: string[]; markupStrings: string[] } | null = null;
 
 /**
  * The reply as the program to run, with what preparing it added: the functions it never called,
  * called at its end, and those its inline handlers (onclick="go()") need, made reachable
  */
 export function inspectExecutableCode(rawText: string, options: { closeCutOff?: boolean; speakComment?: boolean } = {}): PreparedExecutableCode {
-  const added = { called: [] as string[], exposed: [] as string[], redeclared: [] as string[], repeats: 0, markup: 0, looped: [] as string[], markupStrings: [] as string[] };
+  const added = { called: [] as string[], wired: [] as string[], exposed: [] as string[], redeclared: [] as string[], repeats: 0, markup: 0, looped: [] as string[], markupStrings: [] as string[] };
   const outer = preparing;
   preparing = added;
   try {
     const prepared = prepareProgram(rawText, options);
     // (a script in markup the program sets through innerHTML: its functions called, as a program's are)
     let hoisted = 0;
+    let shown: string[] = [];
     if (!prepared.isProse) {
+      // (markup written in a string nothing uses: put on the page, before its scripts are looked for)
+      const unused = showUnusedMarkup(prepared.code);
+      prepared.code = unused.code;
+      shown = unused.names;
       const page = hoistPageScripts(prepared.code);
       hoisted = page.hoisted;
       // (the program's own rule for functions nothing calls reaches the script's too)
@@ -1158,6 +1215,7 @@ export function inspectExecutableCode(rawText: string, options: { closeCutOff?: 
     return {
       ...prepared,
       ...(added.called.length ? { called: [...new Set(added.called)] } : {}),
+      ...(added.wired.length ? { wired: [...new Set(added.wired)] } : {}),
       ...(added.exposed.length ? { exposed: [...new Set(added.exposed)] } : {}),
       ...(added.markupStrings.length ? { markup: added.markupStrings } : {}),
       ...(added.redeclared.length ? { redeclared: [...new Set(added.redeclared)] } : {}),
@@ -1165,6 +1223,7 @@ export function inspectExecutableCode(rawText: string, options: { closeCutOff?: 
       ...(added.markup ? { markupBlocks: added.markup } : {}),
       ...(added.looped.length ? { framed: [...new Set(added.looped)] } : {}),
       ...(hoisted ? { hoistedScripts: hoisted } : {}),
+      ...(shown.length ? { shownMarkup: shown } : {}),
     };
   } finally {
     preparing = outer;
@@ -3601,6 +3660,29 @@ export class JavascriptRuntime {
     // browser (only its parser runs them), and the program put them there to run: each runs, once
     // (a body rewritten with += hands the old scripts back as new elements: the same text doesn't
     // run twice in a run).
+    // The card's sandbox has no allow-forms, so the browser sends no form anywhere and fires no
+    // submit event either: a program's form.addEventListener('submit', …) never ran. Pressing a
+    // submit button, or Enter in a form's field, fires it here (nothing is sent: the card can't go anywhere).
+    {
+      const __chattySubmit = (form, submitter) => {
+        try {
+          const event = typeof SubmitEvent === 'function' ? new SubmitEvent('submit', { bubbles: true, cancelable: true, submitter }) : new Event('submit', { bubbles: true, cancelable: true });
+          form.dispatchEvent(event);
+        } catch {}
+      };
+      document.addEventListener('click', (event) => {
+        const button = event.target instanceof Element ? event.target.closest('button, input[type="submit"], input[type="image"]') : null;
+        if (!button || !button.form || event.defaultPrevented) return;
+        const type = (button.getAttribute('type') || 'submit').toLowerCase();
+        if (type === 'submit' || type === 'image') __chattySubmit(button.form, button);
+      });
+      document.addEventListener('keydown', (event) => {
+        const field = event.target;
+        if (event.key !== 'Enter' || event.defaultPrevented || !(field instanceof HTMLInputElement) || !field.form) return;
+        if (/^(?:button|checkbox|radio|reset|submit|image|file|color|range)$/i.test(field.type)) return;
+        __chattySubmit(field.form, null);
+      });
+    }
     const __chattyRanScripts = new Set();
     // The scripts a container holds, by what they are (their source or text): the ones there before
     // a set are not the new text's (a body added to with += hands the page's own scripts back, the
@@ -3611,6 +3693,8 @@ export class JavascriptRuntime {
         for (const old of Array.from(container.querySelectorAll('script'))) {
           const key = old.src || old.textContent;
           if (before.has(key) || old.hasAttribute('data-chatty-library') || __chattyRanScripts.has(key)) continue;
+          // (a file of the page's own, src="app.js", is one the reply never had: only a script from the web runs)
+          if (old.hasAttribute('src') && !/^(?:https?:)?\\/\\//i.test(old.getAttribute('src') || '')) continue;
           __chattyRanScripts.add(key);
           const fresh = createElementNative.call(document, 'script');
           for (const attr of Array.from(old.attributes)) fresh.setAttribute(attr.name, attr.value);
