@@ -80,6 +80,25 @@ describe('trialRun', () => {
     expect(document.querySelectorAll('iframe').length).toBe(before);
   });
 
+  it('guards loops in a test run as in a real run, so a fix with while (true) cannot freeze the app', async () => {
+    const runtime = new JavascriptRuntime();
+    const p = runtime.trialRun('let n = 0;\nwhile (true) { n++; }', 60);
+    await vi.waitFor(() => expect(trialFrames()[0]).toBeDefined());
+    const frame = trialFrames()[0];
+    const sent: any[] = [];
+    const win = frame.contentWindow!;
+    const send = win.postMessage.bind(win);
+    win.postMessage = ((message: any, ...rest: any[]) => {
+      sent.push(message);
+      return (send as any)(message, ...rest);
+    }) as typeof win.postMessage;
+    fromPage(frame, { type: 'iframe_ready', __trial: tokenOf(frame) });
+    await vi.waitFor(() => expect(sent.some((m) => m?.type === 'execute')).toBe(true));
+    expect(sent.find((m) => m?.type === 'execute').code).toContain('Loop exceeded');
+    await p;
+    runtime.dispose();
+  });
+
   it('tries the program as it would really run: a const it changes later is a let, an await in a plain function is made async', async () => {
     const runtime = new JavascriptRuntime();
     // The balls Qwen3 0.6B wrote: balls is a const that createBalls() assigns

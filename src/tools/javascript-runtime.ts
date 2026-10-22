@@ -5160,7 +5160,9 @@ export class JavascriptRuntime {
           void withLibraries(code, iframe.contentWindow, () => !finished).then(async () => {
             // The program as it would really run (see executeNow): a test run that stops where the
             // real one gets past (a const the program changes later) says nothing about the program
-            const runnable = await letReassignedConsts(await makeAwaitingFunctionsAsync(code));
+            // Loops guarded as in a real run: the hidden page shares this page's thread, so a fix with
+            // `while (true)` tried here would freeze the whole app
+            const runnable = loopProtect(await letReassignedConsts(await makeAwaitingFunctionsAsync(code)));
             if (!finished) iframe.contentWindow?.postMessage({ type: 'execute', id, code: runnable, idKinds: elementKinds(code), idChecked: checkedIds(code) }, '*');
           });
         } catch (err) {
