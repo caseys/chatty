@@ -46,6 +46,20 @@ describe('friendly MIDI messages', () => {
     vi.useRealTimers();
   });
 
+  it('plays drum sounds by name on the drums, whatever instrument was named (a live drum beat sent them to piano)', () => {
+    vi.useFakeTimers();
+    const { sent, output, advance } = setup();
+    output.send('piano', ['kick', 'snare', 'hihat'], 250);
+    expect(sent[0]).toEqual([0x99, 36, 100]);
+    advance(600);
+    expect(sent.filter((m) => m[0] === 0x99).map((m) => m[1])).toEqual([36, 38, 42]);
+    // A pitch among them: the named instrument plays, as before
+    const mixed = setup();
+    mixed.output.send('piano', ['C4', 'kick'], 250);
+    expect(mixed.sent.some((m) => m[0] === 0x99)).toBe(false);
+    vi.useRealTimers();
+  });
+
   it('takes the plain form: send(instrument, notes, duration, time)', () => {
     vi.useFakeTimers();
     const { sent, output, advance } = setup();

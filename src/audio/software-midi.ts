@@ -256,7 +256,8 @@ export class SoftwareMIDIOutput extends StateChangeTarget implements SoftwareMid
       duration = velocity;
       velocity = undefined;
     }
-    const { channel, drums, program } = this.channelFor(String(instrument));
+    // Drum sounds by name ("kick", "snare") sent to another instrument: only the drums have them
+    const { channel, drums, program } = this.channelFor(onlyDrumNames(notes) ? 'drums' : String(instrument));
     const level0 = velocity === undefined || !Number.isFinite(Number(velocity)) ? 100 : Math.max(0, Math.min(127, Math.round(Number(velocity))));
     // A named pattern ('boom-chuck', 'walking G major') plays a whole 4/4 bar over the duration
     const pattern = typeof notes === 'string' ? barPattern(notes, drums) : null;
@@ -568,6 +569,15 @@ function instrumentProgram(key: string): number {
 }
 
 const isBassProgram = (program: number) => program >= 32 && program <= 39;
+
+/** Whether notes are all drum sounds by name ('kick', ['snare', 'hihat']), none of them a pitch */
+function onlyDrumNames(notes: unknown): boolean {
+  const names = (Array.isArray(notes) ? notes.flat() : [notes]).filter((n) => n !== undefined && n !== null);
+  return (
+    names.length > 0 &&
+    names.every((n) => typeof n === 'string' && !/^\s*[a-g](?:#|♯|b|♭)?-?\d?\s*$/i.test(n) && !/^\s*\d+\s*$/.test(n) && drumNote(n.trim()) !== null)
+  );
+}
 
 function drumNote(text: string): number | null {
   const key = normalizeName(text);
