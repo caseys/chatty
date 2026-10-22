@@ -2649,8 +2649,20 @@ export class JavascriptRuntime {
     // The speech check follows the value checks' window (CHECK_MS), and is off when NaN,
     // Infinity or undefined is the program's subject (see the execute handler)
     let speakChecked = true;
-    window.speak = (text) => {
-      const s = typeof text === 'object' ? JSON.stringify(text) : String(text ?? '');
+    // What speak() says for a value: an object or a list as its values in words ("temperature 18, rain
+    // 0"), not braces and quotes, and every argument it was given: speak("Ada Lovelace was", who())
+    // said only its first, and the answer was lost
+    const saidOf = (value, depth = 0) => {
+      if (value === null || value === undefined) return '';
+      if (typeof value !== 'object') return String(value);
+      if (value instanceof Error) return value.message;
+      if (value instanceof Date || depth > 2) return String(value);
+      if (typeof Node === 'function' && value instanceof Node) return (value.textContent || '').trim();
+      if (Array.isArray(value)) return value.map((item) => saidOf(item, depth + 1)).filter(Boolean).join(', ');
+      return Object.entries(value).map(([key, item]) => (key + ' ' + saidOf(item, depth + 1)).trim()).join(', ');
+    };
+    window.speak = (...parts) => {
+      const s = parts.map((part) => saidOf(part).trim()).filter(Boolean).join(' ');
       if (speakChecked && typeof noteRejected === 'function' && badValue(s)) noteRejected('speak(' + shown(s.slice(0, 60)) + ') says ' + (s.match(/NaN|undefined|Infinity/) || [''])[0] + ': almost surely a bug');
       __chattyHost.postMessage({ type: 'speak', id: currentExecId, text: s }, '*');
     };

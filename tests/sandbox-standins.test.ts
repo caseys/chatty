@@ -458,3 +458,29 @@ describe('markup set on a container that holds scripts already', () => {
     w.close();
   });
 });
+
+describe("the card's speak()", () => {
+  let win: ReturnType<typeof loadRunner>;
+  afterEach(() => win?.close());
+
+  const said = (call: (speak: (...parts: unknown[]) => void) => void): string[] => {
+    win = loadRunner();
+    const texts: string[] = [];
+    win.postMessage = ((message: { type?: string; text?: string }) => {
+      if (message?.type === 'speak') texts.push(message.text ?? '');
+    }) as typeof win.postMessage;
+    call((win as unknown as { speak: (...parts: unknown[]) => void }).speak);
+    return texts;
+  };
+
+  it('says every argument it is given, not only the first', () => {
+    expect(said((speak) => speak('Ada Lovelace was', 'a mathematician.'))).toEqual(['Ada Lovelace was a mathematician.']);
+    expect(said((speak) => speak('Total:', 12.6))).toEqual(['Total: 12.6']);
+  });
+
+  it('says an object or a list as its values in words', () => {
+    expect(said((speak) => speak({ temperature: 18, rain: 0 }))).toEqual(['temperature 18, rain 0']);
+    expect(said((speak) => speak('Picked:', ['red', 'blue']))).toEqual(['Picked: red, blue']);
+    expect(said((speak) => speak(undefined))).toEqual(['']);
+  });
+});
