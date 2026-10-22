@@ -52,7 +52,7 @@ import { isAppleMobile, LOCAL_CHAT_MODELS } from './settings.ts';
 import { redeclaredCut } from './repeat-guard.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 import { MIDI_OUTPUT, MIDI_PLAIN_FORM, MIDI_RULE } from './midi-form.ts';
-import { copiedExampleNotes, emptyExampleNotes, restoreMidiOutputLine, useRequestedInstrument, useRequestedShape, wrongInstrument } from './example-copy.ts';
+import { copiedExampleNotes, emptyExampleNotes, restoreMidiOutputLine, routePlainSendToMidi, useRequestedInstrument, useRequestedShape, wrongInstrument } from './example-copy.ts';
 
 /** "Error at line 7: x is not defined" (the line when the browser reported it) */
 function errorText(message: string, line?: number): string {
@@ -946,6 +946,12 @@ export function repairBeforeRunning(code: string, isProse: boolean, note: (text:
       if (midiLine) {
         executableCode = midiLine.code;
         note(`line ${midiLine.line}: the Web MIDI output line copied wrong → the hint's own line: corrected before running`);
+      }
+      // The plain music call (an instrument and a list of notes) aimed at something that isn't the Web MIDI output
+      const routed = routePlainSendToMidi(executableCode);
+      if (routed) {
+        executableCode = routed.code;
+        note(`${[...new Set(routed.calls)].join(', ')}(instrument, notes) → the Web MIDI output's send(): corrected before running`);
       }
       // The one instrument the request names, where the program plays another (or a name that's none)
       const instrument = useRequestedInstrument(executableCode, request);

@@ -139,3 +139,22 @@ describe('the one 3D shape the request names', () => {
     expect(useRequestedShape('new THREE.BoxGeometry(1, 1, 1);\nnew THREE.ConeGeometry(1, 2);', 'Draw a 3D sphere')).toBeNull();
   });
 });
+
+describe('the plain music call aimed at something that is not the Web MIDI output', () => {
+  it('goes to the Web MIDI output (a live first attempt: out.seed on an element)', async () => {
+    const { routePlainSendToMidi } = await import('../src/core/example-copy.ts');
+    const live = "const output = document.querySelector('#output');\nconst instrument = 'piano';\nconst notes = ['C4', 'E4', 'G4'];\nout.seed(instrument, notes);";
+    expect(routePlainSendToMidi(live)).toEqual({
+      code: "const __chattyMidiOut = [...(await navigator.requestMIDIAccess()).outputs.values()][0];\nconst output = document.querySelector('#output');\nconst instrument = 'piano';\nconst notes = ['C4', 'E4', 'G4'];\n__chattyMidiOut.send(instrument, notes);",
+      calls: ['out.seed'],
+    });
+    expect(routePlainSendToMidi('const output = document.getElementById("o");\noutput.send("violin", ["C4", "D4"], 400);')?.calls).toEqual(['output.send']);
+  });
+
+  it('leaves the real output, and calls that are not the plain form, alone', async () => {
+    const { routePlainSendToMidi } = await import('../src/core/example-copy.ts');
+    expect(routePlainSendToMidi('const output = [...(await navigator.requestMIDIAccess()).outputs.values()][0];\noutput.send("piano", ["C4"], 400);')).toBeNull();
+    expect(routePlainSendToMidi('socket.send("hello", [1, 2]);')).toBeNull();
+    expect(routePlainSendToMidi('worker.postMessage("piano");\nform.send(data);')).toBeNull();
+  });
+});

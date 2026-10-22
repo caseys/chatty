@@ -151,3 +151,47 @@ export function useRequestedShape(code: string, request: string): { code: string
   const replaced = code.replace(new RegExp(`new\\s+THREE\\.${from}\\s*\\([^()]*\\)`, 'g'), to.make);
   return replaced === code ? null : { code: replaced, from, to: to.geometry };
 }
+
+/** Names a model gives send() on the MIDI output (seed, sned and play are slips of it, or Chatty's own aliases) */
+const SEND_NAMES = /^(?:send|seed|sned|snd|sendNotes|play|playNotes)$/;
+
+/**
+ * The music hint's plain call aimed at something that isn't the Web MIDI output: `out.seed("piano", notes)`,
+ * `output.send(instrument, notes)` where output is an element on the page. An instrument name and a list of
+ * notes is the plain form only the Web MIDI output takes, so the call goes there: the output is got once, at
+ * the top, and each such call uses it. Calls on an output the program got from requestMIDIAccess are left
+ * alone. Null when nothing changes.
+ */
+export function routePlainSendToMidi(code: string): { code: string; calls: string[] } | null {
+  const stringValue = (arg: string) => {
+    const literal = /^\s*(["'`])([^"'`]*)\1\s*$/.exec(arg);
+    if (literal) return literal[2];
+    const name = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(arg)?.[1];
+    return name ? new RegExp(`\\b(?:const|let|var)\\s+${name}\\s*=\\s*(["'\`])([^"'\`]*)\\1`).exec(code)?.[2] : undefined;
+  };
+  const isList = (arg: string) => {
+    if (/^\s*\[/.test(arg)) return true;
+    const name = /^\s*([A-Za-z_$][\w$]*)\s*$/.exec(arg)?.[1];
+    return !!name && new RegExp(`\\b(?:const|let|var)\\s+${name}\\s*=\\s*\\[`).test(code);
+  };
+  const isInstrument = (text: string | undefined) => {
+    if (!text) return false;
+    const key = text.toLowerCase().trim();
+    return key in INSTRUMENT_PROGRAMS || /^drums?$|^drum kit$|^percussion$/.test(key);
+  };
+  // A receiver the program got from requestMIDIAccess is the real output
+  const midiNames = new Set([...code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^;\n]*requestMIDIAccess/g)].map((m) => m[1]));
+  const calls: Array<{ start: number; end: number; text: string }> = [];
+  for (const m of code.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(([^()]*)\)/g)) {
+    const [whole, receiver, method, argsText] = m;
+    if (!SEND_NAMES.test(method) || midiNames.has(receiver)) continue;
+    const args = argsText.split(/,(?![^[]*\])/);
+    if (args.length < 2 || !isInstrument(stringValue(args[0])) || !isList(args[1])) continue;
+    const start = m.index ?? 0;
+    calls.push({ start, end: start + whole.indexOf('(') , text: `${receiver}.${method}` });
+  }
+  if (calls.length === 0) return null;
+  let out = code;
+  for (const call of [...calls].sort((a, b) => b.start - a.start)) out = `${out.slice(0, call.start)}__chattyMidiOut.send${out.slice(call.end)}`;
+  return { code: `const __chattyMidiOut = [...(await navigator.requestMIDIAccess()).outputs.values()][0];\n${out}`, calls: calls.map((c) => c.text) };
+}
