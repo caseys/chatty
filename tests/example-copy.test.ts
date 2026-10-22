@@ -82,3 +82,38 @@ describe('round 24: drums', () => {
     expect(emptyExampleNotes('output.send("piano", [], 400);', 'Play a drum beat')).toContain('The list of notes is empty');
   });
 });
+
+describe('the instrument held in a variable', () => {
+  it('is read from where the program sets it', async () => {
+    const { wrongInstrument } = await import('../src/core/example-copy.ts');
+    const code = 'const instrument = "violin";\nconst notes = ["C4", "D4"];\noutput.send(instrument, notes, 400);';
+    expect(wrongInstrument(code, 'Play a short song on the flute')).toBe('The request asks for flute, but the program plays "violin": the first value of output.send() is the instrument.');
+    expect(wrongInstrument(code, 'Play a violin melody')).toBeNull();
+  });
+});
+
+describe('the one instrument the request names', () => {
+  it('replaces another instrument where it is written, in send() or in the name passed to it', async () => {
+    const { useRequestedInstrument } = await import('../src/core/example-copy.ts');
+    expect(useRequestedInstrument('const instrument = "violin";\noutput.send(instrument, notes, 400);', 'Play a short song on the flute')).toEqual({
+      code: 'const instrument = "flute";\noutput.send(instrument, notes, 400);',
+      from: 'violin',
+      to: 'flute',
+    });
+    // A made-up name copied from the hint's comment (a live run)
+    expect(useRequestedInstrument('const instrument = "General MIDI Instrument Library";\noutput.send(instrument, notes, 400);', 'Play Twinkle Twinkle Little Star on the piano')?.code).toBe(
+      'const instrument = "piano";\noutput.send(instrument, notes, 400);'
+    );
+    expect(useRequestedInstrument('output.send("piano", ["kick"], 400);', 'Play a drum beat')?.code).toBe('output.send("drums", ["kick"], 400);');
+  });
+
+  it('leaves it alone with no single answer: none named, two named, two played, or the right one', async () => {
+    const { useRequestedInstrument } = await import('../src/core/example-copy.ts');
+    const one = 'output.send("violin", notes, 400);';
+    expect(useRequestedInstrument(one, 'Play Happy Birthday')).toBeNull();
+    expect(useRequestedInstrument(one, 'Play a duet for piano and flute')).toBeNull();
+    expect(useRequestedInstrument('output.send("piano", a, 400);\noutput.send("drums", b, 400);', 'Play a song on the guitar')).toBeNull();
+    expect(useRequestedInstrument(one, 'Play a violin melody')).toBeNull();
+    expect(useRequestedInstrument('output.send("electric guitar", n, 300);', 'Play an electric guitar riff')).toBeNull();
+  });
+});

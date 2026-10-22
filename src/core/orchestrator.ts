@@ -52,7 +52,7 @@ import { isAppleMobile, LOCAL_CHAT_MODELS } from './settings.ts';
 import { redeclaredCut } from './repeat-guard.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 import { MIDI_OUTPUT, MIDI_PLAIN_FORM, MIDI_RULE } from './midi-form.ts';
-import { copiedExampleNotes, emptyExampleNotes, restoreMidiOutputLine, wrongInstrument } from './example-copy.ts';
+import { copiedExampleNotes, emptyExampleNotes, restoreMidiOutputLine, useRequestedInstrument, wrongInstrument } from './example-copy.ts';
 
 /** "Error at line 7: x is not defined" (the line when the browser reported it) */
 function errorText(message: string, line?: number): string {
@@ -941,6 +941,12 @@ export function repairBeforeRunning(code: string, isProse: boolean, note: (text:
       if (midiLine) {
         executableCode = midiLine.code;
         note(`line ${midiLine.line}: the Web MIDI output line copied wrong → the hint's own line: corrected before running`);
+      }
+      // The one instrument the request names, where the program plays another (or a name that's none)
+      const instrument = useRequestedInstrument(executableCode, request);
+      if (instrument) {
+        executableCode = instrument.code;
+        note(`the instrument "${instrument.from}" → "${instrument.to}", the one the request names: corrected before running`);
       }
       // clearRect() with nothing in it throws: it can only mean the whole canvas
       const cleared = wholeCanvasClear(executableCode);
@@ -3046,13 +3052,15 @@ export class ConversationOrchestrator {
     // Sound that waits for the user (an instrument played by keys or taps, a Play button) can't be
     // heard before they press something: it isn't missing yet
     const soundWaits = LISTENS_FOR_USER.test(code);
+    // For the sound check, only a program with something that makes sound: one with none can't play on a tap either
+    const soundWaitsForUser = soundWaits && CAPABILITIES.some((c) => c.name === 'sound' && c.calls.test(code));
     // A request that names something to see as well still gets its visual check; a bare "play"
     // (a game, a video) is not a sound on its own then
     const namesVisual = namesVisualThing(request);
     // (a runtime that can't tell, as in tests, is taken at its word)
     // A bare "play" (a game, a video) chooses the sound rule but asks for no sound by itself
-    const wantsSound = SOUND_WORDS_REQUEST.test(request) && !!this.javascriptRuntime.soundUseCount && !soundWaits;
-    if (soundWaits && SOUND_WORDS_REQUEST.test(request)) appendRunLog('retry', 'outcome check: the sound waits for the user (a key, a tap, a button): not checked');
+    const wantsSound = SOUND_WORDS_REQUEST.test(request) && !!this.javascriptRuntime.soundUseCount && !soundWaitsForUser;
+    if (soundWaitsForUser && SOUND_WORDS_REQUEST.test(request)) appendRunLog('retry', 'outcome check: the sound waits for the user (a key, a tap, a button): not checked');
     // A program that draws on animation frames, in a page that gets none, can't be judged: not a failure, untested
     const unpainted = namesVisual && /\brequestAnimationFrame\b/.test(code) && !(await framesArrive());
     if (unpainted) appendRunLog('retry', 'outcome check: the page gets no animation frames (nobody is watching it): what the program draws on frames is not judged');

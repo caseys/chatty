@@ -99,9 +99,9 @@ describe('prompt rules', () => {
     );
     const whole = promptRules('Play a melody', true);
     expect(whole).toContain(
-      '```js\nconst output = [...(await navigator.requestMIDIAccess()).outputs.values()][0];\nconst notes = [/* the music\'s notes, like "C4" */];\noutput.send("piano", notes, 400);\n```'
+      '```js\nconst output = [...(await navigator.requestMIDIAccess()).outputs.values()][0];\nconst instrument = ""; // the General MIDI instrument asked for, like "violin", "bass" or "drums"\nconst notes = []; // the music\'s notes in order, like "C4" (for drums: "kick", "snare", "hihat")\noutput.send(instrument, notes, 400); // 400 is each note\'s length in ms\n```'
     );
-    expect(whole).toContain('The instrument can be any General MIDI name ("violin", "bass", or "drums" with "kick", "snare" and "hihat"), the notes play one after another, and 400 is each note\'s length in ms.');
+    expect(whole).toContain('```\nThe notes play one after another.');
     expect(rule).not.toMatch(/\b(?:don't|never|do not)\b/i);
   });
 
@@ -162,7 +162,7 @@ describe('a Tone program is sound', () => {
 
   it('asks for Web MIDI in the outcome check, and for connecting a Tone synth when the program uses Tone', async () => {
     const silent = { soundUseCount: () => 0, hasVisualContent: () => false };
-    expect(await outcome('Play a C major chord', silent)).toContain('notes play through Web MIDI. Get an output with const output = [...(await navigator.requestMIDIAccess()).outputs.values()][0], then const notes = [/* the music\'s notes, like "C4" */]; output.send("piano", notes, 400) plays those notes one after another');
+    expect(await outcome('Play a C major chord', silent)).toContain('notes play through Web MIDI. Get an output with const output = [...(await navigator.requestMIDIAccess()).outputs.values()][0], then output.send(instrument, notes, 400) plays the notes one after another');
     expect(await outcome('Play a C major chord', silent)).not.toContain('Tone');
     expect(await outcome('Make a beep', silent)).not.toContain('Web MIDI');
     const quiet = { soundUseCount: () => 1, hasVisualContent: () => false, soundHeardCount: () => 0, soundSilentCount: () => 1 };
@@ -234,6 +234,16 @@ describe('the outcome check on a canvas nothing was drawn on', () => {
     expect(await outcome(request, { soundUseCount: () => 0, hasVisualContent: () => true }, pong)).toBeNull();
     // Nothing on the page at all keeps its own words
     expect(await outcome(request, { soundUseCount: () => 0, hasVisualContent: () => false, hasDrawnContent: () => false }, pong)).toContain('showed nothing');
+  });
+});
+
+describe('sound that waits for the user', () => {
+  it('is only waiting when the program has something that makes sound (a live Twinkle had only a mousedown listener)', async () => {
+    const request = 'Play Twinkle Twinkle Little Star on the piano';
+    const noSound = 'const notes = ["C4", "D4"];\nfunction playNote(e) { e.preventDefault(); }\ndocument.body.addEventListener("mousedown", playNote);';
+    expect(await outcome(request, { soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => true }, noSound)).toContain('played nothing');
+    const onTap = 'const output = [...(await navigator.requestMIDIAccess()).outputs.values()][0];\ndocument.body.addEventListener("mousedown", () => output.send("piano", ["C4"], 400));';
+    expect(await outcome(request, { soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => true }, onTap)).toBeNull();
   });
 });
 
