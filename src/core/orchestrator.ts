@@ -3171,6 +3171,9 @@ export class ConversationOrchestrator {
       // A button whose handler in the markup (onclick="rollDice()") names a function the page does not have throws when pressed
       deadHandlers.length ? `The page's inline handlers call ${deadHandlers.map((name) => `${name}()`).join(', ')}, which the program never defines: onclick="${deadHandlers[0]}()" runs the function of that name when pressed, so it has to exist (function ${deadHandlers[0]}() { … }).` : '',
     ].filter(Boolean);
+    // Why it came out empty, when the data it asked the network for never came
+    const network = missing.length > 0 ? (this.javascriptRuntime.networkFacts?.() ?? []) : [];
+    if (network.length > 0) missing.push(`${network.join('; ')}.`);
     if (missing.length === 0) {
       appendRunLog('retry', `outcome check: ${[wantsSound ? 'wanted sound: heard' : '', wantsVisual ? 'wanted visual: seen' : ''].filter(Boolean).join('; ')}`);
       return null;

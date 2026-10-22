@@ -1862,6 +1862,16 @@ export class JavascriptRuntime {
     }
   }
 
+  /** What the card's program's network requests did (no answer, an error status, a reply read too early), as sentences */
+  networkFacts(): string[] {
+    try {
+      const own = (this.activeIframe?.contentWindow as unknown as { __chattyNetwork?: () => string[] } | null)?.__chattyNetwork;
+      return typeof own === 'function' ? own() : [];
+    } catch {
+      return [];
+    }
+  }
+
   /** Texts the card's program set three times or more in one go (only the last showed), as sentences */
   overwrittenText(): string[] {
     try {
@@ -3309,6 +3319,64 @@ export class JavascriptRuntime {
       }, 0);
     }
     window.__chattyOverwrites = () => __chattyOverwrites.slice();
+    // What the program's network requests did: none answered, an error status, a local server that isn't there
+    // (127.0.0.1:8000 on a phone), or a reply read in the same go as send(), before it can have arrived. Facts for a
+    // program whose outcome check failed: "showed nothing" alone doesn't say the data never came.
+    const __chattyNet = [];
+    const noteNet = (text) => { if (__chattyNet.length < 3 && !__chattyNet.includes(text)) __chattyNet.push(text); };
+    const netPlace = (url) => {
+      try {
+        const u = new URL(String(url), location.href);
+        return /^(?:localhost|127\.|0\.0\.0\.0|\[::1\])/.test(u.hostname) ? ' (there is no server at ' + u.host + ' on this device: the program has to make the data itself)' : '';
+      } catch {
+        return '';
+      }
+    };
+    const netUrl = (input) => String(input && typeof input === 'object' && input.url ? input.url : input).slice(0, 80);
+    try {
+      const pageFetch = window.fetch.bind(window);
+      window.fetch = (input, init) =>
+        pageFetch(input, init).then(
+          (response) => {
+            if (!response.ok) noteNet('fetch(' + shown(netUrl(input)) + ') answered ' + response.status + netPlace(netUrl(input)));
+            return response;
+          },
+          (err) => {
+            noteNet('fetch(' + shown(netUrl(input)) + ') got no answer' + (netPlace(netUrl(input)) || " (nothing is there, or the site doesn't let pages read it)"));
+            throw err;
+          }
+        );
+    } catch {}
+    try {
+      const X = XMLHttpRequest.prototype;
+      const open = X.open;
+      const send = X.send;
+      X.open = function (method, url, ...rest) {
+        this.__chattyUrl = netUrl(url);
+        return open.call(this, method, url, ...rest);
+      };
+      X.send = function (...args) {
+        const url = this.__chattyUrl || '';
+        this.addEventListener('error', () => noteNet('XMLHttpRequest to ' + shown(url) + ' got no answer' + (netPlace(url) || " (nothing is there, or the site doesn't let pages read it)")));
+        this.addEventListener('load', () => { if (this.status >= 400) noteNet('XMLHttpRequest to ' + shown(url) + ' answered ' + this.status + netPlace(url)); });
+        // Until the task that sent it ends, nothing can have come back
+        this.__chattySending = true;
+        setTimeout(() => { this.__chattySending = false; }, 0);
+        return send.apply(this, args);
+      };
+      for (const key of ['status', 'responseText', 'response']) {
+        const d = Object.getOwnPropertyDescriptor(X, key);
+        if (!d || !d.get || !d.configurable) continue;
+        Object.defineProperty(X, key, {
+          ...d,
+          get() {
+            if (this.__chattySending && this.readyState < 4) noteNet('xhr.' + key + ' is read right after send(), before the reply can arrive: read it in xhr.onload');
+            return d.get.call(this);
+          },
+        });
+      }
+    } catch {}
+    window.__chattyNetwork = () => __chattyNet.slice();
     function watchSetters(proto, label) {
       if (!proto) return;
       for (const key of Object.getOwnPropertyNames(proto)) {

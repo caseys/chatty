@@ -299,3 +299,26 @@ describe('round 21: a hex color without #, and text set many times in one go', (
     expect((win as any).__chattyOverwrites()).toEqual(["div#countdown's text was set 5 times in a row without waiting, so only the last ('1') shows"]);
   });
 });
+
+describe('what the network did', () => {
+  let win: Win;
+  afterEach(() => win?.close());
+
+  it('notes a reply read right after send(), and a local server that is not there (a live countdown)', async () => {
+    const loaded = loadRunner();
+    win = loaded.win;
+    win.postMessage({ type: 'execute', id: 'n', code: 'var xhr = new XMLHttpRequest();\nxhr.open("GET", "http://127.0.0.1:9/ten_second_countdown", true);\nxhr.send(null);\nif (xhr.status === 200) document.body.textContent = xhr.responseText;' }, '*');
+    await wait(1500);
+    const facts: string[] = (win as any).__chattyNetwork();
+    expect(facts).toContain('xhr.status is read right after send(), before the reply can arrive: read it in xhr.onload');
+    expect(facts.some((f) => f.startsWith("XMLHttpRequest to 'http://127.0.0.1:9/ten_second_countdown' got no answer (there is no server at 127.0.0.1:9 on this device"))).toBe(true);
+  });
+
+  it('says nothing about a reply read once it has arrived', async () => {
+    const loaded = loadRunner();
+    win = loaded.win;
+    win.postMessage({ type: 'execute', id: 'm', code: 'var xhr = new XMLHttpRequest();\nxhr.open("GET", "http://127.0.0.1:9/x", true);\nxhr.onerror = () => {};\nxhr.send(null);' }, '*');
+    await wait(1500);
+    expect(((win as any).__chattyNetwork() as string[]).some((f) => f.includes('read right after send'))).toBe(false);
+  });
+});

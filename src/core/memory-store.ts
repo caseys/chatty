@@ -431,7 +431,8 @@ export class ConversationMemoryStore {
   }
 
   private resolveAnaphoraAndOptions(userQuery: string): string | null {
-    const lower = userQuery.toLowerCase();
+    // (a number before it makes "second" a time: "a ten second countdown", "5 seconds")
+    const lower = userQuery.toLowerCase().replace(/\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twenty|thirty|sixty)[\s-]+seconds?\b/g, ' ');
     const hasOrdinalRef = /\b(first|second|third|1st|2nd|3rd|last|former|latter)\s+(one|option|choice|item|point)?\b/i.test(
       lower
     );
@@ -446,7 +447,8 @@ export class ConversationMemoryStore {
     // Look back at the most recent assistant message for numbered/bulleted items or entities
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const msg = this.messages[i];
-      if (msg.role === 'assistant') {
+      // (the app's own greeting is no answer the user could be pointing back at)
+      if (msg.role === 'assistant' && !/^Welcome (?:to Chatty|back)\b/.test(msg.canonicalContent.trim())) {
         const content = msg.canonicalContent;
         // Extract list options if present
         const listItems = content
