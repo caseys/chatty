@@ -23,15 +23,43 @@ describe('trialRun', () => {
       url: 'http://localhost/',
       beforeParse(w: Window) {
         real = w.localStorage;
-        real.setItem('saved', 'yes');
+        real.setItem('chatty_card:saved', 'yes');
       },
     });
     const win = dom.window as unknown as Window & typeof globalThis;
     // What a "Clear all" button in a to-do app does, clicked by a trial
     const seen = win.eval("const before = localStorage.getItem('saved'); localStorage.clear(); localStorage.setItem('x', '1'); [before, localStorage.getItem('x'), localStorage.length]");
     expect(Array.from(seen as unknown[])).toEqual(['yes', '1', 1]);
-    expect(real!.getItem('saved')).toBe('yes');
-    expect(real!.getItem('x')).toBeNull();
+    expect(real!.getItem('chatty_card:saved')).toBe('yes');
+    expect(real!.getItem('chatty_card:x')).toBeNull();
+    dom.window.close();
+  });
+
+  it("keeps a card's storage apart from the app's: its keys under a prefix, the app's out of its reach", async () => {
+    const runtime = new JavascriptRuntime();
+    const page = (runtime as unknown as Internals).buildRunnerHtml(false);
+    let real: Storage | null = null;
+    const dom = new JSDOM(page, {
+      runScripts: 'dangerously',
+      pretendToBeVisual: true,
+      url: 'http://localhost/',
+      beforeParse(w: Window) {
+        real = w.localStorage;
+        real.setItem('chatty_user_settings', '{"voice":"a"}');
+        real.setItem('chatty_card:name', 'Zebra42');
+      },
+    });
+    const win = dom.window as unknown as Window & typeof globalThis;
+    const seen = win.eval(
+      "const out = [localStorage.getItem('chatty_user_settings'), localStorage.getItem('name'), localStorage.name, localStorage.length, Object.keys(localStorage).join()];" +
+        "localStorage.clear(); localStorage.setItem('settings', 'x'); localStorage.notes = 'n'; out.push(localStorage.length); out"
+    );
+    expect(Array.from(seen as unknown[])).toEqual([null, 'Zebra42', 'Zebra42', 1, 'name', 2]);
+    expect(real!.getItem('chatty_user_settings')).toBe('{"voice":"a"}');
+    expect(real!.getItem('chatty_card:name')).toBeNull();
+    expect(real!.getItem('chatty_card:settings')).toBe('x');
+    expect(real!.getItem('chatty_card:notes')).toBe('n');
+    expect(real!.getItem('settings')).toBeNull();
     dom.window.close();
   });
 

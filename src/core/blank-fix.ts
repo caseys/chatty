@@ -906,7 +906,7 @@ const AUDIO_MAKERS = new Set(['createOscillator', 'createGain', 'createBufferSou
 const EVENT_TARGET = new Set(['addEventListener', 'removeEventListener', 'dispatchEvent']);
 
 /** Names the sandbox provides, never missing */
-const PROVIDED = new Set(['speak', 'clear', 'out', 'root', 'playNotes', 'searchWikipedia', 'THREE', 'Tone', 'bpm', 'beat', 'start']);
+const PROVIDED = new Set(['speak', 'clear', 'out', 'root', 'playNotes', 'searchWikipedia', 'getWeather', 'THREE', 'Tone', 'bpm', 'beat', 'start']);
 
 /**
  * Before a program runs: a name it uses as a 2D drawing context, a canvas or an audio context, that

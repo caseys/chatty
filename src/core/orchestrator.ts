@@ -270,7 +270,51 @@ const MATH_REQUEST = /\d\s*(?:%|percent|times|plus|minus|divided|squared|\*|\+|\
 const QUESTION_WORDS =
   /^\s*(?:who|what|when|where|why|which|how (?:many|much|old|tall|far|big|long))\b|\b(?:tell me about|look up|search for|find out|define|meaning of|capital of|population of|weather|news|wiki(?:pedia)?)\b/i;
 const FACTS_WORDS = new RegExp(`${QUESTION_WORDS.source}|\\?\\s*$`, 'i');
-const FACTS_REQUEST = { test: (request: string) => FACTS_WORDS.test(request) && !MATH_REQUEST.test(request) };
+const FACTS_REQUEST = {
+  test: (request: string) => FACTS_WORDS.test(request) && !MATH_REQUEST.test(request) && !(WEATHER_REQUEST.test(request) && !WHO_WHY_WHEN.test(request)),
+};
+/** A question about the weather's history or causes ("Who invented the weather forecast?", "Why is snow white?"): facts, not today's weather */
+const WHO_WHY_WHEN = /^\s*(?:who|why|when|which)\b/i;
+/** The weather, here or somewhere: not snow or rain to draw ("Show a snowfall animation") */
+const WEATHER_WORDS = /\b(?:weather|temperature|forecast|rain|rainy|raining|rains|snow|snowy|snowing|sunny|wind|windy|winds|humid\w*|umbrella|jacket|hot|cold|warm|chilly)\b/i;
+const WEATHER_REQUEST = { test: (request: string) => WEATHER_WORDS.test(request) && !DRAWING_REQUEST.test(request) };
+/**
+ * Something kept between visits: notes, a list, a name, a count. Not a bare "keep" or "notes" ("keep the ball
+ * bouncing", the notes C, E and G), and not in a game or a drawing: the rule's example is a text field, which
+ * has no place there ("a snake game that remembers my high score", "save it as a PNG"). The model turns down
+ * the rest (rule-filter.ts)
+ */
+const SAVE_WORDS =
+  /\b(?:sav(?:e|es|ed|ing)|remember\w*|keep (?:my|it|them|this)|kept|persist\w*|stor(?:e|es|ed|age)|still (?:be )?(?:here|there)|next time|come back|reload\w*|refresh\w*|clos(?:e|ing) (?:the |this )?(?:tab|page|app|browser)|my notes|take notes|notes app|sticky notes|notepad|to-?dos?|journal|diary|between visits)\b/i;
+const SAVE_REQUEST = { test: (request: string) => SAVE_WORDS.test(request) && !DRAWING_REQUEST.test(request) };
+/**
+ * The saving rule, for text the user types: load it when the program starts, show it in a field, save it on
+ * each change. The parse is in a try: the card's storage is shared by every card (javascript-runtime.ts
+ * scopedStorageSource), and a value another program saved as plain text isn't JSON. Only the field's own
+ * load and save: a pair without the field was pasted in alone, with nothing to type into (Qwen3 0.6B, 0 of 6
+ * kept), and a count's line in a comment wasn't followed (0 of 4). The field is a textarea for both: the
+ * element's name as a slot was left empty, createElement("") (2 of 2 notes runs)
+ */
+const SAVE_RULE = `- To keep what the user types between visits (a name, notes), load it when the program starts, show it in a field, and save it on each change:
+\`\`\`js
+const key = ""; // what is kept, like "name" or "notes"
+let value = "";
+try { value = JSON.parse(localStorage.getItem(key)) ?? value; } catch {}
+const field = document.createElement("textarea");
+field.value = value;
+field.oninput = () => { value = field.value; localStorage.setItem(key, JSON.stringify(value)); };
+document.body.appendChild(field);
+\`\`\``;
+
+/**
+ * The weather rule: the place an empty slot for the model to fill, with nothing in its comment that reads as a
+ * place (a placeholder name was copied as an undeclared variable; "for where the user is" was copied in)
+ */
+const WEATHER_RULE = `- For weather, getWeather gives the weather right now:
+\`\`\`js
+const place = ""; // the city asked about; leave "" when none is named
+const { temperature, rain, sky } = await getWeather(place); // °C, mm of rain, and the sky in a word like "cloudy"
+\`\`\``;
 /** Text to count, reverse or change (the model turns down a letter to draw, a text box, a song backwards: rule-filter.ts) */
 const TEXT_REQUEST =
   /\b(?:words?|letters?|characters?|sentences?|text|paragraph|revers\w*|backwards?|replac\w*|swap\w*|chang(?:e|es|ing)|upper ?case|lower ?case|capitali[sz]\w*|palindromes?|vowels?|consonants?|spell\w*|anagrams?)\b/i;
@@ -296,7 +340,13 @@ const CARD_REQUEST = new RegExp([VISUAL_REQUEST, KEYS_REQUEST, DRAG_REQUEST, CSS
  * only when the request, or the program it changes, matches. Bigger models get every rule, the
  * same prompt each turn.
  */
-const PROMPT_RULES: ReadonlyArray<{ text: string; name?: RuleName; when?: { test(request: string): boolean } }> = [
+const PROMPT_RULES: ReadonlyArray<{
+  text: string;
+  name?: RuleName;
+  when?: { test(request: string): boolean };
+  /** What in the program being changed calls for the rule, when that isn't its keywords (window has "wind", ctx.save() "save") */
+  inProgram?: { test(program: string): boolean };
+}> = [
   { text: '- ONLY return executable JavaScript: a simple, short, elegant program that does only what was asked (draw, build, play, compute, look up) with minimal code and complete functionality.' },
   { text: '- ONLY chat with user via the speak() function.' },
   { text: '- What you add to document.body appears in a card on screen.', name: 'card', when: CARD_REQUEST },
@@ -329,6 +379,13 @@ const PROMPT_RULES: ReadonlyArray<{ text: string; name?: RuleName; when?: { test
   // pressed, against 0 of 20, with as many first programs running clean; CSS motion, 17 of 17 ran clean against 15
   { text: '- For keyboard control, listen for "keydown" on document and check event.key ("ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "w", "a", "s", "d", " " for space).', name: 'keys', when: KEYS_REQUEST },
   { text: '- For page elements that fade, slide, grow or pulse, use CSS: a transition on opacity or transform, or a @keyframes animation.', name: 'css', when: CSS_MOTION_REQUEST },
+  // Saving and the weather: empty slots for the model to fill (examples with values in them were copied). Scored on
+  // the job done, not a clean run alone: what was typed is back after a reload, the temperature spoken is the one
+  // fetched for the place asked about. Saving, Qwen3 0.6B 5 of 8 against 0 of 8 without (Qwen2.5 0.5B 0 of 8 either
+  // way); weather, Qwen3 4 of 6 against 0 of 6, Qwen2.5 2 of 6 against 0 of 6 (without it, both made a forecast up).
+  // A dates rule did no better than none (2, 2 and 0 of 8 against 2 of 8, Qwen3) and was left out
+  { text: SAVE_RULE, name: 'save', when: SAVE_REQUEST, inProgram: /\blocalStorage\b/ },
+  { text: WEATHER_RULE, name: 'weather', when: WEATHER_REQUEST, inProgram: /\bgetWeather\b/ },
 ];
 
 /** The optional rules a request's keywords put forward */
@@ -344,9 +401,10 @@ export function rulesNamedBy(request: string): Set<RuleName> {
 export function promptRules(request = '', filter = false, scored?: { kept: ReadonlySet<RuleName>; decided: ReadonlySet<RuleName> }, program = ''): string {
   const needed = (rule: (typeof PROMPT_RULES)[number]): boolean => {
     if (!rule.when) return true;
-    if (program !== '' && rule.when.test(program)) return true;
+    if (program !== '' && (rule.inProgram ?? rule.when).test(program)) return true;
     if (scored && rule.name && scored.decided.has(rule.name)) return scored.kept.has(rule.name);
-    return rule.when.test(request);
+    // The request comes with the program after it (staticPromptParts): a rule with its own program test goes by the request alone
+    return rule.when.test(rule.inProgram && program !== '' && request.endsWith(program) ? request.slice(0, -program.length) : request);
   };
   const rules = PROMPT_RULES.filter((rule) => !filter || needed(rule));
   return [

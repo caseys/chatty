@@ -98,3 +98,32 @@ describe('keyboard and CSS motion rules', () => {
     expect(rulesNamedBy('Make a box I can drag around').has('card')).toBe(true);
   });
 });
+
+describe('saving and the weather', () => {
+  it('put forward by what the request asks for, not by look-alike words', () => {
+    const named = (request: string) => [...rulesNamedBy(request)].filter((r) => r === 'save' || r === 'weather');
+    expect(named('Save my notes so they are there next time')).toEqual(['save']);
+    expect(named("What's the weather like here?")).toEqual(['weather']);
+    for (const request of ['Play the notes C, E and G', 'Keep the ball bouncing', 'Now make the ball red', 'Count to 10 one at a time', 'Make a rainbow button', 'Draw rain on a street', 'Sing happy birthday', 'Make a snake game that remembers my high score'])
+      expect(named(request)).toEqual([]);
+    // The weather has its own rule, but its history and causes are facts
+    expect(rulesNamedBy("What's the weather in Paris?").has('facts')).toBe(false);
+    expect(rulesNamedBy('Who invented the weather forecast?').has('facts')).toBe(true);
+  });
+
+  it('take a program being changed by what it uses, not by its words (window, ctx.save())', () => {
+    const program = 'window.addEventListener("click", () => { ctx.save(); const notes = [60, 62]; performance.now(); });';
+    const rules = promptRules(`make it blue\n${program}`, true, undefined, program);
+    expect(rules).not.toContain('For weather');
+    expect(rules).not.toContain('To keep what the user types between visits');
+    const saving = 'let value = JSON.parse(localStorage.getItem("notes"));';
+    expect(promptRules(`make it blue\n${saving}`, true, undefined, saving)).toContain('To keep what the user types between visits');
+  });
+
+  it('show each value to fill in as an empty slot with what goes there', () => {
+    const rules = promptRules('', false);
+    expect(rules).toContain('const place = ""; // the city asked about');
+    expect(rules).toContain('const key = ""; // what is kept');
+    expect(rules).not.toContain('<lat>');
+  });
+});

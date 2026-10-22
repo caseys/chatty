@@ -8,7 +8,7 @@ import { softwareMidiAccess } from '../audio/software-midi.ts';
 // Static, so the synth software-midi loads on demand is bundled into this one script too
 import 'webaudio-tinysynth';
 import { playNotesHelper } from '../tools/music-tool.ts';
-import { fetchWikipediaSummary } from '../tools/web-tools.ts';
+import { fetchWeather, fetchWikipediaSummary } from '../tools/web-tools.ts';
 
 type Audio = { context: AudioContext; output: GainNode };
 let audio: Audio | null = null;
@@ -50,6 +50,12 @@ function speak(text: string): void {
         break;
       case 'searchWikipedia':
         fetchWikipediaSummary(String(message.query ?? '')).then(
+          (result) => reply(String(message.callId), result),
+          (err) => reply(String(message.callId), { success: false, error: String(err?.message ?? err) })
+        );
+        break;
+      case 'getWeather':
+        fetchWeather(message.place).then(
           (result) => reply(String(message.callId), result),
           (err) => reply(String(message.callId), { success: false, error: String(err?.message ?? err) })
         );

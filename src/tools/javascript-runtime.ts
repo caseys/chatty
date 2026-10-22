@@ -8,7 +8,7 @@ import { parse } from 'acorn';
 import type { LlmRuntimeProvider, ToolDefinition } from '../types/index.ts';
 import { loopProtect } from './loop-protect.ts';
 import { playNotesHelper } from './music-tool.ts';
-import { fetchWikipediaSummary } from './web-tools.ts';
+import { fetchWeather, fetchWikipediaSummary } from './web-tools.ts';
 import { callFromFrameLoop, closeCutOff, declareOnce, markupAcrossLines, tripleQuotedStrings, type StandIn } from '../core/error-hints.ts';
 import { analyse, isReference } from '../core/blank-fix.ts';
 import { sureMatch } from '../core/fuzzy-match.ts';
@@ -256,6 +256,53 @@ export interface PreparedExecutableCode {
  * Inspects raw text from the model into executable JavaScript and classifies
  * whether it is an executable JavaScript code action or conversational prose.
  */
+/** Where a card's saved keys live in the app's storage */
+export const CARD_STORAGE_PREFIX = 'chatty_card:';
+
+/**
+ * A card's localStorage and sessionStorage (source text for the sandbox page, evaluated there with
+ * `window` the page). The card shares the app's origin, so its storage is the app's own: a program's
+ * clear() or setItem("settings", …) would reach the app's chats and settings. Each key it uses is
+ * stored under CARD_STORAGE_PREFIX instead, and it sees only those (length, key(), clear(),
+ * Object.keys, localStorage.name = …). One prefix for every card, so what one program saves ("my
+ * name") the next one can read.
+ */
+export const scopedStorageSource = `(() => {
+  const PREFIX = ${JSON.stringify(CARD_STORAGE_PREFIX)};
+  const scoped = (real) => {
+    const own = () => {
+      const keys = [];
+      for (let i = 0; i < real.length; i++) {
+        const k = real.key(i);
+        if (k !== null && k.startsWith(PREFIX)) keys.push(k.slice(PREFIX.length));
+      }
+      return keys;
+    };
+    const api = {
+      get length() { return own().length; },
+      key: (i) => own()[i] ?? null,
+      getItem: (k) => real.getItem(PREFIX + String(k)),
+      setItem: (k, v) => real.setItem(PREFIX + String(k), String(v)),
+      removeItem: (k) => real.removeItem(PREFIX + String(k)),
+      clear: () => { for (const k of own()) real.removeItem(PREFIX + k); },
+    };
+    return new Proxy(api, {
+      get: (t, p) => (p in t ? t[p] : typeof p === 'string' ? (real.getItem(PREFIX + p) ?? undefined) : undefined),
+      set: (t, p, v) => { if (typeof p !== 'string' || p in t) return false; real.setItem(PREFIX + p, String(v)); return true; },
+      has: (t, p) => p in t || (typeof p === 'string' && real.getItem(PREFIX + p) !== null),
+      deleteProperty: (t, p) => { if (typeof p === 'string' && !(p in t)) real.removeItem(PREFIX + p); return true; },
+      ownKeys: () => own(),
+      getOwnPropertyDescriptor: (t, p) =>
+        typeof p === 'string' && !(p in t) && real.getItem(PREFIX + p) !== null
+          ? { value: real.getItem(PREFIX + p), writable: true, enumerable: true, configurable: true }
+          : undefined,
+    });
+  };
+  for (const name of ['localStorage', 'sessionStorage']) {
+    try { const real = window[name]; if (real) Object.defineProperty(window, name, { value: scoped(real), configurable: true }); } catch {}
+  }
+})()`;
+
 /**
  * What a trial run's sandbox page talks to instead of the app window: messages still go to the
  * app (which only watches for errors), and sound has nowhere to go. Web Audio is an
@@ -1322,7 +1369,7 @@ function prepareProgram(rawText: string, options: { closeCutOff?: boolean; speak
   // Guard against conversational prose that happens to parse as comma expressions or bare identifier calls
   // (e.g. "Sure, thanks", "Hi, there", "Sure (thanks)", "Yes, please", "Okay, thanks")
   if (isValidJs && !hadFences) {
-    const hasJsKeywordsOrBuiltins = /\b(?:const|let|var|function|class|new|await|async|return|throw|if|while|for|switch|try|catch|import|export|typeof|instanceof|speak|playNotes|searchWikipedia|root|alert|prompt|confirm|fetch|requestAnimationFrame|cancelAnimationFrame|setTimeout|setInterval|clearTimeout|clearInterval|console|document|window|Math|JSON|Date|Audio|localStorage|sessionStorage)\b/.test(cleaned);
+    const hasJsKeywordsOrBuiltins = /\b(?:const|let|var|function|class|new|await|async|return|throw|if|while|for|switch|try|catch|import|export|typeof|instanceof|speak|playNotes|searchWikipedia|getWeather|root|alert|prompt|confirm|fetch|requestAnimationFrame|cancelAnimationFrame|setTimeout|setInterval|clearTimeout|clearInterval|console|document|window|Math|JSON|Date|Audio|localStorage|sessionStorage)\b/.test(cleaned);
     const hasJsSyntaxOrOperators = /[=;{}[\].=>]/.test(cleaned) || /\([^)]*['"][^)]*\)/.test(cleaned) || /\(\s*\)/.test(cleaned);
     if (!hasJsKeywordsOrBuiltins && !hasJsSyntaxOrOperators) {
       isValidJs = false;
@@ -1392,7 +1439,7 @@ export function detectRecommendedMode(code: string): JavascriptExecutionMode {
   // (Tone.js, which a page gets only there, is named with its capital: "tone" is also a word)
   if (/\bTone\s*\./.test(code)) return 'iframe';
   if (
-    /\b(document|window|canvas|getContext|Audio|AudioContext|webkitAudioContext|OscillatorNode|GainNode|requestMIDIAccess|out|clear|svg|innerHTML|appendChild|addEventListener|setInterval|setTimeout|requestAnimationFrame|createElement|getElementById|querySelector|classList|style|onclick|root|playNotes|speak|searchWikipedia|localStorage|sessionStorage|alert|prompt|confirm|location|navigator)\b/i.test(
+    /\b(document|window|canvas|getContext|Audio|AudioContext|webkitAudioContext|OscillatorNode|GainNode|requestMIDIAccess|out|clear|svg|innerHTML|appendChild|addEventListener|setInterval|setTimeout|requestAnimationFrame|createElement|getElementById|querySelector|classList|style|onclick|root|playNotes|speak|searchWikipedia|getWeather|localStorage|sessionStorage|alert|prompt|confirm|location|navigator)\b/i.test(
       code
     )
   ) {
@@ -2589,6 +2636,8 @@ export class JavascriptRuntime {
   // or \`var draw\` would otherwise meet them in the page's global scope ("Identifier 'setup' has
   // already been declared") before the program starts
   (function () {
+    // Before the trial's host: a trial's copy in memory is of the card's own keys
+    ${scopedStorageSource};
     const __chattyHost = ${host ?? (trial ? trialHost(token) : 'window.parent')};
     // The libraries' own scripts (Tone.js, see standalone/tone-realm.ts) look the host up as a global
     window.__chattyHost = __chattyHost;
@@ -2642,6 +2691,23 @@ export class JavascriptRuntime {
         const callId = Math.random().toString(36).slice(2);
         pendingAsyncCalls.set(callId, resolve);
         __chattyHost.postMessage({ type: 'searchWikipedia', id: currentExecId, callId, query }, '*');
+      });
+    };
+
+    // The weather right now (web-tools.ts fetchWeather, run by the app): { place, temperature, rain, sky }.
+    // When it can't be had (offline, no such place), the card says so itself and the fields read
+    // "unknown": an error here would bring a fix turn, and a fix turn on "the service answered 503"
+    // tends to make a forecast up
+    window.getWeather = (place) => {
+      return new Promise((resolve) => {
+        const callId = Math.random().toString(36).slice(2);
+        pendingAsyncCalls.set(callId, (result) => {
+          if (result && result.error) {
+            window.speak(String(result.error).replace(/^getWeather: /, "I couldn't get the weather: ") + '.');
+            resolve({ place: typeof place === 'string' && place.trim() ? place.trim() : 'here', temperature: 'unknown', rain: 'unknown', sky: 'unknown', error: String(result.error) });
+          } else resolve(result);
+        });
+        __chattyHost.postMessage({ type: 'getWeather', id: currentExecId, callId, place: typeof place === 'string' ? place : '' }, '*');
       });
     };
 
@@ -5024,7 +5090,7 @@ export class JavascriptRuntime {
       return;
     }
 
-    if (data.type === 'playNotes' || data.type === 'searchWikipedia') {
+    if (data.type === 'playNotes' || data.type === 'searchWikipedia' || data.type === 'getWeather') {
       void this.handleAsyncCall(iframe, data);
       return;
     }
@@ -5077,6 +5143,8 @@ export class JavascriptRuntime {
           undefined,
           opts?.audioContextAccessor
         );
+      } else if (data.type === 'getWeather') {
+        result = await fetchWeather(data.place);
       } else {
         result = await fetchWikipediaSummary(String(data.query ?? ''));
       }
@@ -5294,13 +5362,13 @@ export class JavascriptRuntime {
           // Every control was used: done once the trial's own time is up too
           clearTimeout(stopTimer);
           stopTimer = setTimeout(() => finish(null), Math.max(ms - (Date.now() - startedAt), 0));
-        } else if (data.type === 'playNotes' || data.type === 'searchWikipedia') {
-          // Nothing plays and nothing is fetched; the program just gets an answer
+        } else if (data.type === 'playNotes' || data.type === 'searchWikipedia' || data.type === 'getWeather') {
+          // Nothing plays and nothing is fetched; the program just gets an answer (the weather: one of the
+          // shape it gets for real, so what it does with it is tried too)
+          const result =
+            data.type === 'getWeather' ? { place: String(data.place || 'here'), temperature: 18, rain: 0, sky: 'clear' } : { success: data.type === 'playNotes' };
           try {
-            iframe.contentWindow?.postMessage(
-              { type: 'async_response', callId: data.callId, result: { success: data.type === 'playNotes' } },
-              '*'
-            );
+            iframe.contentWindow?.postMessage({ type: 'async_response', callId: data.callId, result }, '*');
           } catch {
             // frame went away
           }

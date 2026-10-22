@@ -21,7 +21,7 @@
 
 import type { LlmRuntimeProvider } from '../types/index.ts';
 
-export const OPTIONAL_RULES = ['card', 'ui', 'canvas', 'three', 'svg', 'music', 'fx', 'facts', 'text', 'keys', 'css'] as const;
+export const OPTIONAL_RULES = ['card', 'ui', 'canvas', 'three', 'svg', 'music', 'fx', 'facts', 'text', 'keys', 'css', 'save', 'weather'] as const;
 export type RuleName = (typeof OPTIONAL_RULES)[number];
 
 /** The system prompt of every question: nothing in it about writing programs, which small models then do */
@@ -48,6 +48,8 @@ export const RULE_QUESTIONS: Record<RuleName, { note?: string; question?: string
   // Keys goes by keywords: no question told its cases apart, and its keywords make no wrong matches in the cases
   keys: { question: 'Will the user control the program with keyboard keys?' },
   css: { question: 'Should the program change how a page element looks over time?' },
+  save: { question: 'Should the program still have what the user entered after the page is closed and opened again?' },
+  weather: { question: 'Is the request about the weather?' },
 };
 
 /**
@@ -60,10 +62,13 @@ export const RULE_CUTOFFS: Readonly<Record<string, Partial<Record<RuleName, numb
   // 34 cases, keywords with these cutoffs: 31 exact. Its card answers don't tell cases apart (AUC 0.5).
   // Text (AUC 0.82): below every request that needs it; the fitted 0.652 dropped a palindrome and a find-and-replace.
   // Its CSS answers barely tell cases apart (AUC 0.63, one case either side of the cutoff), so CSS goes by keywords
-  'qwen3-0.6b': { ui: 0.902, canvas: 0.733, three: 0.807, text: 0.35 },
+  // Saving and weather (AUC 0.9, 0.85): below every request that needs them, where the fitted
+  // cutoffs (0.549, 0.475) dropped a count to keep or sat 0.001 under one
+  'qwen3-0.6b': { ui: 0.902, canvas: 0.733, three: 0.807, text: 0.35, save: 0.3, weather: 0.28 },
   // 34 cases: 29 exact. Its interface answers don't tell cases apart (AUC 0.48), nor its text answers (AUC 0.33).
-  // CSS motion: AUC 1
-  'qwen2.5-0.5b': { card: 0.431, canvas: 0.455, three: 0.615, css: 0.415 },
+  // CSS motion: AUC 1. Saving and weather (AUC 0.83, 1): halfway between the needed and the not, where the
+  // fitted cutoffs (0.339, 0.49) sat 0.001 under one that needs them
+  'qwen2.5-0.5b': { card: 0.431, canvas: 0.455, three: 0.615, css: 0.415, save: 0.315, weather: 0.415 },
 };
 
 const ANSWERS = '\nA) yes\nB) no\nAnswer:';
@@ -216,6 +221,44 @@ export const RULE_CASES: ReadonlyArray<{ request: string; rules: RuleName[] }> =
   { request: 'Make a counter with plus and minus buttons', rules: ['card', 'ui'] },
   { request: 'Tell me about the history of drag racing', rules: ['facts'] },
   { request: 'Draw a glowing moon over the hills', rules: ['card', 'canvas'] },
+  // Saving and the weather (and a few days and times, which neither is for)
+  { request: 'Remember my name for next time', rules: ['card', 'ui', 'save'] },
+  { request: "Save my notes so they're there next time", rules: ['card', 'ui', 'save'] },
+  { request: 'Make a notepad that remembers what I typed', rules: ['card', 'ui', 'save'] },
+  { request: 'Count my button presses and keep the count after a reload', rules: ['card', 'ui', 'save'] },
+  { request: "Keep a grocery list for me that's still there when I come back", rules: ['card', 'ui', 'save'] },
+  { request: 'Make a save-the-princess game', rules: ['card', 'canvas'] },
+  { request: 'Keep score in a game of pong', rules: ['card', 'canvas'] },
+  { request: 'Draw a memory card', rules: ['card', 'canvas'] },
+  { request: 'Draw a smiley face and save it as a PNG', rules: ['card', 'canvas'] },
+  { request: 'Play the notes C, E and G one after another', rules: ['music'] },
+  { request: 'Write a short thank-you note to my teacher', rules: [] },
+  { request: 'Give me some date night ideas', rules: [] },
+  { request: 'Make a date picker form', rules: ['card', 'ui'] },
+  { request: 'How many days are in a leap year?', rules: ['facts'] },
+  { request: 'Count the glasses of water I drink today with a plus button', rules: ['card', 'ui'] },
+  { request: 'Draw a sunny day at the park', rules: ['card', 'canvas'] },
+  { request: 'Play a waltz in three-four time', rules: ['music'] },
+  { request: "What's the weather like in Chicago right now?", rules: ['weather'] },
+  { request: 'Is it going to rain in Seattle today?', rules: ['weather'] },
+  { request: 'Tell me the temperature in Madrid', rules: ['weather'] },
+  { request: 'Do I need a jacket in London today?', rules: ['weather'] },
+  { request: "What's the weather like here?", rules: ['weather'] },
+  { request: 'Draw rain falling on a city street', rules: ['card', 'canvas'] },
+  { request: 'Why is snow white?', rules: ['facts'] },
+  { request: 'Make a hot pink button that says hello', rules: ['card', 'ui'] },
+  { request: 'Write a poem about weathering the storm', rules: [] },
+  { request: 'Who invented the weather forecast?', rules: ['facts'] },
+  { request: 'Keep the ball bouncing across the screen', rules: ['card', 'canvas'] },
+  { request: 'Make a piano that plays notes when I tap the keys', rules: ['card', 'ui', 'music'] },
+  { request: 'Now make the ball red', rules: ['card', 'canvas'] },
+  { request: 'How old is the Eiffel Tower?', rules: ['facts'] },
+  { request: 'Make a stopwatch that shows the time', rules: ['card', 'ui'] },
+  { request: 'Count to 10 one at a time', rules: [] },
+  { request: 'Make a rainbow button', rules: ['card', 'ui'] },
+  { request: 'Flip a coin 10 times in a row', rules: [] },
+  { request: 'Make a to-do list that keeps my items after a reload', rules: ['card', 'ui', 'save'] },
+  { request: 'Make a snake game that remembers my high score', rules: ['card', 'canvas'] },
 ];
 
 /**
