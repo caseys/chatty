@@ -1043,9 +1043,55 @@ export function exposeFunctionsToInlineHandlers(code: string): string {
     ...Array.from(code.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm), (m) => m[1]),
     ...Array.from(code.matchAll(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/gm), (m) => m[1]),
   ];
-  if (names.length === 0) return code;
-  preparing?.exposed.push(...new Set(names));
-  return `${code}\n${[...new Set(names)].map((name) => `try { window.${name} = ${name}; } catch {}`).join('\n')}`;
+  const nested = exposeNestedHandlers(code, names);
+  if (names.length === 0 && nested.names.length === 0) return code;
+  preparing?.exposed.push(...new Set([...names, ...nested.names]));
+  return names.length === 0 ? nested.code : `${nested.code}\n${[...new Set(names)].map((name) => `try { window.${name} = ${name}; } catch {}`).join('\n')}`;
+}
+
+/**
+ * Functions the page's inline handlers call that the program defines only inside another function
+ * (onclick="addTodo()" with addTodo made inside createTodoList()): each, defined there exactly once,
+ * is made global right after its definition, so it is once that function has run.
+ */
+function exposeNestedHandlers(code: string, topLevel: string[]): { code: string; names: string[] } {
+  const called = new Set<string>();
+  for (const attr of code.matchAll(/\son[a-z]+\s*=\s*\\?["']([^"'\\]*)/gi)) {
+    for (const m of attr[1].matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) called.add(m[1]);
+  }
+  for (const name of topLevel) called.delete(name);
+  if (called.size === 0) return { code, names: [] };
+  let program: ReturnType<typeof parse>;
+  try {
+    program = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true });
+  } catch {
+    return { code, names: [] };
+  }
+  const found = new Map<string, number[]>();
+  const visit = (node: unknown, inFunction: boolean) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child, inFunction);
+      return;
+    }
+    const n = node as { type?: string; end?: number; id?: { type: string; name: string } | null; declarations?: Array<{ id: { type: string; name: string }; init?: { type: string } | null }> };
+    if (typeof n.type !== 'string') return;
+    if (inFunction && n.type === 'FunctionDeclaration' && n.id && called.has(n.id.name)) found.set(n.id.name, [...(found.get(n.id.name) ?? []), n.end ?? 0]);
+    if (inFunction && n.type === 'VariableDeclaration') {
+      for (const d of n.declarations ?? []) {
+        if (d.id.type === 'Identifier' && called.has(d.id.name) && d.init && /^(?:Arrow)?Function/.test(d.init.type)) found.set(d.id.name, [...(found.get(d.id.name) ?? []), n.end ?? 0]);
+      }
+    }
+    const opens = /Function/.test(n.type);
+    for (const key of Object.keys(n)) if (key !== 'type') visit((n as Record<string, unknown>)[key], inFunction || opens);
+  };
+  visit(program.body, false);
+  const once = [...found].filter(([, ends]) => ends.length === 1).map(([name, [end]]) => ({ name, end }));
+  let out = code;
+  for (const { name, end } of once.sort((a, b) => b.end - a.end)) {
+    out = `${out.slice(0, end)}\ntry { window.${name} = ${name}; } catch {}${out.slice(end)}`;
+  }
+  return { code: out, names: once.map((o) => o.name) };
 }
 
 /** Speaks the explanation that came before extracted code when the code says nothing itself. */

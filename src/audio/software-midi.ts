@@ -620,7 +620,10 @@ function noteValues(value: unknown, drums: boolean, program: number): { notes: n
   if (/^-?\d+(\.\d+)?$/.test(text)) return { notes: [clampNote(Number(text))], scale: false };
   if (drums) {
     const hit = drumNote(text);
-    return hit === null ? none : { notes: [hit], scale: false };
+    if (hit !== null) return { notes: [hit], scale: false };
+    // A note name on drums ('C4'): in General MIDI each drum sound is a note number, so it's that number's drum
+    const named = /^([a-g])(#|♯|b|♭)?(-?\d)$/i.exec(text);
+    return named ? { notes: [clampNote(pitch(named[1], named[2], Number(named[3])))], scale: false } : none;
   }
   const bass = isBassProgram(program);
   // The accidental sits right after the letter ('Bbm' is B-flat minor; 'B blues' has none)

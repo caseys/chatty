@@ -58,3 +58,27 @@ describe("the hint's Web MIDI output line copied wrong", () => {
     expect(restoreMidiOutputLine('const output = [...(await navigator.requestMIDIAccess()).outputs.values()][0];\nlet x = ;', parsesAsProgram)).toBeNull();
   });
 });
+
+describe("the example's empty list of notes, copied as it is", () => {
+  it('says the list is empty, with drum sounds for a drum request', async () => {
+    const { emptyExampleNotes } = await import('../src/core/example-copy.ts');
+    // From a live drum-beat run
+    const live = 'const output = [...(await navigator.requestMIDIAccess()).outputs.values()][0];\nconst notes = [/* the music\'s notes, like "C4" */];\noutput.send("piano", notes, 400);';
+    expect(emptyExampleNotes(live, 'Play a drum beat')).toBe(
+      'The list of notes is empty (the example\'s placeholder), so nothing plays: fill it with the notes of "Play a drum beat", in order, as drum sounds ("kick", "snare", "hihat") with "drums" as the instrument.'
+    );
+    expect(emptyExampleNotes(live, 'Play a lullaby')).toContain('(note names like "C4")');
+    expect(emptyExampleNotes(live.replace('[/* the music\'s notes, like "C4" */]', '["C4", "D4"]'), 'Play a lullaby')).toBeNull();
+  });
+});
+
+describe('round 24: drums', () => {
+  it('reads a note name on drums as its General MIDI drum, and an inline empty list as empty', async () => {
+    const { noteNumber } = await import('../src/audio/software-midi.ts');
+    const { emptyExampleNotes } = await import('../src/core/example-copy.ts');
+    expect(noteNumber('C4', true)).toBe(60);
+    expect(noteNumber('kick', true)).toBe(36);
+    // From a live drum-beat run: the list written empty right in send()
+    expect(emptyExampleNotes('output.send("piano", [], 400);', 'Play a drum beat')).toContain('The list of notes is empty');
+  });
+});

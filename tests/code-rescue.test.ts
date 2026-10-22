@@ -258,6 +258,17 @@ describe('syntax errors are not hidden', () => {
 });
 
 describe('inline handlers in written HTML', () => {
+  it('makes a function an inline handler calls global where it is made, when it is made inside another function', () => {
+    // From a live to-do list: addTodo and displayItems made inside createTodoList()
+    const code = 'function createTodoList() {\n  const todoList = [];\n  const addTodo = () => {\n    todoList.push("x");\n  };\n  function displayItems() {}\n  document.body.innerHTML = \'<button onclick="addTodo()">Add</button><div onclick="displayItems()"></div>\';\n}\ncreateTodoList();';
+    const out = exposeFunctionsToInlineHandlers(code);
+    expect(out).toContain('  };\ntry { window.addTodo = addTodo; } catch {}');
+    expect(out).toContain('  function displayItems() {}\ntry { window.displayItems = displayItems; } catch {}');
+    // Made twice in different places: no single answer, left alone
+    const twice = 'function a() { function go() {} }\nfunction b() { function go() {} }\ndocument.body.innerHTML = \'<button onclick="go()">Go</button>\';';
+    expect(exposeFunctionsToInlineHandlers(twice)).not.toContain('window.go = go');
+  });
+
   it('makes top-level functions global only when the HTML calls them inline', () => {
     const withHandler = exposeFunctionsToInlineHandlers('function calc() {}\nconst reset = () => {};\ndocument.write(\'<button onclick="calc()">Go</button>\');');
     expect(withHandler).toContain('try { window.calc = calc; } catch {}');

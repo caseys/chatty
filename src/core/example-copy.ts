@@ -61,3 +61,14 @@ export function restoreMidiOutputLine(code: string, parses: (code: string) => bo
   }
   return null;
 }
+
+/** The fact for a program that sends the example's empty list of notes, copied as it is, or null */
+export function emptyExampleNotes(code: string, request: string): string | null {
+  const empty =
+    /\[\s*\/\*[^*]*\bnotes\b[^*]*\*\/\s*\]/.test(code) || /\b(?:const|let|var)\s+notes\s*=\s*\[\s*\]/.test(code) || /\.send\s*\(\s*["'`][^"'`]*["'`]\s*,\s*\[\s*\]/.test(code);
+  if (!empty || !/\.send\s*\(/.test(code)) return null;
+  const drums = requestedInstrument(request) === 'drums';
+  return `The list of notes is empty (the example's placeholder), so nothing plays: fill it with the notes of "${request.trim()}", in order${
+    drums ? ', as drum sounds ("kick", "snare", "hihat") with "drums" as the instrument' : ' (note names like "C4")'
+  }.`;
+}

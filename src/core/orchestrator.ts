@@ -52,7 +52,7 @@ import { isAppleMobile, LOCAL_CHAT_MODELS } from './settings.ts';
 import { redeclaredCut } from './repeat-guard.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 import { MIDI_OUTPUT, MIDI_PLAIN_FORM, MIDI_RULE } from './midi-form.ts';
-import { copiedExampleNotes, restoreMidiOutputLine, wrongInstrument } from './example-copy.ts';
+import { copiedExampleNotes, emptyExampleNotes, restoreMidiOutputLine, wrongInstrument } from './example-copy.ts';
 
 /** "Error at line 7: x is not defined" (the line when the browser reported it) */
 function errorText(message: string, line?: number): string {
@@ -3109,6 +3109,8 @@ export class ConversationOrchestrator {
     const emptied = wantsVisual && shown() && !drawn() ? (this.javascriptRuntime.emptyElements?.() ?? []) : [];
     const deadHandlers = wantsVisual && shown() && drawn() ? (this.javascriptRuntime.deadHandlers?.() ?? []) : [];
     const missing = [
+      // The example's empty list of notes, copied as it is: said first, it's why nothing played
+      wantsSound && soundKinds(request).music ? (emptyExampleNotes(code, request) ?? '') : '',
       wantsSound && !asked()
         ? soundKinds(request).music
           ? `The program played nothing: notes play through Web MIDI. Get an output with ${MIDI_OUTPUT}, then ${MIDI_PLAIN_FORM}.`
