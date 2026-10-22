@@ -172,6 +172,47 @@ function declarations(ast: AnyNode): Declaration[] {
   return found;
 }
 
+/** The keys a name is matched by: its first four letters, and the first four of each camelCase or snake_case part */
+function prefixKeys(name: string): string[] {
+  const parts = name.split(/_+|(?<=[a-z0-9])(?=[A-Z])/).filter(Boolean);
+  return [...new Set([name, ...parts].map((part) => part.slice(0, 4).toLowerCase()))].filter((key) => key.length > 0);
+}
+
+/**
+ * The declared name a missing one most likely means, by the start of its words (out → output, canv →
+ * myCanvas, midiOut → output): a key of one (see prefixKeys) starts a key of the other, either way round.
+ * The longest shared start wins, and the last declared on a tie. The missing name needs three letters or
+ * more, so a stray `i` or `x` matches nothing. Null when nothing matches.
+ */
+export function prefixMatchOf(missing: string, declared: Array<{ name: string; line: number }>): string | null {
+  if (missing.length < 3) return null;
+  const mine = prefixKeys(missing).filter((key) => key.length >= 3);
+  let best: { name: string; line: number; shared: number } | null = null;
+  const lower = missing.toLowerCase();
+  const missingParts = prefixKeys(missing).length > 1 ? missing.split(/_+|(?<=[a-z0-9])(?=[A-Z])/).filter(Boolean) : [missing];
+  for (const candidate of declared) {
+    if (candidate.name === missing) continue;
+    // A list and one of its items (balls and ball) are not each other
+    const other = candidate.name.toLowerCase();
+    if (other === `${lower}s` || other === `${lower}es` || lower === `${other}s` || lower === `${other}es`) continue;
+    let shared = 0;
+    let onlyFirstWords = true;
+    const candidateParts = candidate.name.split(/_+|(?<=[a-z0-9])(?=[A-Z])/).filter(Boolean);
+    for (const a of mine) {
+      for (const b of prefixKeys(candidate.name)) {
+        if (!(a.startsWith(b) || b.startsWith(a))) continue;
+        shared = Math.max(shared, Math.min(a.length, b.length));
+        if (a !== missingParts[0].slice(0, 4).toLowerCase() || b !== candidateParts[0].slice(0, 4).toLowerCase()) onlyFirstWords = false;
+      }
+    }
+    if (shared < 3) continue;
+    // Two names of several words that share only their first (playNote and playChord: a verb) name different things
+    if (missingParts.length > 1 && candidateParts.length > 1 && onlyFirstWords) continue;
+    if (!best || shared > best.shared || (shared === best.shared && candidate.line >= best.line)) best = { ...candidate, shared };
+  }
+  return best?.name ?? null;
+}
+
 /** The one name that differs from the missing one only in letter case, or null */
 function caseSlip(missing: string, names: string[]): string | null {
   const sameLetters = [...new Set(names)].filter((name) => name !== missing && name.toLowerCase() === missing.toLowerCase());
@@ -316,6 +357,13 @@ function notDefined(code: string, error: string, errorLine?: number, page?: Page
     const slip = slipOf(name, visible) ?? [slipOf(name, Object.getOwnPropertyNames(globalThis))].find((global) => global && fitsGlobal(uses, tree, global));
     const renamed = slip ? renameUndeclared(code, name, slip) : null;
     if (slip && renamed) return { correction: { code: renamed, note: `${name} → ${slip}` } };
+    // No slip, and the missing name is called or has a member used (out.seed(), canvas.getContext()): the declared
+    // name it most likely means, by the start of its words (out → output), the last declared on a tie
+    const called = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\s*(?:\\(|\\.)`).test(code);
+    const seen = declared.filter((d) => visible.includes(d.name));
+    const meant = called ? prefixMatchOf(name, seen) : null;
+    const prefixed = meant ? renameUndeclared(code, name, meant) : null;
+    if (meant && prefixed) return { correction: { code: prefixed, note: `${name} → ${meant} (the declared name its start matches)` } };
   }
   // What really exists to be meant: the program's own top-level functions, classes and variables from
   // its scopes, closest to the missing name first (then in the order declared), and Chatty's helpers

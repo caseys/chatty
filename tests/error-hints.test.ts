@@ -934,7 +934,8 @@ describe('a library named with its file’s ending', () => {
     expect(errorHint('ToneJS.start();', 'ToneJS is not defined', 1, { ids: [], scope: {} })?.correction).toBeUndefined();
     expect(errorHint('ToneJS.start();', 'ToneJS is not defined', 1)?.correction).toBeUndefined();
     expect(errorHint('ToneKit.start();', 'ToneKit is not defined', 1, { ids: [], scope })?.correction).toBeUndefined();
-    expect(errorHint('const ToneJS = {};\nToneJS.start(); Tone2.go();', 'Tone2 is not defined', 2, { ids: [], scope })?.correction).toBeUndefined();
+    // (the program's own ToneJS is the name Tone2 matches by its start: renamed to it, not to the library)
+    expect(errorHint('const ToneJS = {};\nToneJS.start(); Tone2.go();', 'Tone2 is not defined', 2, { ids: [], scope })?.correction?.note).toBe('Tone2 → ToneJS (the declared name its start matches)');
   });
 });
 
@@ -1145,5 +1146,28 @@ describe('an element that was never made, used with the members of a value the p
     expect(errorHint(none, 'drawingArea.clearRect is not a function', 2, page)?.text).not.toContain('already has one');
     const element = "const area = document.getElementById('drawing-area');\narea.focus();";
     expect(errorHint(element, 'area.focus is not a function', 2, page)?.text).toContain('Create the element');
+  });
+});
+
+describe('an undefined name matched to a declared one by the start of its words', () => {
+  it('matches by the first four letters of the name or of a camelCase part, either way round', async () => {
+    const { prefixMatchOf } = await import('../src/core/error-hints.ts');
+    const d = (name: string, line: number) => ({ name, line });
+    expect(prefixMatchOf('out', [d('output', 1)])).toBe('output');
+    expect(prefixMatchOf('canv', [d('myCanvas', 2)])).toBe('myCanvas');
+    expect(prefixMatchOf('midiOut', [d('output', 1)])).toBe('output');
+    expect(prefixMatchOf('scoreText', [d('scoreLabel', 1), d('score', 2)])).toBe('score');
+    // The longest shared start wins; the last declared breaks a tie
+    expect(prefixMatchOf('board', [d('boardData', 3), d('boardEl', 5)])).toBe('boardEl');
+    // Too short, or nothing in common: no match
+    expect(prefixMatchOf('i', [d('items', 1)])).toBeNull();
+    expect(prefixMatchOf('ctx', [d('context', 1)])).toBeNull();
+  });
+
+  it('renames every use and runs the program again (a live case: canvas used, myCanvas declared)', async () => {
+    const { errorHint } = await import('../src/core/error-hints.ts');
+    const code = 'const myCanvas = document.createElement("canvas");\ndocument.body.appendChild(myCanvas);\nconst ctx = canvas.getContext("2d");';
+    const hint = errorHint(code, 'canvas is not defined', 3);
+    expect(hint?.correction?.code).toBe('const myCanvas = document.createElement("canvas");\ndocument.body.appendChild(myCanvas);\nconst ctx = myCanvas.getContext("2d");');
   });
 });
