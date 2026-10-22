@@ -33,6 +33,7 @@ import {
   type TurnRouter,
 } from './phone-pipeline.ts';
 import {
+  askOnCard,
   type CanvasTrace,
   JavascriptRuntime,
   inspectExecutableCode,
@@ -41,11 +42,11 @@ import {
 } from '../tools/javascript-runtime.ts';
 import { setForRecentRequests } from './recent-requests.ts';
 import { appendRunLog } from './run-log.ts';
-import { memberBlank, fillMember, blankChoices, blankRequest, choiceRequest, declareMissing, fillBlank, findBlank, type Blank } from './blank-fix.ts';
+import { memberBlank, fillMember, blankChoices, blankRequest, choiceRequest, declareMissing, fillBlank, fillCallsItself, findBlank, standsForMissingFunction, type Blank } from './blank-fix.ts';
 import { madeAsWrongClass, memberList, wholeCanvasClear, withLibraryClassNames, type RealMember } from './method-hints.ts';
 import { applyFixReply, brokenLines, enclosingFunction, failingStatement, FIX_SYSTEM_PROMPT, fixRequest, isBareText, restoreWhole } from './line-fix.ts';
 import { missingStepsError, sameShortfallNote } from './sound-setup.ts';
-import { addNewToClasses, escapeScriptBackticks, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, looksThrown, provideThree, quoteToneTimes, unusedDrawingValues, dropExampleTags } from './error-hints.ts';
+import { addNewToClasses, closeAttributeQuotes, escapeScriptBackticks, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, looksThrown, provideThree, quoteToneTimes, unusedDrawingValues, dropExampleTags } from './error-hints.ts';
 import { applyAssignmentFixes, moveToContext, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { isAppleMobile, LOCAL_CHAT_MODELS } from './settings.ts';
@@ -155,12 +156,16 @@ export function repetitionCutIndex(text: string): number {
   // turns), which ordinary code never repeats line for line
   const blockStart = Math.max(0, text.length - 8000);
   const done = text.slice(blockStart).split('\n').slice(0, -1); // the last line may still be arriving
+  // Lines are compared without their indent: a fix that wrote `function drawLoop() {` and
+  // `requestAnimationFrame(drawLoop);` some 30 times, each copy inside the one before and so
+  // indented deeper, ran for 22 seconds (Qwen2.5 0.5B)
+  const bare = done.map((line) => line.trimStart());
   for (let k = 2; k <= 40; k++) {
     const copies = k >= 8 ? 2 : 3;
     if (done.length < k * copies) break;
     // Where the lines start repeating every k lines
     let p = done.length - k;
-    while (p > 0 && done[p - 1] === done[p - 1 + k]) p--;
+    while (p > 0 && bare[p - 1] === bare[p - 1 + k]) p--;
     if (done.length - p < k * copies) continue;
     const block = done.slice(p, p + k).join('\n');
     if (block.replace(/\s/g, '').length < 20 || !/[A-Za-z]/.test(block)) continue;
@@ -652,6 +657,8 @@ const BLANK_SYSTEM_PROMPT = [
 
 /** The most candidate expressions the blank stage tries in test runs for one attempt */
 const MAX_BLANK_CANDIDATES = 6;
+/** An error that is endless recursion (Chrome and Safari; Firefox) */
+const RECURSION = /Maximum call stack size exceeded|too much recursion/;
 
 /** The index a multiple-choice reply picks: its first letter A, B, … within the choices, or -1 */
 export function chosenIndex(reply: string, count: number): number {
@@ -1160,6 +1167,12 @@ export function repairBeforeRunning(code: string, isProse: boolean, note: (text:
         executableCode = stray.code;
         note(`${strayName(stray.removed)} on line ${stray.line} → removed: corrected before running`);
       }
+      // An attribute in a markup string closed with the string's quote, not its own (onclick='go()">)
+      const attributes = closeAttributeQuotes(executableCode);
+      if (attributes) {
+        executableCode = attributes.code;
+        note(`line${attributes.lines.length > 1 ? 's' : ''} ${attributes.lines.join(', ')}: an attribute in markup closed with the other quote (which ended the string) → closed with the quote it opened with: corrected before running`);
+      }
       // `a && b = c`: a logical expression can't be assigned to; it is `a && (b = c)`
       const logical = wrapLogicalAssignment(executableCode);
       if (logical) {
@@ -1239,6 +1252,12 @@ export function repairBeforeRunning(code: string, isProse: boolean, note: (text:
     if (onCanvas.moved.length > 0) {
       executableCode = onCanvas.code;
       for (const { object, members } of onCanvas.moved) note(`${members.map((m) => `${object}.${m}`).join(', ')} → ${object}.getContext("2d")…: a canvas element draws through its context: corrected before running`);
+    }
+    // prompt(), which the card can't show (it answers null): asked on the card, the program waiting for the answer
+    const asked = askOnCard(executableCode);
+    if (asked) {
+      executableCode = asked.code;
+      note(`prompt() (${asked.calls === 1 ? 'a box' : `${asked.calls} boxes`} the card can't open: it answers null) → asked on the card, and the program waits for the answer: corrected before running`);
     }
   }
   // Members its objects don't have (ctx.fillstyle, style.backgroundColour): a sure slip is
@@ -2197,6 +2216,7 @@ export class ConversationOrchestrator {
           if (inspected.spokeComment) appendRunLog('imagined', `its closing comment → speak(${JSON.stringify(inspected.spokeComment.slice(0, 80))}): corrected before running`);
           if (inspected.called?.length) appendRunLog('imagined', `${inspected.called.map((n) => `${n}()`).join(', ')} declared but never called → called at the end: corrected before running`);
           if (inspected.wired?.length) appendRunLog('imagined', `${inspected.wired.map((n) => `${n}()`).join(', ')} works out what the user types and was never called → runs as they type and when a form is sent: corrected before running`);
+          if (inspected.standInFields?.length) appendRunLog('imagined', `the field${inspected.standInFields.length === 1 ? '' : 's'} it reads (${inspected.standInFields.join(', ')}) never made → ${inspected.standInFields.length === 1 ? 'a text box' : 'a text box for each'} on the card: corrected before running`);
           if (inspected.shownMarkup?.length) appendRunLog('imagined', `the markup in ${inspected.shownMarkup.join(', ')} was never put on the page → added to the card: corrected before running`);
           if (inspected.hoistedScripts) appendRunLog('imagined', `${inspected.hoistedScripts === 1 ? 'a <script>' : `${inspected.hoistedScripts} <script>s`} in markup the program sets never runs in the browser → its code is part of the program: corrected before running`);
           if (inspected.exposed?.length) appendRunLog('imagined', `${inspected.exposed.map((n) => `${n}()`).join(', ')} made reachable from the page's inline handlers: corrected before running`);
@@ -3423,6 +3443,8 @@ export class ConversationOrchestrator {
       if (key && key !== blank.text.trim() && !LITERAL.test(key)) votes.set(key, (votes.get(key) ?? 0) + 1);
     };
     let count = 0;
+    // The choice the model's scores clearly prefer: 0.75 or more, and twice the next
+    let clearlyPreferred: string | null = null;
     type Candidate = { code: string; expr: string; level: number; rank: number; votes: number };
     let best = null as Candidate | null;
     // The choices best-first: by name at first, by the model's probabilities once it has scored them
@@ -3438,6 +3460,12 @@ export class ConversationOrchestrator {
     const test = async (expr: string): Promise<void> => {
       if (tested.has(expr) || count >= MAX_BLANK_CANDIDATES || moved() || abort.signal.aborted) return;
       tested.add(expr);
+      // A missing function's name only gets a function that shares a word with it or that the model
+      // clearly chose, and never the function it is in (that would only call itself): see blank-fix.ts
+      if (!standsForMissingFunction(run.code, blank, error, expr, clearlyPreferred === expr) || fillCallsItself(run.code, blank, expr)) {
+        appendRunLog('retry', `\`${expr}\` for \`${blank.text}\`: ${fillCallsItself(run.code, blank, expr) ? 'the function it is in, which would only call itself' : 'shares no word with it, and the model did not clearly choose it'}: not tried`);
+        return;
+      }
       const filled = members ? fillMember(run.code, blank, expr) : fillBlank(run.code, blank, expr);
       if (!filled || filled === run.code) return;
       count++;
@@ -3454,7 +3482,10 @@ export class ConversationOrchestrator {
       // reached the blank is judged by the line, as before: 2 past the blank, 1 another error.
       // (a pick whose use the run never reached, with no error, is level 1; for a member it is not applied: nothing showed it works)
       const atFill = !!trial.error && failsAtFill(trial.error, expr, blank.text, error);
-      const level = !trial.error
+      // A run that ends in endless recursion made the program worse, however far it got (nextTurn put
+      // where isValidMove was called, in a tic-tac-toe, overflowed the stack and was taken for progress)
+      const recursed = !!trial.error && RECURSION.test(trial.error) && !RECURSION.test(error);
+      const level = recursed ? 0 : !trial.error
         ? trial.reached === false && probe !== filled
           ? members
             ? 0
@@ -3489,6 +3520,7 @@ export class ConversationOrchestrator {
           // (equal scores keep their order by name)
           const order = labels.map((_, i) => i).sort((a, b) => scores[b] - scores[a] || a - b);
           ranked = [...order.map((i) => choices[i]), ...choices.slice(labels.length)];
+          if (scores[order[0]] >= 0.75 && scores[order[0]] >= 2 * (scores[order[1]] ?? 0)) clearlyPreferred = choices[order[0]];
           // (a runtime reports only its likeliest few: the rest follow them in their order)
           const shown = order.filter((i) => scores[i] > 0);
           appendRunLog('retry', `scored the choices by probability: ${shown.map((i) => `\`${choices[i]}\` ${scores[i].toFixed(2)}`).join(', ')}${choices.length > shown.length ? ` (${choices.length - shown.length} more, less likely)` : ''}`);

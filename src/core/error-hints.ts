@@ -147,6 +147,8 @@ interface Declaration {
   /** The function it is declared in, or undefined for the program's top level */
   inside?: AnyNode;
   kind: 'function' | 'class' | 'variable' | 'parameter';
+  /** A variable whose value, where it is declared, is a function (`const go = () => …`) */
+  holdsFunction?: boolean;
 }
 
 /** Every name the program declares: functions, classes, variables and parameters (catch's too) */
@@ -165,7 +167,12 @@ function declarations(ast: AnyNode): Declaration[] {
     if (node.type === 'ClassDeclaration' && node.id) {
       found.push({ name: (node.id as AnyNode).name as string, line: lineOf(node), inside, kind: 'class' });
     }
-    if (node.type === 'VariableDeclarator') addPattern(node.id as AnyNode, inside, 'variable');
+    if (node.type === 'VariableDeclarator') {
+      const init = node.init as AnyNode | null;
+      if ((node.id as AnyNode).type === 'Identifier' && init && /^(?:Arrow)?Function(?:Expression)?$/.test(init.type)) {
+        found.push({ name: (node.id as AnyNode).name as string, line: lineOf(node), inside, kind: 'variable', holdsFunction: true });
+      } else addPattern(node.id as AnyNode, inside, 'variable');
+    }
     if (/Function/.test(node.type)) for (const param of node.params as AnyNode[]) addPattern(param, node, 'parameter');
     if (node.type === 'CatchClause' && node.param) addPattern(node.param as AnyNode, inside, 'parameter');
   });
@@ -360,7 +367,10 @@ function notDefined(code: string, error: string, errorLine?: number, page?: Page
     // No slip, and the missing name is called or has a member used (out.seed(), canvas.getContext()): the declared
     // name it most likely means, by the start of its words (out → output), the last declared on a tie
     const called = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\s*(?:\\(|\\.)`).test(code);
-    const seen = declared.filter((d) => visible.includes(d.name));
+    // A name that is called means a function: drawSquare() is no `var square` holding a <div> (a
+    // tic-tac-toe Qwen2.5 0.5B wrote, which then failed with "square is not a function")
+    const callsIt = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\s*\\(`).test(code);
+    const seen = declared.filter((d) => visible.includes(d.name) && (!callsIt || d.kind === 'function' || d.holdsFunction));
     const meant = called ? prefixMatchOf(name, seen) : null;
     const prefixed = meant ? renameUndeclared(code, name, meant) : null;
     if (meant && prefixed) return { correction: { code: prefixed, note: `${name} → ${meant} (the declared name its start matches)` } };
@@ -545,6 +555,52 @@ export function dropStrayCharacter(code: string): { code: string; line: number; 
     if (tryParse(candidate)) return { code: candidate, line: code.slice(0, stopped).split('\n').length, removed: code[stopped] };
   }
   return null;
+}
+
+/**
+ * An attribute in markup written as a string, opened with one quote and closed with the other, the
+ * string's own: `"<button onclick='teamPicker()">Pick Another Team</button>"` ends the string at
+ * `)"`, and the program doesn't parse (a team picker and a times table Qwen2.5 0.5B wrote). The
+ * attribute closes with the quote it opened with. Only where the parser stops on that line, one
+ * attribute at a time, kept only when the parser then gets further; the lines are returned.
+ */
+export function closeAttributeQuotes(code: string): { code: string; lines: number[] } | null {
+  const stopAt = (text: string): number | null => {
+    try {
+      parse(text, PARSE_OPTIONS);
+      return null;
+    } catch (error) {
+      return typeof (error as { pos?: unknown }).pos === 'number' ? (error as { pos: number }).pos : -1;
+    }
+  };
+  let current = code;
+  let stopped = stopAt(current);
+  if (stopped === null || stopped < 0) return null;
+  const lines: number[] = [];
+  for (let round = 0; round < 10 && stopped !== null && stopped >= 0; round++) {
+    const lineStart = current.lastIndexOf('\n', stopped - 1) + 1;
+    const lineEnd = current.indexOf('\n', stopped);
+    const line = current.slice(lineStart, lineEnd < 0 ? current.length : lineEnd);
+    // name='value" or name="value' (no quote, angle bracket or line end inside), right before the
+    // tag goes on: a space, > or />
+    let fixed: string | null = null;
+    for (const m of line.matchAll(/\s[\w:-]+=(['"])([^'"<>\n]*)(['"])(?=[\s>/])/g)) {
+      if (m[1] === m[3] || lineStart + (m.index ?? 0) > stopped) continue;
+      const at = lineStart + (m.index ?? 0) + m[0].length - 1;
+      const candidate = current.slice(0, at) + m[1] + current.slice(at + 1);
+      const next = stopAt(candidate);
+      if (next === null || (next >= 0 && next > stopped)) {
+        fixed = candidate;
+        stopped = next;
+        break;
+      }
+    }
+    if (!fixed) break;
+    current = fixed;
+    lines.push(current.slice(0, lineStart).split('\n').length);
+  }
+  // (what still doesn't parse after them is the other repairs' to judge)
+  return lines.length ? { code: current, lines: [...new Set(lines)] } : null;
 }
 
 /**

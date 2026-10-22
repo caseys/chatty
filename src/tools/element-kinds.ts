@@ -25,7 +25,16 @@ const KIND_OF_MEMBER: Record<string, ElementKind> = {
   selectedIndex: 'field',
   options: 'field',
   showModal: 'dialog',
+  // What is typed in a form control arrives as its input and change events: a pounds converter
+  // listened for 'input' on its 'lbsInput' and read this.value, a temperature converter for
+  // 'change' on its 'celsius' (Qwen3.5 2B, Qwen2.5 0.5B). Key events come from any element
+  // with focus, so they say nothing
+  oninput: 'field',
+  onchange: 'field',
 };
+
+/** Events only a form control fires (see oninput above) */
+const FIELD_EVENTS = new Set(['input', 'change']);
 
 type AnyNode = Record<string, unknown> & { type: string };
 
@@ -66,11 +75,13 @@ export function elementKinds(code: string): Record<string, ElementKind> {
     }
   });
   const seen = new Map<string, Set<ElementKind>>();
-  walk(ast, (node) => {
+  walk(ast, (node, parent) => {
     if (node.type !== 'MemberExpression' || node.computed) return;
     const object = node.object as AnyNode;
     const id = lookedUpId(object) ?? (object.type === 'Identifier' ? holders.get(object.name as string) : undefined);
-    const kind = id ? KIND_OF_MEMBER[(node.property as AnyNode).name as string] : undefined;
+    const member = (node.property as AnyNode).name as string;
+    const event = member === 'addEventListener' && parent?.type === 'CallExpression' && parent.callee === node ? (parent.arguments as AnyNode[])[0] : undefined;
+    const kind = !id ? undefined : event ? (event.type === 'Literal' && FIELD_EVENTS.has(event.value as string) ? 'field' : undefined) : Object.hasOwn(KIND_OF_MEMBER, member) ? KIND_OF_MEMBER[member] : undefined;
     if (!id || !kind) return;
     if (!seen.has(id)) seen.set(id, new Set());
     seen.get(id)!.add(kind);

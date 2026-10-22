@@ -23,6 +23,22 @@ describe('loopProtect', () => {
     await expect(run(code)).rejects.toThrow(/Loop exceeded/);
   });
 
+  it('lets a loop that waits run past the limit, keeping what each await gives', async () => {
+    // A tune played note by note: each wait gives the page back (LIM is 100 ms here)
+    const tune = 'const got = []; for (let i = 0; i < 5; i++) { got.push(await new Promise((r) => setTimeout(() => r(i), 40))); } return got;';
+    expect(await run(tune)).toEqual([0, 1, 2, 3, 4]);
+    // Nested, inside an expression, one await inside another, and in the loop's test
+    const nested = 'let n = 0; const wait = (v) => new Promise((r) => setTimeout(() => r(v), 30)); for (let a = 0; a < 3; a++) { for (let b = 0; b < 2; b++) { n += (await wait(await wait(1))) + 0; } } let k = 0; while (await wait(k < 3)) k++; return [n, k];';
+    expect(await run(nested)).toEqual([6, 3]);
+    const forAwait = 'const out = []; async function* g() { for (let i = 0; i < 4; i++) { yield i; await new Promise((r) => setTimeout(r, 40)); } } for await (const v of g()) out.push(v); return out;';
+    expect(await run(forAwait)).toEqual([0, 1, 2, 3]);
+  });
+
+  it('still stops a loop that only waits in a function it makes, or spins between its waits', async () => {
+    await expect(run('for (;;) { [1].forEach(async () => { await null; }); }')).rejects.toThrow(/Loop exceeded/);
+    await expect(run('let i = 0; while (true) { i++; if (i === 1) await null; }')).rejects.toThrow(/Loop exceeded/);
+  });
+
   it('handles labeled loops with continue/break', async () => {
     const code = `
       let n = 0;
