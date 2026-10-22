@@ -315,6 +315,31 @@ const WEATHER_RULE = `- For weather, getWeather gives the weather right now:
 const place = ""; // the city asked about; leave "" when none is named
 const { temperature, rain, sky } = await getWeather(place); // °C, mm of rain, and the sky in a word like "cloudy"
 \`\`\``;
+
+/** Data at a web address: an API, JSON, a URL to read (not a picture's address: the page can't show other sites' images) */
+const FETCH_WORDS = /https?:\/\/|\b(?:apis?|json|endpoints?|web address|urls?|fetch(?:es|ing)? (?:the |some |a )?(?:data|json|info\w*|list|price|results?|joke|quote|fact)s?)\b/i;
+const IMAGE_ADDRESS = /\b(?:picture|image|photo|img)s?\b|\.(?:png|jpe?g|gif|webp|svg)\b/i;
+/** A question about APIs themselves ("What is an API?"), with no address to read: the facts rule's */
+const ASKS_ABOUT_IT = /^\s*(?:what|why|how|explain|tell me about)\b/i;
+const FETCH_REQUEST = {
+  test: (request: string) => FETCH_WORDS.test(request) && !IMAGE_ADDRESS.test(request) && !(ASKS_ABOUT_IT.test(request) && !/https?:\/\//i.test(request)),
+};
+const FETCH_RULE = `- For data from a web address, fetch it and read its JSON:
+\`\`\`js
+const url = ""; // the address asked for
+const data = await (await fetch(url)).json();
+\`\`\``;
+
+/** Copying text for the user to paste: not in a drawing ("copy the style of Picasso", "a copy of the Mona Lisa") */
+const CLIPBOARD_WORDS = /\b(?:clipboard|paste|copy (?:button|link)|cop(?:y|ies|ied|ying) (?:it|this|that|them|the|my|to|into|with)|(?:to|can|and) copy)\b/i;
+const CLIPBOARD_REQUEST = { test: (request: string) => CLIPBOARD_WORDS.test(request) && !DRAWING_REQUEST.test(request) };
+const CLIPBOARD_RULE = `- To copy text for the user, write it to the clipboard when a button is clicked (browsers allow it only then):
+\`\`\`js
+const button = document.createElement("button");
+button.textContent = "Copy";
+button.onclick = () => navigator.clipboard.writeText(""); // the text to copy
+document.body.appendChild(button);
+\`\`\``;
 /** Text to count, reverse or change (the model turns down a letter to draw, a text box, a song backwards: rule-filter.ts) */
 const TEXT_REQUEST =
   /\b(?:words?|letters?|characters?|sentences?|text|paragraph|revers\w*|backwards?|replac\w*|swap\w*|chang(?:e|es|ing)|upper ?case|lower ?case|capitali[sz]\w*|palindromes?|vowels?|consonants?|spell\w*|anagrams?)\b/i;
@@ -386,6 +411,16 @@ const PROMPT_RULES: ReadonlyArray<{
   // A dates rule did no better than none (2, 2 and 0 of 8 against 2 of 8, Qwen3) and was left out
   { text: SAVE_RULE, name: 'save', when: SAVE_REQUEST, inProgram: /\blocalStorage\b/ },
   { text: WEATHER_RULE, name: 'weather', when: WEATHER_REQUEST, inProgram: /\bgetWeather\b/ },
+  // Data from a web address and the clipboard, by keywords alone (no per-model cutoffs: one rule set for every
+  // model). Scored on the first program's real job, three requests three times each, with and without the rule:
+  // fetch, the value asked for (not the JSON dumped) spoken from the fetched reply, Qwen2.5 0.5B 5 of 9 against
+  // 1 of 9, Qwen3 0.6B 0 of 9 either way (both wrote "[object Object]" or guessed a field); clipboard, the text
+  // asked for on the clipboard after a click on the copy button, Qwen3 3 of 9 against 1 of 9, Qwen2.5 3 of 9
+  // against 0 (all on "copies 'hello world'": a password or a quote with a copy button got none either way).
+  // Left out, no better than none: clicks and typing (Qwen3 3 of 6 either way, Qwen2.5 1 of 6 against 2) and
+  // timers (an empty setInterval; 6 of 24 against 5 of 24 in all, the model filling the tick with a constant)
+  { text: FETCH_RULE, name: 'fetch', when: FETCH_REQUEST, inProgram: /\bfetch\s*\(/ },
+  { text: CLIPBOARD_RULE, name: 'clipboard', when: CLIPBOARD_REQUEST, inProgram: /\bnavigator\.clipboard\b/ },
 ];
 
 /** The optional rules a request's keywords put forward */

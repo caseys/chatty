@@ -21,7 +21,7 @@
 
 import type { LlmRuntimeProvider } from '../types/index.ts';
 
-export const OPTIONAL_RULES = ['card', 'ui', 'canvas', 'three', 'svg', 'music', 'fx', 'facts', 'text', 'keys', 'css', 'save', 'weather'] as const;
+export const OPTIONAL_RULES = ['card', 'ui', 'canvas', 'three', 'svg', 'music', 'fx', 'facts', 'text', 'keys', 'css', 'save', 'weather', 'fetch', 'clipboard'] as const;
 export type RuleName = (typeof OPTIONAL_RULES)[number];
 
 /** The system prompt of every question: nothing in it about writing programs, which small models then do */
@@ -50,6 +50,8 @@ export const RULE_QUESTIONS: Record<RuleName, { note?: string; question?: string
   css: { question: 'Should the program change how a page element looks over time?' },
   save: { question: 'Should the program still have what the user entered after the page is closed and opened again?' },
   weather: { question: 'Is the request about the weather?' },
+  fetch: { question: 'Does the request give a web address to get data from?' },
+  clipboard: { question: 'Should the program copy text for the user to paste?' },
 };
 
 /**
@@ -259,6 +261,49 @@ export const RULE_CASES: ReadonlyArray<{ request: string; rules: RuleName[] }> =
   { request: 'Flip a coin 10 times in a row', rules: [] },
   { request: 'Make a to-do list that keeps my items after a reload', rules: ['card', 'ui', 'save'] },
   { request: 'Make a snake game that remembers my high score', rules: ['card', 'canvas'] },
+  // Data from a web address and the clipboard, with look-alikes for their keywords (and clicks and timers, whose
+  // rules were left out: orchestrator PROMPT_RULES)
+  { request: 'Make a button that shows a random fact when I click it', rules: ['card', 'ui'] },
+  { request: 'Make a color picker that shows the hex code as I drag the slider', rules: ['card', 'ui'] },
+  { request: 'Let me type a number and show its square right away', rules: ['card', 'ui'] },
+  { request: 'Make a light switch I can tap on and off', rules: ['card', 'ui'] },
+  { request: 'Input your name and get a greeting', rules: ['card', 'ui'] },
+  { request: 'Play a click sound effect', rules: ['fx'] },
+  { request: 'Explain the inputs and outputs of a function', rules: [] },
+  { request: 'What type of animal is a whale?', rules: ['facts'] },
+  { request: 'Write a story about a button factory', rules: [] },
+  { request: 'Draw a football field', rules: ['card', 'canvas'] },
+  { request: 'Tell me about tap dancing', rules: ['facts'] },
+  { request: 'Make a pomodoro timer for 25 minutes', rules: ['card', 'ui'] },
+  { request: 'Show a new random number every two seconds', rules: ['card'] },
+  { request: 'Remind me to stretch in 5 minutes', rules: [] },
+  { request: 'Make a slideshow of three colors that changes every 3 seconds', rules: ['card'] },
+  { request: 'Show a timer of a game round that counts down from 30', rules: ['card', 'ui'] },
+  { request: 'Write a short story about time travel', rules: [] },
+  { request: 'How many seconds are in a day?', rules: ['facts'] },
+  { request: 'Draw a clock', rules: ['card', 'canvas'] },
+  { request: 'Repeat the word hello 5 times', rules: [] },
+  { request: 'Wait, make it red instead', rules: [] },
+  { request: 'Make flash cards for Spanish', rules: ['card', 'ui'] },
+  { request: 'Draw the life cycle of a frog', rules: ['card', 'svg'] },
+  { request: 'Play a drum loop that repeats', rules: ['music'] },
+  { request: 'Get the data from https://jsonplaceholder.typicode.com/todos/1 and show its title', rules: ['card', 'fetch'] },
+  { request: 'Read https://api.github.com/users/octocat and tell me how many followers they have', rules: ['fetch'] },
+  { request: 'Fetch the JSON at https://dog.ceo/api/breeds/list/all and list the breeds', rules: ['fetch'] },
+  { request: 'What does the endpoint https://api.ipify.org?format=json return?', rules: ['fetch'] },
+  { request: 'Show the current price of bitcoin from the CoinGecko API', rules: ['card', 'fetch'] },
+  { request: "Let's play a game of fetch with a dog", rules: ['card', 'canvas'] },
+  { request: 'What is an API?', rules: ['facts'] },
+  { request: 'Tell me a random joke', rules: [] },
+  { request: 'Make a button that copies the current date to my clipboard', rules: ['card', 'ui', 'clipboard'] },
+  { request: 'Make an emoji picker that copies the emoji I tap', rules: ['card', 'ui', 'clipboard'] },
+  { request: 'Generate a paragraph of lorem ipsum I can paste into my document', rules: ['card', 'ui', 'clipboard'] },
+  { request: 'Make a share link box with a copy to clipboard button', rules: ['card', 'ui', 'clipboard'] },
+  { request: 'Draw a copy of the Mona Lisa', rules: ['card', 'canvas'] },
+  { request: 'Draw a triangle and a copy of it next to it', rules: ['card', 'canvas'] },
+  { request: 'Write a poem about a copycat', rules: [] },
+  { request: 'Make toothpaste ads', rules: [] },
+  { request: 'Paint a sunflower copying the style of Van Gogh', rules: ['card', 'canvas'] },
 ];
 
 /**
