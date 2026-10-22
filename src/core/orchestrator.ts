@@ -212,11 +212,14 @@ const TONE_PROGRAM = /\bTone\s*\./;
 /** Sound effects, which Web Audio plays: a beep, a chime, an alarm, a click (or a program already written with Web Audio) */
 const EFFECT_REQUEST = new RegExp(String.raw`\b(?:beeps?|tones?|chimes?|alarms?|dings?|buzz(?:es|ed|ing|er)?|clicks?|sirens?|sound effects?)\b|AudioContext`, 'i');
 
+/** A heart that beats, which isn't a beat to play ("a heart that beats with CSS" got the music rule) */
+const HEART_BEATS = /\bhearts?\b(?:\s+\w+){0,4}?\s+beat(?:s|ing)?\b/gi;
 /**
  * Which sound rules a request needs: Web MIDI for music, Web Audio for sound effects, both when it
  * names both or names neither ("play a sound"), none when it has nothing to do with sound
  */
-function soundKinds(request: string): { music: boolean; effects: boolean } {
+function soundKinds(said: string): { music: boolean; effects: boolean } {
+  const request = said.replace(HEART_BEATS, 'heart');
   const music = MUSIC_REQUEST.test(request) || TONE_PROGRAM.test(request);
   const effects = EFFECT_REQUEST.test(request);
   if (!music && !effects) {
@@ -226,8 +229,12 @@ function soundKinds(request: string): { music: boolean; effects: boolean } {
   return { music, effects };
 }
 const SOUND_WORDS_REQUEST = new RegExp(SOUND_WORDS, 'i');
-const DRAWING_REQUEST =
-  /\b(?:draw|paint|sketch|picture|image|art\b|animat|game|simulat|bounc|canvas|scene|shape|circle|square|triangle|stars?\b|sky|rainbow|landscape|pattern|fractal|particle|mov(?:e|ing)|getContext)/i;
+/** Games that are drawn whatever the request says ("Let me play pong against the computer" got no drawing rule) */
+const DRAWN_GAMES = String.raw`pong|tetris|breakout|flappy|asteroids|space invaders|pac-?man|chess ?boards?|checker ?boards?`;
+const DRAWING_REQUEST = new RegExp(
+  String.raw`\b(?:draw|paint|sketch|picture|image|art\b|animat|game|simulat|bounc|canvas|scene|shape|circle|square|triangle|stars?\b|sky|rainbow|landscape|pattern|fractal|particle|mov(?:e|ing)|getContext|(?:${DRAWN_GAMES})\b)`,
+  'i'
+);
 /** What is made to be used: an app the user presses or types in (not a display, a clock or a drawing) */
 const USED_WORDS = 'calculator|converter|form(?!\\s+of\\b)|quiz|to-?do|checklist|stopwatch|picker|toggle|sliders?|tracker|planner|editor|generator|roller|mixer|buttons?';
 /**
@@ -241,13 +248,38 @@ export const MAKES_USED_THING = new RegExp(
 );
 /** A request to draw: the verb, but not a card, a number or a winner (those are drawn at random, in words) */
 const DRAW_REQUEST = /\b(?:draw|paint|sketch|illustrate)\b(?!(?:\s+\w+){0,2}\s+(?:card|cards|number|numbers|name|names|winner|lot|lots|straw|conclusion|breath|blood|attention|raffle)\b)/i;
+/**
+ * What the canvas rule is for: something drawn. Not every drawing word: a guessing, word or number game is
+ * played in words ("a guessing game…" built a canvas with it), a square number is arithmetic ("show a table of
+ * the first ten square numbers"), and a conclusion drawn or a picture painted with words is writing ("draw me a
+ * conclusion from this…", "paint me a picture with words of a sunset"). A card drawn is still drawn ("Draw a
+ * memory card"), so only a drawn conclusion is left out. A clock with hands is drawn ("an analog clock with hands"
+ * got no drawing rule). A heart isn't put forward: with the rule, "show a big red heart in the middle of the page"
+ * gave an empty canvas or a red square (3 of 4, Qwen3 0.6B and Qwen2.5 0.5B), without it a heart in words
+ */
+const CANVAS_WORDS = new RegExp(
+  String.raw`\b(?:draw(?:s|n|ings?)?|paint(?:s|ed|ings?)?|sketch(?:es|ed|ing)?|illustrat\w*)\b(?!(?:\s+\w+){0,2}\s+(?:conclusions?|breath|blood|attention|inspiration|comparisons?|parallels?)\b)|\b(?:${DRAWN_GAMES})\b|\b(?:picture|image|art\b|animat|simulat|bounc|canvas|scene|shape|circle|(?<!\b(?:its|their) )squares?\b(?!\s+(?:of|numbers?|roots?|feet|foot|meters?|metres?|miles?|inch(?:es)?|yards?|kilomet\w*|centimet\w*)\b)|triangle|stars?\b|sky|rainbow|landscape|pattern|fractal|particle|mov(?:e|ing)|getContext|analog(?:ue)? (?:clocks?|watch(?:es)?)|clock ?faces?|(?:hour|minute|second|clock)s? hands?\b)`,
+  'i'
+);
+const GAME_WORDS = /\bgames?\b/i;
+/** A game played in words or with cards and tiles on the page, not drawn ("memory matching game" got the 3D rule) */
+const GAME_IN_WORDS = /\bguess\w*|\b(?:trivia|quiz|riddle|word|number|spelling|math|question|memory|matching|card)s? games?\b/i;
+const IN_WORDS = /\b(?:with|in|using) (?:\w+ )?words\b|\bword ?pictures?\b/i;
+const CANVAS_REQUEST = {
+  test: (request: string) =>
+    !IN_WORDS.test(request) &&
+    (CANVAS_WORDS.test(request) || (GAME_WORDS.test(request) && !GAME_IN_WORDS.test(request))),
+};
 /** A request for something the user does to it: tap, click, press, type in, drag, move by mouse or keys */
 const ASKS_FOR_INPUT = /\b(?:tap(?:s|ping)?|click(?:s|ing)?|pressing|swipe|drag(?:ging)?|typ(?:e|ing) (?:in|into)|arrow keys|keyboard|mouse or touch|(?:with|by|using) (?:the |your )?mouse)\b/i;
 /** What asks for something that changes by itself on screen */
 const MOTION_REQUEST = /\b(?:animat\w*|bounc\w*|mov(?:ing|es)|spinn?(?:ing)?|rotating|orbit\w*|pulsing|blinking|flashing|falling|floating|flying|scrolling|count ?down|ticking)\b/i;
 /** A program driven by the pointer or keys: what moves is up to the user */
 const MOVES_WITH_USER = /\baddEventListener\s*\(\s*['"`](?:mouse|pointer|touch|key|wheel)\w*['"`]|\bon(?:mouse|pointer|touch|key|wheel)\w*\s*=/i;
-const THREE_D_REQUEST = /(?:\b3d\b|\bthree[- ]?d\b|\bgames?\b|\brender|\bscene|\bcube|\bsphere|\bwebgl|\brotat|\bspin|\borbit|THREE\.)/i;
+const THREE_D_SCENE = /(?:\b3d\b|\bthree[- ]?d\b|\brender|\bscene|\bcube|\bsphere|\bwebgl|\brotat|\bspin|\borbit|THREE\.)/i;
+const THREE_D_REQUEST = new RegExp(`${THREE_D_SCENE.source}|\\bgames?\\b`, 'i');
+/** The 3D rule: not for a game played in words, which put a renderer's canvas in a guessing game, as the canvas rule did */
+const THREE_RULE_REQUEST = { test: (request: string) => THREE_D_SCENE.test(request) || (GAME_WORDS.test(request) && !GAME_IN_WORDS.test(request)) };
 const DIAGRAM_REQUEST = /\b(?:svg|diagram|icon|chart|graph|logo|vector|flowchart|map)/i;
 /** Things that must appear on screen: an app, a form, a to-do list, a timer */
 const INTERFACE_THING =
@@ -276,13 +308,21 @@ const QUESTION_WORDS =
   /^\s*(?:who|what|when|where|why|which|how (?:many|much|old|tall|far|big|long))\b|\b(?:tell me about|look up|search for|find out|define|meaning of|capital of|population of|weather|news|wiki(?:pedia)?)\b/i;
 const FACTS_WORDS = new RegExp(`${QUESTION_WORDS.source}|\\?\\s*$`, 'i');
 const FACTS_REQUEST = {
-  test: (request: string) => FACTS_WORDS.test(request) && !MATH_REQUEST.test(request) && !(WEATHER_REQUEST.test(request) && !WHO_WHY_WHEN.test(request)),
+  test: (request: string) => FACTS_WORDS.test(request) && !MATH_REQUEST.test(request) && !(WEATHER_TOPIC.test(request) && !WHO_WHY_WHEN.test(request)),
 };
 /** A question about the weather's history or causes ("Who invented the weather forecast?", "Why is snow white?"): facts, not today's weather */
 const WHO_WHY_WHEN = /^\s*(?:who|why|when|which)\b/i;
 /** The weather, here or somewhere: not snow or rain to draw ("Show a snowfall animation") */
 const WEATHER_WORDS = /\b(?:weather|temperature|forecast|rain|rainy|raining|rains|snow|snowy|snowing|sunny|wind|windy|winds|humid\w*|umbrella|jacket|hot|cold|warm|chilly)\b/i;
-const WEATHER_REQUEST = { test: (request: string) => WEATHER_WORDS.test(request) && !DRAWING_REQUEST.test(request) };
+/**
+ * Writing about the weather, not asking for it: a piece to write, or a story or poem it goes in ("write one
+ * sentence describing the weather in the opening of my novel" fetched the weather). Not a program written to
+ * tell it ("Write a program that tells me the temperature in Oslo")
+ */
+const WRITES_ABOUT =
+  /^\s*(?:please\s+)?(?:write|compose|draft)\b(?!(?:\s+\w+){0,3}\s+(?:code|program|app|script|function|widget|tool|page)s?\b)|\b(?:novel|story|stories|poem|chapter|essay|haiku|limerick|lyrics)\b/i;
+const WEATHER_TOPIC = { test: (request: string) => WEATHER_WORDS.test(request) && !DRAWING_REQUEST.test(request) };
+const WEATHER_REQUEST = { test: (request: string) => WEATHER_TOPIC.test(request) && !WRITES_ABOUT.test(request) };
 /**
  * Something kept between visits: notes, a list, a name, a count. Not a bare "keep" or "notes" ("keep the ball
  * bouncing", the notes C, E and G), and not in a game or a drawing: the rule's example is a text field, which
@@ -345,9 +385,9 @@ button.textContent = "Copy";
 button.onclick = () => navigator.clipboard.writeText(""); // the text to copy
 document.body.appendChild(button);
 \`\`\``;
-/** Text to count, reverse or change (the model turns down a letter to draw, a text box, a song backwards: rule-filter.ts) */
+/** Text to count, reverse or change (the model turns down a letter to draw, a text box, a song backwards: rule-filter.ts). Not a letter written to someone ("copy editing tips for a cover letter" got it) */
 const TEXT_REQUEST =
-  /\b(?:words?|letters?|characters?|sentences?|text|paragraph|revers\w*|backwards?|replac\w*|swap\w*|chang(?:e|es|ing)|upper ?case|lower ?case|capitali[sz]\w*|palindromes?|vowels?|consonants?|spell\w*|anagrams?)\b/i;
+  /\b(?:words?|(?<!\b(?:cover|love|thank[- ]you|business|open|resignation|recommendation|reference|application) )letters?(?!\s+(?:to|for|from)\b)|characters?|sentences?|text|paragraph|revers\w*|backwards?|replac\w*|swap\w*|chang(?:e|es|ing)|upper ?case|lower ?case|capitali[sz]\w*|palindromes?|vowels?|consonants?|spell\w*|anagrams?)\b/i;
 /**
  * Played with the keyboard: arrow keys, WASD, the space bar, a key pressed. Not a bare "key" or "keyboard": a
  * piano keyboard, the key of G and "three keys to" something matched those, and the model (Qwen3 0.6B) couldn't
@@ -381,7 +421,7 @@ const PROMPT_RULES: ReadonlyArray<{
   { text: '- ONLY chat with user via the speak() function.' },
   { text: '- What you add to document.body appears in a card on screen.', name: 'card', when: CARD_REQUEST },
   { text: '- Use HTML and CSS for interfaces: buttons, forms, tables, dashboards and widgets.', name: 'ui', when: INTERFACE_REQUEST },
-  { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations.', name: 'canvas', when: DRAWING_REQUEST },
+  { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations.', name: 'canvas', when: CANVAS_REQUEST },
   // Only for what moves: a board game or a still drawing given it wrote frame loops, elapsed time and
   // movement for things that never move (Qwen2.5 0.5B, a two-player game of taps)
   {
@@ -393,7 +433,7 @@ const PROMPT_RULES: ReadonlyArray<{
   {
     text: "- For 3D, THREE (three.js) is ready to use: make a THREE.Scene, a THREE.PerspectiveCamera and a THREE.WebGLRenderer, put the renderer's canvas on the page with document.body.appendChild(renderer.domElement), add each object with scene.add(new THREE.Mesh(geometry, material)) using the geometry of the shape asked for, and call renderer.render(scene, camera) in a requestAnimationFrame loop.",
     name: 'three',
-    when: THREE_D_REQUEST,
+    when: THREE_RULE_REQUEST,
   },
   { text: '- <svg> works for diagrams and icons.', name: 'svg', when: DIAGRAM_REQUEST },
   {
@@ -429,7 +469,9 @@ const PROMPT_RULES: ReadonlyArray<{
   // asked for on the clipboard after a click on the copy button, Qwen3 3 of 9 against 1 of 9, Qwen2.5 3 of 9
   // against 0 (all on "copies 'hello world'": a password or a quote with a copy button got none either way).
   // Left out, no better than none: clicks and typing (Qwen3 3 of 6 either way, Qwen2.5 1 of 6 against 2) and
-  // timers (an empty setInterval; 6 of 24 against 5 of 24 in all, the model filling the tick with a constant)
+  // timers (an empty setInterval; 6 of 24 against 5 of 24 in all, the model filling the tick with a constant), and
+  // making each field the program reads (createElement, then append it) for converters and forms: typing in the
+  // field changed the output 6 of 18 times against 5 of 18 (Qwen3.5 2B 2 against 3), within noise
   { text: FETCH_RULE, name: 'fetch', when: FETCH_REQUEST, inProgram: /\bfetch\s*\(/ },
   { text: CLIPBOARD_RULE, name: 'clipboard', when: CLIPBOARD_REQUEST, inProgram: /\bnavigator\.clipboard\b/ },
 ];

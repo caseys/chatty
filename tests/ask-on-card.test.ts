@@ -25,6 +25,10 @@ describe('prompt(), which the card cannot open, asked on the card', () => {
   it('makes a function async for it when nothing reads its result: a statement call, a listener, a handler', () => {
     const game = 'function startGame() {\n  const g = prompt("Enter your guess: ");\n  speak(g);\n}\nstartGame();';
     expect(askOnCard(game)!.code).toBe('async function startGame() {\n  const g = (await __chattyAsk("Enter your guess: "));\n  speak(g);\n}\nstartGame();');
+    // Awaited as a statement (Qwen3.5 2B, "ask me my name and then greet me by name"), but not where its value is used
+    const greet = 'function greetUser() {\n  const name = prompt("What is your name?");\n  console.log(name);\n}\nawait greetUser();';
+    expect(askOnCard(greet)!.code).toBe('async function greetUser() {\n  const name = (await __chattyAsk("What is your name?"));\n  console.log(name);\n}\nawait greetUser();');
+    expect(askOnCard('function f() { return prompt("x"); }\nconst v = (await f()).trim();')).toBeNull();
     // The temperature converter Qwen2.5 0.5B asked in a click listener
     const click = 'document.getElementById("convert").addEventListener("click", function() {\n  let c = prompt("Enter temperature in Celsius: ");\n  speak(c * 9 / 5 + 32);\n});';
     expect(askOnCard(click)!.code).toContain('addEventListener("click", async function() {\n  let c = (await __chattyAsk("Enter temperature in Celsius: "));');

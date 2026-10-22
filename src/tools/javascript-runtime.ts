@@ -1146,7 +1146,12 @@ export function askOnCard(code: string): { code: string; calls: number } | null 
   const resultUnused = (ref: N) => {
     const parent = parents.get(ref);
     if (!parent) return false;
-    if (parent.type === 'CallExpression' && parent.callee === ref) return parents.get(parent)?.type === 'ExpressionStatement';
+    // (or awaited as a statement, which gets the same value from it made async: "await greetUser();", Qwen3.5 2B,
+    // whose prompt answered null and showed nothing)
+    if (parent.type === 'CallExpression' && parent.callee === ref) {
+      const up = parents.get(parent);
+      return up?.type === 'ExpressionStatement' || (up?.type === 'AwaitExpression' && parents.get(up)?.type === 'ExpressionStatement');
+    }
     if (parent.type === 'CallExpression' || parent.type === 'NewExpression') return parent.callee !== ref;
     return parent.type === 'AssignmentExpression' && parent.right === ref && parent.left.type === 'MemberExpression' && /^on[a-z]+$/.test(parent.left.property?.name ?? '');
   };

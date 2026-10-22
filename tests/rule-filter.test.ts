@@ -59,6 +59,26 @@ describe('prompt rules from the model', () => {
   });
 });
 
+describe('which rules a drawing, the weather and a letter get', () => {
+  it('puts the canvas rule forward for what is drawn, not a game in words, square numbers or wordplay', () => {
+    for (const r of ['a guessing game where I guess a number between 1 and 100', 'show a table of the first ten square numbers', 'draw me a conclusion from this: it rained and the grass is wet', 'paint me a picture with words of a sunset', 'memory matching game'])
+      expect(rulesNamedBy(r).has('canvas'), r).toBe(false);
+    for (const r of ['Let me play pong against the computer', 'an analog clock with hands', 'Make a snake game', 'Draw a memory card'])
+      expect(rulesNamedBy(r).has('canvas'), r).toBe(true);
+    expect(rulesNamedBy('Play an analog synth bass line').has('canvas')).toBe(false);
+    expect(rulesNamedBy('memory matching game').has('three')).toBe(false);
+    expect(rulesNamedBy('a heart that beats with CSS').has('music')).toBe(false);
+    expect(rulesNamedBy('Play a beat that sounds like a heart beating').has('music')).toBe(true);
+  });
+
+  it('keeps the weather rule off writing about the weather, and the text rule off a letter to write', () => {
+    expect(rulesNamedBy('write one sentence describing the weather in the opening of my novel').has('weather')).toBe(false);
+    expect(rulesNamedBy('Write a program that tells me the temperature in Oslo').has('weather')).toBe(true);
+    expect(rulesNamedBy('copy editing tips for a cover letter').has('text')).toBe(false);
+    expect(rulesNamedBy("Count the letters in 'mississippi'").has('text')).toBe(true);
+  });
+});
+
 describe('the text rule', () => {
   it('is put forward for text to count, reverse or change, and only then', () => {
     expect(rulesNamedBy('Count the words in this sentence: the cat sat').has('text')).toBe(true);
