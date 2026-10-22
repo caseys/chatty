@@ -1266,7 +1266,7 @@ describe('Dynamic Context Compaction (>85% Context) & First-Press Interruption',
         },
         'standard'
       );
-      expect(built.systemPrompt).toContain('All messages to the user go through speak(text)');
+      expect(built.systemPrompt).toContain('ONLY chat with user via the speak() function.');
 
       // iPhone and iPad (Safari) ask for the shortest program; everything else keeps the usual wording
       const tail = () => (orchestrator as any).staticPromptParts().tail.join('\n');

@@ -9,6 +9,7 @@
  */
 export type RunLogEntryKind =
   | 'request'
+  | 'rules'
   | 'sent'
   | 'reply'
   | 'program'

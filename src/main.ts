@@ -320,6 +320,13 @@ export class MinimalVoiceApp {
     // Expose engine globally for programmatic access / testing
     if (typeof window !== 'undefined') {
       (window as unknown as { chattyEngine?: VoiceAssistantEngine }).chattyEngine = this.engine;
+      // The rule filter's calibration (rule-filter.ts): scores RULE_CASES with the loaded model and fits the cutoffs
+      if (import.meta.env.DEV) {
+        const engine = this.engine;
+        (window as unknown as { chattyRuleFilter?: unknown }).chattyRuleFilter = {
+          calibrate: () => engine.orchestrator.calibrateRuleFilter(),
+        };
+      }
     }
 
     // Connect JavaScript Runtime iframe container

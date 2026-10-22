@@ -1745,7 +1745,9 @@ describe('which turns are about the last program, and which rules a request gets
     expect(promptRules('Who was Ada Lovelace?', true)).toContain(facts);
     expect(promptRules("What's 15 percent of 84?", true)).not.toContain(facts);
     expect(promptRules('Build a game where the car is steered by arrow keys', true)).not.toContain(facts);
-    expect(promptRules('Build a racing game', true)).not.toContain('Use HTML and CSS for interfaces');
+    // A game puts the interface rule forward; the model decides (rule-filter.ts)
+    const vetoed = { kept: new Set<never>(), decided: new Set(['ui'] as const) };
+    expect(promptRules('Build a racing game', true, vetoed)).not.toContain('Use HTML and CSS for interfaces');
   });
 });
 
