@@ -274,6 +274,21 @@ const FACTS_REQUEST = { test: (request: string) => FACTS_WORDS.test(request) && 
 /** Text to count, reverse or change (the model turns down a letter to draw, a text box, a song backwards: rule-filter.ts) */
 const TEXT_REQUEST =
   /\b(?:words?|letters?|characters?|sentences?|text|paragraph|revers\w*|backwards?|replac\w*|swap\w*|chang(?:e|es|ing)|upper ?case|lower ?case|capitali[sz]\w*|palindromes?|vowels?|consonants?|spell\w*|anagrams?)\b/i;
+/**
+ * Played with the keyboard: arrow keys, WASD, the space bar, a key pressed. Not a bare "key" or "keyboard": a
+ * piano keyboard, the key of G and "three keys to" something matched those, and the model (Qwen3 0.6B) couldn't
+ * tell them apart.
+ */
+const KEYS_REQUEST =
+  /\b(?:arrow ?keys?|arrows|wasd|space ?bar|keystrokes?|key ?press(?:es)?|(?:press|hit|type)\w* (?:a |an |any |the |each |every )?(?:\w+ )?keys?|keys? (?:i|you|we) (?:press|hit|type)|steer\w*|(?:with|using|on) (?:the |my |your |a )?(?:computer )?keyboard)\b|\baddEventListener\s*\(\s*['"`]key/i;
+/** Moved by the pointer: dragged, or following the mouse or a finger (not a bare "mouse": the animal, or one drawn). For the card rule only: a drag rule of its own did worse than none (Qwen3 0.6B) */
+const DRAG_REQUEST =
+  /\b(?:drag\w*|(?:follows?|following|chas\w+) (?:the |my |your )?(?:mouse|cursor|pointer|finger)|(?:with|by|using) (?:the |my |your |a )?(?:mouse|finger))\b|\baddEventListener\s*\(\s*['"`](?:pointer|mouse)move/i;
+/** An element that changes by itself in CSS: fading, sliding, growing, pulsing (not "animate": that's mostly canvas motion, the canvas rule's) */
+const CSS_MOTION_REQUEST =
+  /\b(?:fad(?:e|es|ed|ing)|slid(?:e|es|ing)|puls(?:e|es|ing)|grow(?:s|ing)?|shrink\w*|transitions?|keyframes|css|wiggl\w*|shak(?:e|es|ing)|glow\w*|blink\w*|flash\w*|hover\w*)\b/i;
+/** What the card rule is for: anything shown, and what is played with keys or the pointer or moves in CSS */
+const CARD_REQUEST = new RegExp([VISUAL_REQUEST, KEYS_REQUEST, DRAG_REQUEST, CSS_MOTION_REQUEST].map((r) => r.source).join('|'), 'i');
 
 /**
  * The rules, as bullets (small models copy numbering into their replies). A rule with `when` is
@@ -284,7 +299,7 @@ const TEXT_REQUEST =
 const PROMPT_RULES: ReadonlyArray<{ text: string; name?: RuleName; when?: { test(request: string): boolean } }> = [
   { text: '- ONLY return executable JavaScript: a simple, short, elegant program that does only what was asked (draw, build, play, compute, look up) with minimal code and complete functionality.' },
   { text: '- ONLY chat with user via the speak() function.' },
-  { text: '- What you add to document.body appears in a card on screen.', name: 'card', when: VISUAL_REQUEST },
+  { text: '- What you add to document.body appears in a card on screen.', name: 'card', when: CARD_REQUEST },
   { text: '- Use HTML and CSS for interfaces: buttons, forms, tables, dashboards and widgets.', name: 'ui', when: INTERFACE_REQUEST },
   { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations. For motion, keep each thing\'s position and speed in variables, and move and redraw it in one requestAnimationFrame loop.', name: 'canvas', when: DRAWING_REQUEST },
   // Steps in words, no code: tested on five 3D requests (Qwen3 0.6B, twice each), every reply put the canvas on the
@@ -310,6 +325,10 @@ const PROMPT_RULES: ReadonlyArray<{ text: string; name?: RuleName; when?: { test
   // working it out: on a word count, a reversal and a find-and-replace, twice each, Qwen3 0.6B ran clean 4 times in 6
   // and got none right, and with it 11 in 12, 7 right (Qwen2.5 0.5B: 5 in 6 without, 6 in 6 with)
   { text: '- For text tools (counting words, reversing, replacing), put the text from the request in a string and speak the result of its string methods, such as split, reverse, join and replaceAll.', name: 'text', when: TEXT_REQUEST },
+  // Tested through the pipeline against no rule (Qwen3 0.6B): keys, 5 of 20 programs moved something when keys were
+  // pressed, against 0 of 20, with as many first programs running clean; CSS motion, 17 of 17 ran clean against 15
+  { text: '- For keyboard control, listen for "keydown" on document and check event.key ("ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "w", "a", "s", "d", " " for space).', name: 'keys', when: KEYS_REQUEST },
+  { text: '- For page elements that fade, slide, grow or pulse, use CSS: a transition on opacity or transform, or a @keyframes animation.', name: 'css', when: CSS_MOTION_REQUEST },
 ];
 
 /** The optional rules a request's keywords put forward */

@@ -76,3 +76,25 @@ describe('the text rule', () => {
     expect(RULE_CUTOFFS['qwen2.5-0.5b'].text).toBeUndefined();
   });
 });
+
+describe('keyboard and CSS motion rules', () => {
+  const named = (request: string) => [...rulesNamedBy(request)].filter((rule) => ['keys', 'css'].includes(rule));
+
+  it('are put forward by their keywords', () => {
+    expect(named('Move a square with the arrow keys')).toEqual(['keys']);
+    expect(named('Show the name of whichever key I press')).toEqual(['keys']);
+    expect(named('Fade a word in and out')).toEqual(['css']);
+  });
+
+  it('are not put forward by the look-alikes the model could not turn down', () => {
+    expect(named('Make a piano keyboard I can play by tapping the keys')).toEqual([]);
+    expect(named('Play a short tune in the key of G major')).toEqual([]);
+    expect(named('Give me three keys to staying productive')).toEqual([]);
+    expect(named('Animate 10 colored balls bouncing around the screen')).toEqual([]);
+  });
+
+  it('put the card rule forward for what is played with keys or dragged', () => {
+    expect(rulesNamedBy('Let me steer a little car around with WASD').has('card')).toBe(true);
+    expect(rulesNamedBy('Make a box I can drag around').has('card')).toBe(true);
+  });
+});

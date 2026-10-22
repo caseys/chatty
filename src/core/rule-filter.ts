@@ -21,7 +21,7 @@
 
 import type { LlmRuntimeProvider } from '../types/index.ts';
 
-export const OPTIONAL_RULES = ['card', 'ui', 'canvas', 'three', 'svg', 'music', 'fx', 'facts', 'text'] as const;
+export const OPTIONAL_RULES = ['card', 'ui', 'canvas', 'three', 'svg', 'music', 'fx', 'facts', 'text', 'keys', 'css'] as const;
 export type RuleName = (typeof OPTIONAL_RULES)[number];
 
 /** The system prompt of every question: nothing in it about writing programs, which small models then do */
@@ -45,6 +45,9 @@ export const RULE_QUESTIONS: Record<RuleName, { note?: string; question?: string
   fx: { question: 'Will the program make a beep or a sound effect?' },
   facts: { question: 'Is the request a question about a person, place or fact?' },
   text: { question: 'Does the request give a piece of text to count, reverse or change?' },
+  // Keys goes by keywords: no question told its cases apart, and its keywords make no wrong matches in the cases
+  keys: { question: 'Will the user control the program with keyboard keys?' },
+  css: { question: 'Should the program change how a page element looks over time?' },
 };
 
 /**
@@ -55,10 +58,12 @@ export const RULE_QUESTIONS: Record<RuleName, { note?: string; question?: string
  */
 export const RULE_CUTOFFS: Readonly<Record<string, Partial<Record<RuleName, number>>>> = {
   // 34 cases, keywords with these cutoffs: 31 exact. Its card answers don't tell cases apart (AUC 0.5).
-  // Text (AUC 0.82): below every request that needs it; the fitted 0.652 dropped a palindrome and a find-and-replace
+  // Text (AUC 0.82): below every request that needs it; the fitted 0.652 dropped a palindrome and a find-and-replace.
+  // Its CSS answers barely tell cases apart (AUC 0.63, one case either side of the cutoff), so CSS goes by keywords
   'qwen3-0.6b': { ui: 0.902, canvas: 0.733, three: 0.807, text: 0.35 },
-  // 34 cases: 29 exact. Its interface answers don't tell cases apart (AUC 0.48), nor its text answers (AUC 0.33)
-  'qwen2.5-0.5b': { card: 0.431, canvas: 0.455, three: 0.615 },
+  // 34 cases: 29 exact. Its interface answers don't tell cases apart (AUC 0.48), nor its text answers (AUC 0.33).
+  // CSS motion: AUC 1
+  'qwen2.5-0.5b': { card: 0.431, canvas: 0.455, three: 0.615, css: 0.415 },
 };
 
 const ANSWERS = '\nA) yes\nB) no\nAnswer:';
@@ -183,6 +188,34 @@ export const RULE_CASES: ReadonlyArray<{ request: string; rules: RuleName[] }> =
   { request: 'Write a sentence about the ocean', rules: [] },
   { request: 'Make a word guessing game', rules: ['card', 'ui'] },
   { request: 'Make a button that changes color when I tap it', rules: ['card', 'ui'] },
+  // Keyboard and CSS motion; dragging and pictures from the web, which only the card rule is for (a drag rule
+  // did worse than none, and the page's content security policy keeps <img> from loading other sites)
+  { request: 'Move a square with the arrow keys', rules: ['card', 'canvas', 'keys'] },
+  { request: 'Let me steer a little car around with WASD', rules: ['card', 'canvas', 'keys'] },
+  { request: 'Show the name of whichever key I press', rules: ['card', 'keys'] },
+  { request: 'Press the space bar to make the ball jump', rules: ['card', 'canvas', 'keys'] },
+  { request: 'Play a short tune in the key of G major', rules: ['music'] },
+  { request: 'Give me three keys to staying productive', rules: [] },
+  { request: 'Make a box I can drag around', rules: ['card'] },
+  { request: 'Let me drag the circles around with my finger', rules: ['card', 'canvas'] },
+  { request: 'Put a sticky note on screen that I can move by dragging it', rules: ['card'] },
+  { request: 'How fast can a mouse run?', rules: ['facts'] },
+  { request: 'Make a drop-down menu to pick a color', rules: ['card', 'ui'] },
+  { request: 'Draw a cartoon mouse eating cheese', rules: ['card', 'canvas'] },
+  { request: 'Fade a word in and out', rules: ['card', 'css'] },
+  { request: 'Make a button that grows when I hover over it', rules: ['card', 'ui', 'css'] },
+  { request: 'Have the title slide in from the left', rules: ['card', 'css'] },
+  { request: 'Show a heart that pulses like a heartbeat', rules: ['card', 'css'] },
+  { request: 'Animate a ball rolling across a canvas', rules: ['card', 'canvas'] },
+  { request: 'Write a short story about a ghost who fades away', rules: [] },
+  { request: 'Show a picture of a cat from this URL: https://picsum.photos/id/40/300/200', rules: ['card'] },
+  { request: 'Display this image: https://picsum.photos/id/237/400/300.jpg', rules: ['card'] },
+  { request: 'Load the photo at https://picsum.photos/id/1025/300/300 onto a canvas', rules: ['card', 'canvas'] },
+  { request: 'Draw a picture of a sailboat on the sea', rules: ['card', 'canvas'] },
+  { request: 'What makes a photo look good?', rules: ['facts'] },
+  { request: 'Make a counter with plus and minus buttons', rules: ['card', 'ui'] },
+  { request: 'Tell me about the history of drag racing', rules: ['facts'] },
+  { request: 'Draw a glowing moon over the hills', rules: ['card', 'canvas'] },
 ];
 
 /**
