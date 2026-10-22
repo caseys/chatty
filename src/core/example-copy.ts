@@ -40,3 +40,24 @@ export function wrongInstrument(code: string, request: string): string | null {
   const playing = [...new Set(used)].map((name) => `"${name}"`).join(', ');
   return `The request asks for ${wanted}, but the program plays ${playing}: the first value of output.send() is the instrument.`;
 }
+
+/**
+ * The hint's output line copied wrong ("output = [...]await navigator.requestMIDIAccess().outputs.values()[0];"):
+ * a line that names requestMIDIAccess and outputs but doesn't parse can only mean the hint's own line, so it
+ * becomes that line, keeping the program's name for the output and how it declared it. Null when nothing changes.
+ */
+export function restoreMidiOutputLine(code: string, parses: (code: string) => boolean): { code: string; line: number } | null {
+  if (parses(code)) return null;
+  const lines = code.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!/requestMIDIAccess/.test(line) || !/\boutputs\b/.test(line) || parses(line.replace(/\bawait\b/g, ''))) continue;
+    const target = /^(\s*)(?:(const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=/.exec(line);
+    if (!target) continue;
+    const [, indent, declared, name] = target;
+    const fixed = `${indent}${declared ? `${declared} ` : ''}${name} = [...(await navigator.requestMIDIAccess()).outputs.values()][0];`;
+    const candidate = [...lines.slice(0, i), fixed, ...lines.slice(i + 1)].join('\n');
+    if (parses(candidate)) return { code: candidate, line: i + 1 };
+  }
+  return null;
+}

@@ -34,3 +34,27 @@ describe('a copied music example', () => {
     expect(wrongInstrument(`${output}output.send([0x90, 60, 100]);`, 'Play a violin note')).toBeNull();
   });
 });
+
+describe("the hint's Web MIDI output line copied wrong", () => {
+  it("becomes the hint's own line, keeping the program's name and declaration", async () => {
+    const { restoreMidiOutputLine } = await import('../src/core/example-copy.ts');
+    const { parsesAsProgram } = await import('../src/core/error-hints.ts');
+    // From a live drum-beat run
+    const live = 'speak("Playing a drum beat.")\n\noutput = [...]await navigator.requestMIDIAccess().outputs.values()[0];\noutput.send("drums", ["kick"], 400);';
+    expect(restoreMidiOutputLine(live, parsesAsProgram)).toEqual({
+      code: 'speak("Playing a drum beat.")\n\noutput = [...(await navigator.requestMIDIAccess()).outputs.values()][0];\noutput.send("drums", ["kick"], 400);',
+      line: 3,
+    });
+    expect(restoreMidiOutputLine('const out = [...await navigator.requestMIDIAccess().outputs.values()[0];', parsesAsProgram)?.code).toBe(
+      'const out = [...(await navigator.requestMIDIAccess()).outputs.values()][0];'
+    );
+  });
+
+  it('leaves a program that parses alone, and a broken line that is not the output line', async () => {
+    const { restoreMidiOutputLine } = await import('../src/core/example-copy.ts');
+    const { parsesAsProgram } = await import('../src/core/error-hints.ts');
+    const fine = 'const midi = await navigator.requestMIDIAccess();\nconst output = midi.outputs.values().next().value;';
+    expect(restoreMidiOutputLine(fine, parsesAsProgram)).toBeNull();
+    expect(restoreMidiOutputLine('const output = [...(await navigator.requestMIDIAccess()).outputs.values()][0];\nlet x = ;', parsesAsProgram)).toBeNull();
+  });
+});

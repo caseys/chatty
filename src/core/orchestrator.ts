@@ -52,7 +52,7 @@ import { isAppleMobile, LOCAL_CHAT_MODELS } from './settings.ts';
 import { redeclaredCut } from './repeat-guard.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 import { MIDI_OUTPUT, MIDI_PLAIN_FORM, MIDI_RULE } from './midi-form.ts';
-import { copiedExampleNotes, wrongInstrument } from './example-copy.ts';
+import { copiedExampleNotes, restoreMidiOutputLine, wrongInstrument } from './example-copy.ts';
 
 /** "Error at line 7: x is not defined" (the line when the browser reported it) */
 function errorText(message: string, line?: number): string {
@@ -935,6 +935,12 @@ export function repairBeforeRunning(code: string, isProse: boolean, note: (text:
       if (times) {
         executableCode = times.code;
         note(`${times.quoted.join(', ')} written without quotes → ${times.quoted.map((q) => JSON.stringify(q)).join(', ')} (Tone's note values are text): corrected before running`);
+      }
+      // The hint's Web MIDI output line copied wrong, so the program doesn't parse: the hint's own line
+      const midiLine = restoreMidiOutputLine(executableCode, parsesAsProgram);
+      if (midiLine) {
+        executableCode = midiLine.code;
+        note(`line ${midiLine.line}: the Web MIDI output line copied wrong → the hint's own line: corrected before running`);
       }
       // clearRect() with nothing in it throws: it can only mean the whole canvas
       const cleared = wholeCanvasClear(executableCode);
