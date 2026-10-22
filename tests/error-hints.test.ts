@@ -1185,6 +1185,26 @@ describe('an undefined name matched to a declared one by the start of its words'
   });
 });
 
+describe('appending what a function returns, when it returns nothing', () => {
+  it('runs the function instead: the Connect Four drawGame() Qwen2.5 0.5B wrote built its cards and returned nothing', async () => {
+    const { runAppendOfNothing } = await import('../src/core/error-hints.ts');
+    const game = "function drawGame() {\n  for (let i = 0; i < 7; i++) {\n    const card = document.createElement('div');\n    card.className = 'card';\n  }\n}\ndocument.body.appendChild(drawGame());\nspeak('Here is the board.');";
+    expect(runAppendOfNothing(game)).toEqual({ code: game.replace('document.body.appendChild(drawGame());', 'drawGame();'), calls: ['document.body.appendChild(drawGame())'] });
+    expect(runAppendOfNothing('function draw() { ctx.fillRect(0, 0, 9, 9); }\nroot.append(draw());')!.code).toBe('function draw() { ctx.fillRect(0, 0, 9, 9); }\ndraw();');
+  });
+
+  it('leaves a function that returns something, one declared twice or not at all, a call inside the function itself, and a value that is used', async () => {
+    const { runAppendOfNothing } = await import('../src/core/error-hints.ts');
+    expect(runAppendOfNothing("function card() { const d = document.createElement('div'); return d; }\ndocument.body.appendChild(card());")).toBeNull();
+    expect(runAppendOfNothing('function card() { const make = () => { return 1; }; make(); }\ndocument.body.appendChild(card());')).not.toBeNull();
+    expect(runAppendOfNothing('async function card() {}\ndocument.body.appendChild(card());')).toBeNull();
+    expect(runAppendOfNothing('document.body.appendChild(card());')).toBeNull();
+    expect(runAppendOfNothing('function quiz() {\n  document.body.appendChild(quiz());\n}')).toBeNull();
+    expect(runAppendOfNothing('function card() {}\nconst el = document.body.appendChild(card());')).toBeNull();
+    expect(runAppendOfNothing('function card() {}\ndocument.body.appendChild(card(), other);')).toBeNull();
+  });
+});
+
 describe('an attribute in a markup string closed with the other quote', () => {
   it('closes with the quote it opened with: the team picker and times table Qwen2.5 0.5B wrote', async () => {
     const { closeAttributeQuotes } = await import('../src/core/error-hints.ts');

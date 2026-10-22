@@ -2218,6 +2218,59 @@ function isEsClass(value: unknown): boolean {
 }
 
 /**
+ * `parent.appendChild(f())` where f, a function of the program's own, returns nothing: appending
+ * undefined always throws, so the call can only fail. f() runs on its own, and what it made goes on
+ * the card as anything made and left off the page does (a planets quiz whose quiz() built three
+ * questions, a Connect Four whose drawGame() built its cards, both Qwen2.5 0.5B). Only a statement
+ * of exactly that shape (appendChild, append or prepend of one call of a function declared once,
+ * with no return in its own body). Same line count.
+ */
+export function runAppendOfNothing(code: string): { code: string; calls: string[] } | null {
+  if (!/\.(?:appendChild|append|prepend)\s*\(/.test(code)) return null;
+  const ast = tryParse(code);
+  if (!ast) return null;
+  const declared = new Map<string, AnyNode[]>();
+  walk(ast, (node) => {
+    if (node.type === 'FunctionDeclaration' && node.id) declared.set((node.id as AnyNode).name as string, [...(declared.get((node.id as AnyNode).name as string) ?? []), node]);
+  });
+  const returnsSomething = (fn: AnyNode) => {
+    let found = false;
+    const visit = (node: AnyNode) => {
+      if (found) return;
+      if (node !== fn && /Function/.test(node.type)) return;
+      if (node.type === 'ReturnStatement' || node.type === 'YieldExpression') found = true;
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) for (const child of value) child && typeof child.type === 'string' && visit(child as AnyNode);
+        else if (value && typeof value === 'object' && typeof (value as AnyNode).type === 'string') visit(value as AnyNode);
+      }
+    };
+    visit(fn);
+    return found || !!fn.async || !!fn.generator;
+  };
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const calls: string[] = [];
+  walk(ast, (node) => {
+    if (node.type !== 'ExpressionStatement') return;
+    const call = node.expression as AnyNode;
+    if (call.type !== 'CallExpression' || (call.callee as AnyNode).type !== 'MemberExpression' || (call.callee as AnyNode).computed) return;
+    if (!/^(?:appendChild|append|prepend)$/.test(((call.callee as AnyNode).property as AnyNode).name as string)) return;
+    const args = call.arguments as AnyNode[];
+    const inner = args[0];
+    if (args.length !== 1 || inner.type !== 'CallExpression' || (inner.callee as AnyNode).type !== 'Identifier') return;
+    const name = (inner.callee as AnyNode).name as string;
+    const fns = declared.get(name) ?? [];
+    // (not inside the function itself: there the call only calls itself again)
+    if (fns.length !== 1 || returnsSomething(fns[0]) || (node.start >= fns[0].start && node.end <= fns[0].end)) return;
+    edits.push({ start: call.start, end: call.end, text: code.slice(inner.start, inner.end) });
+    calls.push(`${code.slice((call.callee as AnyNode).start, (call.callee as AnyNode).end)}(${name}())`);
+  });
+  if (edits.length === 0) return null;
+  let out = code;
+  for (const e of edits.sort((a, b) => b.start - a.start)) out = out.slice(0, e.start) + e.text + out.slice(e.end);
+  return out.split('\n').length === code.split('\n').length && tryParse(out) ? { code: out, calls } : null;
+}
+
+/**
  * `new` in front of every call of a class: a class called as a function (`Tone.PolySynth()`,
  * `THREE.Mesh(…)`, the program's own `Ball()`) always throws, in every browser, and made with new
  * is the one way it works. Every call whose callee is a plain name or a chain of names (a call in

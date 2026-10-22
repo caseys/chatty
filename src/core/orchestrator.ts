@@ -46,7 +46,7 @@ import { memberBlank, fillMember, blankChoices, blankRequest, choiceRequest, dec
 import { madeAsWrongClass, memberList, wholeCanvasClear, withLibraryClassNames, type RealMember } from './method-hints.ts';
 import { applyFixReply, brokenLines, enclosingFunction, failingStatement, FIX_SYSTEM_PROMPT, fixRequest, isBareText, restoreWhole } from './line-fix.ts';
 import { missingStepsError, sameShortfallNote } from './sound-setup.ts';
-import { addNewToClasses, closeAttributeQuotes, escapeScriptBackticks, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, looksThrown, provideThree, quoteToneTimes, unusedDrawingValues, dropExampleTags } from './error-hints.ts';
+import { addNewToClasses, closeAttributeQuotes, runAppendOfNothing, escapeScriptBackticks, missingReadFacts, shareDeclarations, dropBrowserCopies, dropHelperCopies, dropEndlessSelfCalls, dropFenceLabels, dropRequestEcho, dropStrayCharacter, joinSplitReturn, moveClassesUp, parsesAsProgram, wrapLogicalAssignment, strayName, unwrapBackticks, wrapBracelessArrows, fixAudioNodeProperties, fixIteratorResults, fixKeySlips, fixToneCalls, loopOneFrameAnimations, dropUnusedPackages, errorHint, fixCaseSlips, looksThrown, provideThree, quoteToneTimes, unusedDrawingValues, dropExampleTags } from './error-hints.ts';
 import { applyAssignmentFixes, moveToContext, renameMembers, unknownMemberError, unknownMembers, unusableAssignments } from './property-check.ts';
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { isAppleMobile, LOCAL_CHAT_MODELS } from './settings.ts';
@@ -1232,6 +1232,12 @@ export function repairBeforeRunning(code: string, isProse: boolean, note: (text:
       if (ownClasses) {
         executableCode = ownClasses.code;
         note(`${ownClasses.count} call${ownClasses.count === 1 ? '' : 's'} of a class (${ownClasses.names.join(', ')}) → made with new (a class called as a function always throws): corrected before running`);
+      }
+      // parent.appendChild(quiz()) where quiz() returns nothing: quiz() runs, and what it made goes on the card
+      const appendsNothing = runAppendOfNothing(executableCode);
+      if (appendsNothing) {
+        executableCode = appendsNothing.code;
+        note(`${appendsNothing.calls.join(', ')}: the function returns nothing, and appending nothing always fails → the function runs, and what it made goes on the card: corrected before running`);
       }
       // A class used above its declaration at the top of the program: moved above its first use
       const classes = moveClassesUp(executableCode);
