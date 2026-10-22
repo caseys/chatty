@@ -276,6 +276,17 @@ describe('a whole-program reply with several code blocks', () => {
     expect(applyFixReply(failed, reply, undefined, undefined, true)).toBe(complete);
   });
 
+  it('takes a ```js block and an ```html block of only a <script> as one program (a fix Qwen2.5 0.5B wrote for a board game)', () => {
+    const page = "document.body.innerHTML = '<div id=\"grid\"></div><button onclick=\"board()\">New game</button>';";
+    const board = "function board() {\n  document.getElementById('grid').textContent = 'X';\n}";
+    const twoBlocks = ['Here is the fixed program:', '```js', page, '```', '```html', '<script>', board, '</script>', '```'].join('\n');
+    expect(applyFixReply(`${page}\nboard();`, twoBlocks, undefined, undefined, true).replace(/\n{2,}/g, "\n")).toBe(`${page}\n${board}`);
+    // Not when the HTML block is a page of its own (markup beside the script): one block, as before
+    const withMarkup = twoBlocks.replace('<script>', '<div>hi</div>\n<script>');
+    expect(applyFixReply(`${page}\nboard();`, withMarkup, undefined, undefined, true)).not.toContain('function board');
+    expect(applyFixReply(failed, reply, undefined, undefined, true)).toBe(complete);
+  });
+
   it('takes the block that keeps most of the program’s own lines', () => {
     const own = ['```js', 'loop.start();', '```', '```js', failed.replace('{ duration: 4, tempo: 120 }', '(time) => {}, "4n"'), '```'].join('\n');
     expect(applyFixReply(failed, own, undefined, undefined, true)).toBe(failed.replace('{ duration: 4, tempo: 120 }', '(time) => {}, "4n"'));
