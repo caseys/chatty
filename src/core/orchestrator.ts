@@ -269,37 +269,56 @@ const MATH_REQUEST = /\d\s*(?:%|percent|times|plus|minus|divided|squared|\*|\+|\
 const QUESTION_WORDS =
   /^\s*(?:who|what|when|where|why|which|how (?:many|much|old|tall|far|big|long))\b|\b(?:tell me about|look up|search for|find out|define|meaning of|capital of|population of|weather|news|wiki(?:pedia)?)\b/i;
 const FACTS_WORDS = new RegExp(`${QUESTION_WORDS.source}|\\?\\s*$`, 'i');
+const TIME_REQUEST =
+  /\b(?:count ?downs?|timers?|stopwatch(?:es)?|clocks?|count(?:ing)? (?:up|down)|seconds?|minutes?|tick(?:s|ing)?|blink(?:s|ing)?)\b/i;
 const FACTS_REQUEST = { test: (request: string) => FACTS_WORDS.test(request) && !MATH_REQUEST.test(request) };
 
 /**
- * The rules, as bullets (small models copy numbering into their replies). A rule with `when` is
+ * The rules, as bullets, each kept short: on 16 requests (Qwen3 0.6B) the trimmed rules ended working as often
+ * as longer ones or more, with the fewest fix turns of the sizes tried (a minimal prompt and one the model trimmed
+ * itself did worse, as did the model rewriting or choosing its rules per request). The rules (small models copy numbering into their replies). A rule with `when` is
  * for some requests only: models with a small context (the smallest ones, on any device) get it
  * only when the request, or the program it changes, matches. Bigger models get every rule, the
  * same prompt each turn.
  */
 const PROMPT_RULES: ReadonlyArray<{ text: string; when?: { test(request: string): boolean } }> = [
   { text: '- ONLY return executable JavaScript: a simple, elegant program that does what was asked (draw, build, play, compute, look up) with minimal code and complete functionality.' },
-  { text: '- A complete program builds what it shows or plays, keeps what changes in variables, and connects every control, timer and animation loop it needs.' },
+  { text: '- Connect every control, timer and animation loop the program needs.' },
   { text: '- All messages to the user go through speak(text). Calculate all results using JavaScript logic and put them in the speak() text with a template string.' },
   { text: '- What you add to document.body appears in a card on screen.', when: VISUAL_REQUEST },
-  { text: '- Use HTML and CSS for interfaces: buttons, forms, tables, dashboards and widgets.', when: INTERFACE_REQUEST },
-  { text: '- Use <canvas> for visuals: drawings, art, animations, games and simulations. For motion, keep each thing\'s position and speed in variables, and move and redraw it in one requestAnimationFrame loop.', when: DRAWING_REQUEST },
+  { text: '- Use HTML and CSS for interfaces.', when: INTERFACE_REQUEST },
+  { text: '- Use <canvas> for visuals, with one requestAnimationFrame loop for motion.', when: DRAWING_REQUEST },
   // Steps in words, no code: tested on five 3D requests (Qwen3 0.6B, twice each), every reply put the canvas on the
   // page, added its mesh and rendered, where a code example was copied (its cube) and lost the render loop
   {
     text: "- For 3D, THREE (three.js) is ready to use: make a THREE.Scene, a THREE.PerspectiveCamera and a THREE.WebGLRenderer, put the renderer's canvas on the page with document.body.appendChild(renderer.domElement), add each object with scene.add(new THREE.Mesh(geometry, material)) using the geometry of the shape asked for, and call renderer.render(scene, camera) in a requestAnimationFrame loop.",
     when: THREE_D_REQUEST,
   },
-  { text: '- <svg> works for diagrams and icons.', when: DIAGRAM_REQUEST },
   {
     text: MIDI_RULE,
     when: { test: (request: string) => soundKinds(request).music },
   },
   {
-    text: '- Beeps, tones and sound effects use Web Audio (new AudioContext(), oscillators, gain, each connected to its destination).',
+    text: '- Sound effects use Web Audio.',
     when: { test: (request: string) => soundKinds(request).effects },
   },
-  { text: '- Answer what you know directly. For facts you lack, fetch a public API that allows cross-origin requests, such as Wikipedia (https://en.wikipedia.org/api/rest_v1/page/summary/<title>), and speak a sentence or two of it.', when: FACTS_REQUEST },
+  { text: '- Answer what you know directly.', when: FACTS_REQUEST },
+  // Empty slots to fill, not a worked countdown (a shown one was copied): on 12 timer runs (Qwen3 0.6B) it ended
+  // working 11 times, against 9 with no example and fewer with the same advice in words only
+  {
+    text: `- For anything that changes over time (a countdown, timer, stopwatch, clock, blinking), setInterval runs one step at a set pace, like this:
+\`\`\`js
+let value = 0; // where it starts, as the request says
+const shown = document.createElement('div'); // the big text on the card
+document.body.appendChild(shown);
+const timer = setInterval(() => {
+  shown.textContent = value; // what the screen shows each tick
+  value = value; // how it changes each tick
+  // when it stops: clearInterval(timer)
+}, 1000); // 1000 is the time between ticks in ms
+\`\`\``,
+    when: TIME_REQUEST,
+  },
 ];
 
 /** The rules for a request: all of them, or (filter) only those it needs */

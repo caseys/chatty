@@ -495,10 +495,10 @@ describe('rules picked for small models', () => {
     // An edit is matched against the program it changes too
     expect(promptRules('make it faster\nconst out = (await navigator.requestMIDIAccess())', true)).toContain('For music, this browser has a General MIDI software instrument library');
     expect(promptRules('Draw a rainbow over green hills', true)).toContain('<canvas>');
-    expect(promptRules('Who was Ada Lovelace?', true)).toContain('Wikipedia');
+    expect(promptRules('Who was Ada Lovelace?', true)).toContain('Answer what you know directly');
     // Unfiltered: every rule
     const all = promptRules();
-    for (const part of ['For music, this browser has a General MIDI software instrument library', 'Beeps, tones and sound effects use Web Audio', '<canvas>', '<svg>', 'WebGL', 'Wikipedia']) expect(all).toContain(part);
+    for (const part of ['For music, this browser has a General MIDI software instrument library', 'Sound effects use Web Audio', '<canvas>', 'WebGL', 'Answer what you know directly', 'setInterval runs one step']) expect(all).toContain(part);
   });
 });
 
@@ -618,7 +618,7 @@ describe('fix turns and compaction', () => {
 describe('the optional rules follow the request', () => {
   const canvas = 'Use <canvas>';
   const sound = 'For music, this browser has a General MIDI software instrument library';
-  const facts = 'en.wikipedia.org/api/rest_v1';
+  const facts = 'Answer what you know directly';
   const cases: Array<[string, { canvas?: boolean; sound?: boolean; facts?: boolean }]> = [
     ['Draw a beach sunset with rainbow sky and deep purple ocean', { canvas: true }],
     ['Build a blues music loop with piano, bass, and drums in G minor, 120 bpm, 4 measures', { sound: true }],
@@ -1741,7 +1741,7 @@ describe('which turns are about the last program, and which rules a request gets
     expect(promptRules('Build a racing game', true)).toContain(three);
     expect(promptRules('render a scene with a 3D cube', true)).toContain(three);
     expect(promptRules('Draw a cat', true)).not.toContain(three);
-    const facts = 'For facts you lack';
+    const facts = 'Answer what you know directly';
     expect(promptRules('Who was Ada Lovelace?', true)).toContain(facts);
     expect(promptRules("What's 15 percent of 84?", true)).not.toContain(facts);
     expect(promptRules('Build a game where the car is steered by arrow keys', true)).not.toContain(facts);
