@@ -2047,6 +2047,7 @@ export class ConversationOrchestrator {
           if (inspected.framed?.length) appendRunLog('imagined', `${inspected.framed.join(', ')}: a frame loop that did nothing but ask for the next frame now runs the drawing function nothing called: corrected before running`);
           if (inspected.markupBlocks) appendRunLog('imagined', `${inspected.markupBlocks === 1 ? 'a line of' : `${inspected.markupBlocks} blocks of`} markup between the code blocks said aloud → put on the page instead: corrected before running`);
           if (inspected.repeatedBlocks) appendRunLog('imagined', `the program written out again in another code block → one copy kept: corrected before running`);
+          for (const note of inspected.markup ?? []) appendRunLog('imagined', `${note}: corrected before running`);
           if (inspected.redeclared?.length) appendRunLog('imagined', `${inspected.redeclared.join(', ')} declared again → set again (the first declaration made let): corrected before running`);
           if (inspected.cutOff) {
             const { dropped, closed, template } = inspected.cutOff;

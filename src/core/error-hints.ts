@@ -458,7 +458,11 @@ function leftOpen(code: string, error: string): ErrorHint | null {
     const message = String((err as Error).message);
     const line = (err as { loc?: { line?: number } }).loc?.line;
     if (/Unterminated template/.test(message)) return { text: `The \` template string opened at line ${line} is never closed.` };
-    if (/Unterminated string/.test(message)) return { text: `The string at line ${line} is never closed.` };
+    if (/Unterminated string/.test(message)) {
+      // (a '…' or "…" string ends with its line: one that goes on over the next lines needs backticks)
+      const onward = line !== undefined && line < code.replace(/\s+$/, '').split('\n').length;
+      return { text: `The string at line ${line} is never closed.${onward ? ' A string in quotes must end on the line it starts; text over several lines goes in one `…` template string.' : ''}` };
+    }
     if (/Unterminated comment/.test(message)) return { text: `The /* comment at line ${line} is never closed.` };
   }
   const open = stack[stack.length - 1];
@@ -1305,6 +1309,122 @@ export function missingReadFacts(code: string, reads: Array<{ name: string; type
 /** What a stray character is called in the run log */
 export function strayName(removed: string): string {
   return /[`'"]/.test(removed) ? 'a stray quote' : `a stray ${removed}`;
+}
+
+/** Where the parser stops, or null when the program parses */
+function parseStop(code: string): { message: string; pos: number; line: number } | null {
+  try {
+    parse(code, PARSE_OPTIONS);
+    return null;
+  } catch (err) {
+    const { message, pos, loc } = err as { message: string; pos?: number; loc?: { line?: number } };
+    return { message: String(message), pos: pos ?? -1, line: loc?.line ?? -1 };
+  }
+}
+
+/** The calls and properties that take a page's markup as a string */
+const MARKUP_CALL = /(?:\bdocument\.write(?:ln)?|\.insertAdjacentHTML)\s*\(\s*(?:(['"])[a-z]+\1\s*,\s*)?$/i;
+const MARKUP_PROPERTY = /\.(?:inner|outer)HTML\s*\+?=\s*$/;
+const CODE_START = /^(?:var|let|const|function|class|if|else|for|while|do|switch|return|try|catch|await|async|new|import|export)\b/;
+
+/** A line of markup (it opens or ends with a tag) or of plain text (no code's punctuation, no keyword) */
+function markupOrText(line: string): boolean {
+  const t = line.trim();
+  return !t || /^</.test(t) || />$/.test(t) || (!/[;{}=()`]/.test(t) && !CODE_START.test(t));
+}
+
+/** Text for a template string: its backticks and `${` escaped */
+const asTemplateText = (text: string) => text.replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
+
+/**
+ * A '…' or "…" string of markup (document.write, innerHTML =, insertAdjacentHTML) that opens at
+ * `pos` and runs on over the lines after it, so the parser stops at its first line end. Its end
+ * is the first later line closing it with the call's `)` (`</form>');`), or for a property with
+ * the quote (`</div>';`); a call's inner lines may end in stray quotes (`<br><br>';`), which go.
+ * Every line in it must be markup or text, never code. One template string from the opening
+ * quote to the closing one, or null.
+ */
+function markupString(code: string, pos: number): { code: string; start: number; end: number } | null {
+  const quote = code[pos];
+  if (quote !== "'" && quote !== '"') return null;
+  const lines = code.split('\n');
+  const start = code.slice(0, pos).split('\n').length - 1;
+  const column = pos - (code.lastIndexOf('\n', pos - 1) + 1);
+  const prefix = lines[start].slice(0, column);
+  const call = MARKUP_CALL.test(prefix);
+  if (!call && !MARKUP_PROPERTY.test(prefix)) return null;
+  const first = lines[start].slice(column + 1);
+  if (!markupOrText(first)) return null;
+  const q = quote === "'" ? "'" : '"';
+  const close = new RegExp(`^([^${q}]*)${q}${call ? '\\)' : ''}(\\s*;?\\s*)$`);
+  const stray = new RegExp(`${q}\\s*;?\\s*$`);
+  const out = [`${prefix}\`${asTemplateText(first)}`];
+  let markup = /<\/?[a-z]/i.test(first);
+  for (let i = start + 1; i < lines.length && i <= start + 60; i++) {
+    const ending = close.exec(lines[i]);
+    if (ending) {
+      if (!markupOrText(ending[1])) return null;
+      markup ||= /<\/?[a-z]/i.test(ending[1]);
+      if (!markup) return null;
+      out.push(`${asTemplateText(ending[1])}\`${call ? ')' : ''}${ending[2]}`);
+      return { code: [...lines.slice(0, start), ...out, ...lines.slice(i + 1)].join('\n'), start: start + 1, end: i + 1 };
+    }
+    // (a property's string has no `)` to tell its end from a stray quote: its first quote ends it)
+    const inner = call ? lines[i].replace(stray, '') : lines[i];
+    if (inner.includes(q) || !markupOrText(inner)) return null;
+    markup ||= /<\/?[a-z]/i.test(inner);
+    out.push(asTemplateText(inner.replace(/\s+$/, '')));
+  }
+  return null;
+}
+
+/**
+ * `document.write('<table>';`: a markup call whose one string argument ends the line with `;`
+ * and no `)`. The `)` goes before the `;`. Null for any other line.
+ */
+function unclosedMarkupCall(code: string, pos: number): { code: string; line: number } | null {
+  if (code[pos] !== ';') return null;
+  const lineStart = code.lastIndexOf('\n', pos - 1) + 1;
+  const lineEnd = code.indexOf('\n', pos);
+  const before = code.slice(lineStart, pos);
+  const after = code.slice(pos + 1, lineEnd < 0 ? code.length : lineEnd);
+  const m = /^(.*?)(['"])((?:(?!\2)[^\\]|\\.)*)\2\s*$/.exec(before);
+  if (!m || !MARKUP_CALL.test(m[1]) || after.trim()) return null;
+  return { code: `${code.slice(0, pos)})${code.slice(pos)}`, line: code.slice(0, pos).split('\n').length };
+}
+
+/**
+ * Before a program runs: markup written across lines inside one '…' or "…" string (a reply's
+ * `document.write('  <form>` on one line, its inputs and labels on the next, `</form>');` at
+ * the end), which stops the parser at the first line end. The one reading is a single string
+ * of markup over those lines: it becomes a template string (markupString), its stray quotes at
+ * inner line ends dropped. A markup call left without its `)` (`document.write('<table>';`) gets
+ * it. Each repair must get the parser past its lines, and all of them together must make the
+ * program parse, or parse once a reply cut off before its end is closed (closeCutOff, which runs
+ * after this). Null when there is nothing to do; the notes say what changed, for the run log.
+ */
+export function markupAcrossLines(code: string): { code: string; notes: string[] } | null {
+  let current = code;
+  const notes: string[] = [];
+  for (let stop = parseStop(current); stop && notes.length < 20; ) {
+    let next: { code: string; note: string; end: number } | null = null;
+    if (/Unterminated string constant/.test(stop.message)) {
+      const joined = markupString(current, stop.pos);
+      if (joined) next = { code: joined.code, end: joined.end, note: `markup written over lines ${joined.start}-${joined.end} in one ${current[stop.pos]}…${current[stop.pos]} string → one \`…\` template string` };
+    } else if (/Unexpected token/.test(stop.message)) {
+      const closed = unclosedMarkupCall(current, stop.pos);
+      if (closed) next = { code: closed.code, end: closed.line, note: `the markup call at line ${closed.line} left without its ) → closed` };
+    }
+    if (!next) break;
+    const after = parseStop(next.code);
+    // (each repair gets the parser past its own lines)
+    if (after && after.line <= next.end) break;
+    current = next.code;
+    notes.push(next.note);
+    stop = after;
+  }
+  if (!notes.length) return null;
+  return tryParse(current) || closeCutOff(current) ? { code: current, notes } : null;
 }
 
 function syntaxSlip(code: string, error: string, errorLine?: number): ErrorHint | null {

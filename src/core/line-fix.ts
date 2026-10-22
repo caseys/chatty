@@ -53,8 +53,12 @@ export function brokenLines(code: string): { start: number; end: number } | null
   try {
     parse(code, STRICT);
     return null;
-  } catch {
-    // Broken: find where
+  } catch (err) {
+    // Broken: find where. A string that never closes is all one broken region, wherever it ends
+    if (/Unterminated string constant/.test(String((err as Error).message))) {
+      const open = unclosedString(code, (err as { pos?: number }).pos ?? -1);
+      if (open) return open;
+    }
   }
   let program: { body: Array<{ start: number; end: number; loc: { start: { line: number }; end: { line: number } } }> };
   try {
@@ -76,6 +80,27 @@ export function brokenLines(code: string): { start: number; end: number } | null
   const start = broken[0].loc.start.line;
   const end = broken[broken.length - 1].loc.end.line;
   return end - start < 60 ? { start, end } : null;
+}
+
+/**
+ * A '…' or "…" string the parser finds unterminated at `pos`, written on over the lines after it
+ * (markup in document.write('<form>…</form>');): from the line it opens to the first later line
+ * that ends it as its statement ends, with the quote and the call's `)` when it opened inside
+ * a call (`</form>');`), with the quote otherwise (`</div>';`). Null when no line does.
+ */
+function unclosedString(code: string, pos: number): { start: number; end: number } | null {
+  const quote = code[pos];
+  if (quote !== "'" && quote !== '"') return null;
+  const lines = code.split('\n');
+  const start = code.slice(0, pos).split('\n').length;
+  const prefix = code.slice(code.lastIndexOf('\n', pos - 1) + 1, pos);
+  // (inside a call when the line has opened more parentheses than it closed before the quote)
+  const call = (prefix.match(/\(/g) ?? []).length > (prefix.match(/\)/g) ?? []).length;
+  const ends = new RegExp(`${quote}${call ? '\\)+' : ''}\\s*;?\\s*$`);
+  for (let line = start + 1; line <= lines.length && line - start < 60; line++) {
+    if (ends.test(lines[line - 1])) return { start, end: line };
+  }
+  return null;
 }
 
 /** The system prompt of a fix turn: only what fixing needs */

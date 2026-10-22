@@ -9,7 +9,7 @@ import type { LlmRuntimeProvider, ToolDefinition } from '../types/index.ts';
 import { loopProtect } from './loop-protect.ts';
 import { playNotesHelper } from './music-tool.ts';
 import { fetchWikipediaSummary } from './web-tools.ts';
-import { callFromFrameLoop, closeCutOff, declareOnce, type StandIn } from '../core/error-hints.ts';
+import { callFromFrameLoop, closeCutOff, declareOnce, markupAcrossLines, type StandIn } from '../core/error-hints.ts';
 import { analyse, isReference } from '../core/blank-fix.ts';
 import { sureMatch } from '../core/fuzzy-match.ts';
 import { checkedIds, elementKinds } from './element-kinds.ts';
@@ -238,6 +238,8 @@ export interface PreparedExecutableCode {
   repeatedBlocks?: number;
   /** Lines of bare markup between code blocks (a <canvas> on a line of its own), put on the page instead of said aloud */
   markupBlocks?: number;
+  /** Markup written across lines in one quoted string, made a template string (markupAcrossLines) */
+  markup?: string[];
   /** Drawing functions put in the frame loop that never ran them ("animate() → start()") */
   framed?: string[];
   /** Functions its inline handlers call, made reachable from them (see exposeFunctionsToInlineHandlers) */
@@ -1129,14 +1131,14 @@ export function withoutMarkdownLeftovers(text: string): string {
 }
 
 /** What preparing a reply added, for the run log (see inspectExecutableCode) */
-let preparing: { called: string[]; exposed: string[]; redeclared: string[]; repeats: number; markup: number; looped: string[] } | null = null;
+let preparing: { called: string[]; exposed: string[]; redeclared: string[]; repeats: number; markup: number; looped: string[]; markupStrings: string[] } | null = null;
 
 /**
  * The reply as the program to run, with what preparing it added: the functions it never called,
  * called at its end, and those its inline handlers (onclick="go()") need, made reachable
  */
 export function inspectExecutableCode(rawText: string, options: { closeCutOff?: boolean; speakComment?: boolean } = {}): PreparedExecutableCode {
-  const added = { called: [] as string[], exposed: [] as string[], redeclared: [] as string[], repeats: 0, markup: 0, looped: [] as string[] };
+  const added = { called: [] as string[], exposed: [] as string[], redeclared: [] as string[], repeats: 0, markup: 0, looped: [] as string[], markupStrings: [] as string[] };
   const outer = preparing;
   preparing = added;
   try {
@@ -1153,6 +1155,7 @@ export function inspectExecutableCode(rawText: string, options: { closeCutOff?: 
       ...prepared,
       ...(added.called.length ? { called: [...new Set(added.called)] } : {}),
       ...(added.exposed.length ? { exposed: [...new Set(added.exposed)] } : {}),
+      ...(added.markupStrings.length ? { markup: added.markupStrings } : {}),
       ...(added.redeclared.length ? { redeclared: [...new Set(added.redeclared)] } : {}),
       ...(added.repeats ? { repeatedBlocks: added.repeats } : {}),
       ...(added.markup ? { markupBlocks: added.markup } : {}),
@@ -1203,7 +1206,17 @@ function prepareProgram(rawText: string, options: { closeCutOff?: boolean; speak
     if (tidy !== cleaned && parsesAsJs(tidy)) cleaned = tidy;
   }
 
-  // 2c. A name declared again in the same block stops the program before it starts: the later
+  // 2c. Markup written across lines inside one '…' string (document.write('<form>, its fields,
+  // `</form>');`): one template string. Before the cut-off close, which needs it to parse
+  // (error-hints.ts markupAcrossLines)
+  if (!parsesAsJs(cleaned)) {
+    const markup = markupAcrossLines(cleaned);
+    if (markup) {
+      cleaned = markup.code;
+      preparing?.markupStrings.push(...markup.notes);
+    }
+  }
+  // 2d. A name declared again in the same block stops the program before it starts: the later
   // declarations set the value instead (error-hints.ts declareOnce)
   if (!parsesAsJs(cleaned)) {
     const once = declareOnce(cleaned);
