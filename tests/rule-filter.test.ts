@@ -127,3 +127,37 @@ describe('saving and the weather', () => {
     expect(rules).not.toContain('<lat>');
   });
 });
+
+describe('data from a web address and the clipboard', () => {
+  it('put forward by what the request asks for, not by look-alike words', () => {
+    const named = (request: string) => [...rulesNamedBy(request)].filter((r) => r === 'fetch' || r === 'clipboard');
+    expect(named('Tell me a cat fact from https://catfact.ninja/fact')).toEqual(['fetch']);
+    expect(named('Show the current price of bitcoin from the CoinGecko API')).toEqual(['fetch']);
+    expect(named('Generate a random password and add a button to copy it')).toEqual(['clipboard']);
+    expect(named('Make a share link box with a copy to clipboard button')).toEqual(['clipboard']);
+    for (const request of [
+      'What is an API?',
+      "Let's play a game of fetch with a dog",
+      'Display this image: https://picsum.photos/id/237/400/300.jpg',
+      'Tell me a random joke',
+      'Draw a copy of the Mona Lisa',
+      'Copy the style of Picasso in a drawing',
+      'Make toothpaste ads',
+      'Write a poem about a copycat',
+    ])
+      expect(named(request), request).toEqual([]);
+  });
+
+  it('take a program being changed by what it uses', () => {
+    const program = 'navigator.clipboard.writeText(text); const data = await (await fetch(url)).json();';
+    const rules = promptRules(`make it blue\n${program}`, true, undefined, program);
+    expect(rules).toContain('For data from a web address');
+    expect(rules).toContain('To copy text for the user');
+  });
+
+  it('show each value to fill in as an empty slot, the clipboard write inside a click', () => {
+    const rules = promptRules('', false);
+    expect(rules).toContain('const url = ""; // the address asked for');
+    expect(rules).toContain('button.onclick = () => navigator.clipboard.writeText(""); // the text to copy');
+  });
+});
