@@ -170,45 +170,6 @@ describe('a Tone program is sound', () => {
   });
 });
 
-describe('the outcome check on an app with nothing to press', () => {
-  // Qwen3 0.6B's "Make a quiz with 3 multiple choice questions about animals": a heading and an empty results div
-  const quiz = 'document.body.innerHTML = `<div class="card"><h2>Quiz: Animals</h2><div id="quiz-results"></div></div>`;\nspeak("Hi!");';
-  const request = 'Make a quiz with 3 multiple choice questions about animals';
-  const page = (controls: number) => ({ soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => true, controlCount: () => controls });
-
-  it('says the page has nothing to press or type in', async () => {
-    expect(await outcome(request, page(0), quiz)).toContain('The page has nothing to press or type in');
-    expect(await outcome('Code a tip calculator app with a UI for entering the bill and tip %', page(0), quiz)).toContain('nothing to press or type in');
-  });
-
-  it('is content with a control, a request for something to look at, or a runtime that cannot count', async () => {
-    // (with a handler for them: controls that nothing listens to are the next test)
-    expect(await outcome(request, page(3), `${quiz}\ndocument.addEventListener("click", () => {});`)).toBeNull();
-    expect(await outcome('Show a big ten second countdown on screen', page(0), 'document.body.innerHTML = "10";\nsetInterval(() => {}, 1000);')).toBeNull();
-    expect(await outcome('Draw a house with a red roof', page(0), 'ctx.fillRect(1, 1, 5, 5);')).toBeNull();
-    expect(await outcome(request, { soundUseCount: () => 0, hasVisualContent: () => true }, quiz)).toBeNull();
-  });
-
-  it('is not asked of a drawing, something shown, or a program that listens for the user', async () => {
-    // The reviewer's cases: a drawn calculator, a heart "in the form of", a list to show, a dice roller on a canvas
-    expect(await outcome('Draw a calculator', page(0), 'ctx.fillRect(1, 1, 5, 5);')).toBeNull();
-    expect(await outcome('Draw a cat in the form of a heart', page(0), 'ctx.fillRect(1, 1, 5, 5);')).toBeNull();
-    expect(await outcome('Show my to-do list: milk, eggs', page(0), 'document.body.innerHTML = "<p>milk</p><p>eggs</p>";')).toBeNull();
-    expect(await outcome('Make a dice roller', page(0), 'canvas.addEventListener("click", () => roll());')).toBeNull();
-    expect(await outcome('Make a drawing app', page(0), 'ctx.fillRect(1, 1, 5, 5);')).toBeNull();
-  });
-
-  it('is not asked when the app word is not what is being made (the reviewer’s probes), and still is when it is', async () => {
-    const text = 'document.body.innerHTML = "<p>Roses are red</p>";';
-    for (const request of ['Write a poem about a calculator', 'Make a list of quiz questions about France', 'Write a story for a quiz show', 'Create a poster about a stopwatch']) {
-      expect(await outcome(request, page(0), text), request).toBeNull();
-    }
-    for (const request of ['Build a simple unit converter', 'Make me a to-do list', 'Code a tip calculator', 'Create an editor for notes']) {
-      expect(await outcome(request, page(0), text), request).toContain('nothing to press or type in');
-    }
-  });
-});
-
 describe('the outcome check on a canvas nothing was drawn on', () => {
   // The program of Qwen3 0.6B's Pong: a canvas, a paddle and a mouse listener, and nothing that draws
   const pong = 'const canvas = document.createElement("canvas");\ndocument.body.appendChild(canvas);\nconst paddle = { x: 100 };\nwindow.addEventListener("mousemove", (e) => { paddle.x = e.clientX; });';
@@ -454,43 +415,6 @@ describe('the context budget', () => {
   });
 });
 
-describe('the outcome check on something to tap or use that nothing reacts to', () => {
-  const page = (controls: number) => ({ soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => true, controlCount: () => controls });
-  const message = 'Nothing in the program reacts to the user';
-  // The programs Qwen3 0.6B wrote: a board drawn once, and three sliders read once
-  const board = 'const canvas = document.getElementById("gameCanvas");\nconst ctx = canvas.getContext("2d");\nctx.fillRect(0, 0, 10, 10);';
-  const sliders = 'document.body.innerHTML = `<input type="range" id="r"><input type="range" id="g">`;\ndocument.getElementById("out").textContent = document.getElementById("r").value;';
-
-  it('says so for a game to tap and a picker with sliders, when no handler is anywhere in the program', async () => {
-    expect(await outcome('Make a tic-tac-toe game where two players take turns tapping the squares', page(0), board)).toContain(message);
-    expect(await outcome('Make a color picker with three sliders for red, green and blue', page(3), sliders)).toContain(message);
-    expect(await outcome('Make a game where I click on the moving targets to score points', page(0), board)).toContain(message);
-  });
-
-  it('also for an instruction that starts with a verb the check did not list (the die Qwen3 0.6B answered with the request as text)', async () => {
-    const echo = 'document.body.innerHTML = `Roll a six-sided die when I tap a button`;';
-    expect(await outcome('Roll a six-sided die when I tap a button', page(0), echo)).toContain('The page has nothing to press');
-    expect(await outcome('Roll a six-sided die when I tap a button', page(1), echo)).toContain(message);
-    expect(await outcome('Roll a six-sided die when I tap a button', page(1), `${echo}\ndocument.body.addEventListener("click", () => {});`)).toBeNull();
-    // (an instruction that names no tapping is not a request for a screen; a question about tapping is a question)
-    expect(await outcome('Roll a six-sided die', page(0), echo)).toBeNull();
-    expect(await outcome('Why do I tap a button to roll a die?', page(0), echo)).toBeNull();
-  });
-
-  it('is content with any handler: a click, a key, a pointer move, an onclick in the markup, an input listener', async () => {
-    for (const handler of ['canvas.addEventListener("click", () => {});', 'document.addEventListener("keydown", () => {});', 'window.addEventListener("mousemove", () => {});', 'document.body.innerHTML = "<button onclick=\\"go()\\">go</button>";', 'r.addEventListener("input", () => {});']) {
-      expect(await outcome('Make a tic-tac-toe game where two players take turns tapping the squares', page(0), `${board}\n${handler}`), handler).toBeNull();
-    }
-  });
-
-  it('is not asked of a drawing, a display, or a request that does not name what the user does (a mouse is also an animal)', async () => {
-    expect(await outcome('Draw a mouse with big ears', page(0), board)).toBeNull();
-    expect(await outcome('Draw a house with a red roof', page(0), board)).toBeNull();
-    expect(await outcome('Show a big ten second countdown on screen', page(0), 'document.body.innerHTML = "10";\nsetInterval(() => {}, 1000);')).toBeNull();
-    expect(await outcome('Build a tip calculator', page(0), board)).not.toContain(message);
-  });
-});
-
 describe('the outcome check on elements with nothing in them that wait for a tap', () => {
   // The real board from Qwen3 0.6B's tic-tac-toe: nine empty squares with click handlers, none with a size
   const empty = { soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => false };
@@ -591,18 +515,4 @@ describe('the outcome check on a drawing that is only words', () => {
       expect(await outcome(request, drawing(false), words), request).toBeNull();
     }
   });
-});
-
-describe('the outcome check on a request that names the button to tap, and the page has none', () => {
-  // The real program from Qwen2.5 0.5B's die: text, a function, and a click handler on an element the page never had
-  const die = 'document.body.innerHTML = `Roll a six-sided die when I tap a button`;\nfunction rollDice() {}\ndocument.getElementById("nextRoll").addEventListener("click", rollDice);';
-  const page = (controls: number) => ({ soundUseCount: () => 0, hasVisualContent: () => true, hasDrawnContent: () => true, controlCount: () => controls });
-
-  it('says the page has nothing to press, and is content with a button there', async () => {
-    expect(await outcome('Roll a six-sided die when I tap a button', page(0), die)).toContain('The page has nothing to press or type in');
-    expect(await outcome('Roll a six-sided die when I tap a button', page(1), die)).toBeNull();
-    // (a request that names no control, or no tapping, is not held to it)
-    expect(await outcome('Roll a six-sided die when I tap', page(0), die)).toBeNull();
-    expect(await outcome('Show a button', page(0), die)).toBeNull();
-  }, 30000);
 });

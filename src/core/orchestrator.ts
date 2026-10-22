@@ -238,8 +238,6 @@ export const MAKES_USED_THING = new RegExp(
 const DRAW_REQUEST = /\b(?:draw|paint|sketch|illustrate)\b(?!(?:\s+\w+){0,2}\s+(?:card|cards|number|numbers|name|names|winner|lot|lots|straw|conclusion|breath|blood|attention|raffle)\b)/i;
 /** A request for something the user does to it: tap, click, press, type in, drag, move by mouse or keys */
 const ASKS_FOR_INPUT = /\b(?:tap(?:s|ping)?|click(?:s|ing)?|pressing|swipe|drag(?:ging)?|typ(?:e|ing) (?:in|into)|arrow keys|keyboard|mouse or touch|(?:with|by|using) (?:the |your )?mouse)\b/i;
-/** A request that says which control the user uses to do it, and what the user does with it ("when I tap a button", "type in the box") */
-const NAMES_A_CONTROL = new RegExp(`(?=.*${ASKS_FOR_INPUT.source})(?=.*\\b(?:buttons?|inputs?|sliders?|text ?box|checkbox(?:es)?|dropdown)\\b)`, 'i');
 /** What asks for something that changes by itself on screen */
 const MOTION_REQUEST = /\b(?:animat\w*|bounc\w*|mov(?:ing|es)|spinn?(?:ing)?|rotating|orbit\w*|pulsing|blinking|flashing|falling|floating|flying|scrolling|count ?down|ticking)\b/i;
 /** A program driven by the pointer or keys: what moves is up to the user */
@@ -3147,14 +3145,6 @@ export class ConversationOrchestrator {
     // (Tone.Transport never started, a source never connected), in place of the generic advice
     // (also when the speakers weren't measured: what the program made says what is missing, heard or not)
     const stepMissing = wantsSound && asked() && !heard() && !noNoteStarted && !nothingSent ? missingStepsError(setupNow()) : null;
-    // An app to press or type in, with nothing on the page to press or type in
-    const noControls = wantsVisual && ((MAKES_USED_THING.test(request) && !soundWaits) || NAMES_A_CONTROL.test(request)) && !DRAWING_REQUEST.test(request) && shown() && drawn() && !!this.javascriptRuntime.controlCount && this.javascriptRuntime.controlCount() === 0;
-    // Something the user is to tap, click, type in or move, with no handler for any of it anywhere in the program
-    // (controls that do nothing, a board that can't be tapped): the page can say there are controls, the parser
-    // that nothing listens
-    const listens = LISTENS_FOR_USER.test(code) || MOVES_WITH_USER.test(code);
-    const noHandlers =
-      wantsVisual && !soundWaits && !listens && shown() && drawn() && (ASKS_FOR_INPUT.test(request) || (MAKES_USED_THING.test(request) && !!this.javascriptRuntime.controlCount && this.javascriptRuntime.controlCount() > 0));
     // A drawing asked for, and the card holds only text: the words stand where the picture should be
     const textOnly = wantsVisual && DRAW_REQUEST.test(request) && !soundWaits && shown() && drawn() && this.javascriptRuntime.hasGraphics?.() === false;
     const emptied = wantsVisual && shown() && !drawn() ? (this.javascriptRuntime.emptyElements?.() ?? []) : [];
@@ -3187,11 +3177,7 @@ export class ConversationOrchestrator {
             ? offCanvas
           : textOnly
             ? 'The program drew nothing: the card shows only text. A drawing is a canvas drawn on (fillRect, arc, lineTo, fill, stroke), an <svg>, or elements with a size and a background color.'
-          : noControls
-            ? 'The page has nothing to press or type in: this app needs controls the user can use (button, input, select), each with a handler (onclick, an input listener) that does the work.'
-            : noHandlers
-              ? 'Nothing in the program reacts to the user: the request is for something to tap, click, type in or move, and no handler does that work (addEventListener("click", …) on what is tapped, an onclick, an input listener, a key or pointer listener).'
-            : stillScreen
+          : stillScreen
               ? `The screen never changed and nothing is scheduled to change it: something that moves or counts has to keep updating what it shows (setInterval, or requestAnimationFrame that draws again each frame).${overwrites.length ? ` ${overwrites.join('; ')}: wait between the updates (setInterval, or await a timeout in the loop).` : ''}`
               : '',
       // A button whose handler in the markup (onclick="rollDice()") names a function the page does not have throws when pressed
@@ -3713,7 +3699,7 @@ export class ConversationOrchestrator {
       return undefined;
     }
     const yes = Object.entries(scored.yes).map(([rule, p]) => `${rule} ${Math.round((p ?? 0) * 100)}%`).join(', ');
-    appendRunLog('rules', `kept ${[...scored.kept].join(', ') || 'none'} of the optional rules (yes: ${yes}; ${Math.round(performance.now() - started)} ms)`);
+    appendRunLog('rules', `asked about ${[...scored.decided].join(', ') || 'none'}, kept ${[...scored.kept].join(', ') || 'none'} (yes: ${yes || '-'}; ${Math.round(performance.now() - started)} ms); the other rules go by keywords`);
     return scored;
   }
 

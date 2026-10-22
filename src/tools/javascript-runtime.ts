@@ -9,7 +9,7 @@ import type { LlmRuntimeProvider, ToolDefinition } from '../types/index.ts';
 import { loopProtect } from './loop-protect.ts';
 import { playNotesHelper } from './music-tool.ts';
 import { fetchWikipediaSummary } from './web-tools.ts';
-import { callFromFrameLoop, closeCutOff, declareOnce, markupAcrossLines, type StandIn } from '../core/error-hints.ts';
+import { callFromFrameLoop, closeCutOff, declareOnce, markupAcrossLines, tripleQuotedStrings, type StandIn } from '../core/error-hints.ts';
 import { analyse, isReference } from '../core/blank-fix.ts';
 import { sureMatch } from '../core/fuzzy-match.ts';
 import { checkedIds, elementKinds } from './element-kinds.ts';
@@ -1100,9 +1100,13 @@ function exposeNestedHandlers(code: string, topLevel: string[]): { code: string;
 
 /**
  * Other ways small models fence code (triple double or single quotes, ~~~, or a
- * `Javascript """` line) rewritten as ``` fences, so extractProgram finds them.
+ * `Javascript """` line) rewritten as ``` fences, so extractProgram finds them. Not in a reply
+ * fenced with ``` already: there a """ line is the program's own (a Python-style string, made a
+ * template string before it runs: error-hints.ts tripleQuotedStrings), and taking it for a fence
+ * cut the program in two.
  */
 function normalizeFences(text: string): string {
+  if (/^[ \t]*```/m.test(text)) return text;
   return text.replace(
     /^[ \t]*(?:(javascript|js|html|css)[ \t:]*)?(?:"""|'''|~~~)[ \t]*([\w-]*)[ \t]*$/gim,
     (_line, label?: string, lang?: string) => '```' + (lang || label || '')
@@ -1206,7 +1210,15 @@ function prepareProgram(rawText: string, options: { closeCutOff?: boolean; speak
     if (tidy !== cleaned && parsesAsJs(tidy)) cleaned = tidy;
   }
 
-  // 2c. Markup written across lines inside one '…' string (document.write('<form>, its fields,
+  // 2c. A Python-style """…""" (or '''…''') string: one template string (error-hints.ts tripleQuotedStrings)
+  if (!parsesAsJs(cleaned)) {
+    const tripled = tripleQuotedStrings(cleaned);
+    if (tripled) {
+      cleaned = tripled.code;
+      preparing?.markupStrings.push(...tripled.notes);
+    }
+  }
+  // Markup written across lines inside one '…' string (document.write('<form>, its fields,
   // `</form>');`): one template string. Before the cut-off close, which needs it to parse
   // (error-hints.ts markupAcrossLines)
   if (!parsesAsJs(cleaned)) {
@@ -1852,16 +1864,6 @@ export class JavascriptRuntime {
       );
     } catch {
       return false;
-    }
-  }
-
-  /** How many controls (buttons, fields, links) the card has: what the user can press or type in */
-  controlCount(): number {
-    try {
-      const own = (this.activeIframe?.contentWindow as unknown as { __chattyControls?: () => number } | null)?.__chattyControls;
-      return typeof own === 'function' ? own() : 0;
-    } catch {
-      return 0;
     }
   }
 
@@ -4398,7 +4400,6 @@ export class JavascriptRuntime {
       return __chattyVisualNow(false);
     }
     // How many things the user can press, type in or choose from are on the page
-    window.__chattyControls = () => document.querySelectorAll('button, input:not([type="hidden"]), select, textarea, a[href], [onclick], [contenteditable="true"], summary').length;
     // Functions an inline handler in the markup calls (onclick="rollDice()") that the page does not have: the
     // handler runs them by name when pressed, and throws. Names the element itself or the document has are real.
     window.__chattyDeadHandlers = () => {

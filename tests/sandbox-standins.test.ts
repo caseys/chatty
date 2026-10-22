@@ -387,17 +387,6 @@ describe('an error that repeats every frame', () => {
   });
 });
 
-describe('what the user can press on the card', () => {
-  it('counts buttons, fields, links and handlers, not hidden fields or plain text', () => {
-    const win = loadRunner() as any;
-    win.root.innerHTML = '<h2>Quiz</h2><p>Which animal barks?</p>';
-    expect(win.__chattyControls()).toBe(0);
-    win.root.innerHTML = '<button>Dog</button><input type="text"><input type="hidden" name="x"><select><option>a</option></select><a href="#x">link</a><div onclick="go()">tap</div>';
-    expect(win.__chattyControls()).toBe(5);
-    win.close();
-  });
-});
-
 describe('a program’s own names next to the runner’s', () => {
   it('can be the ones the runner uses itself: setup, draw, shown, contexts, hashText, wiring, OUT', async () => {
     const runtime = new JavascriptRuntime();

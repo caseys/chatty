@@ -1427,6 +1427,24 @@ export function markupAcrossLines(code: string): { code: string; notes: string[]
   return tryParse(current) || closeCutOff(current) ? { code: current, notes } : null;
 }
 
+/**
+ * Before a program runs: a Python-style string, """…""" or '''…''', where a value goes (after `=`, `(`,
+ * `,`, `:` or `return`). In JavaScript that is an empty string and then one never closed; the one
+ * reading is the text between the triple quotes, which becomes a template string (its backticks and
+ * `${` escaped). The program must parse after, or once a reply cut off before its end is closed
+ * (closeCutOff). Null when there is none, or it doesn't help.
+ */
+export function tripleQuotedStrings(code: string): { code: string; notes: string[] } | null {
+  const notes: string[] = [];
+  const fixed = code.replace(/((?:[=(,:]|\breturn)\s*)("""|''')([\s\S]*?)\2/g, (_all, lead: string, _quotes: string, text: string, at: number) => {
+    const line = code.slice(0, at).split('\n').length;
+    notes.push(`the ${_quotes}…${_quotes} string at line ${line} (Python's) → one \`…\` template string`);
+    return `${lead}\`${text.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${')}\``;
+  });
+  if (!notes.length) return null;
+  return tryParse(fixed) || closeCutOff(fixed) ? { code: fixed, notes } : null;
+}
+
 function syntaxSlip(code: string, error: string, errorLine?: number): ErrorHint | null {
   const line = errorLine ?? 0;
   if (/shorthand property initializer|Expected a ':' following the property name/i.test(error)) {
