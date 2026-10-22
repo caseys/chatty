@@ -21,7 +21,7 @@
 
 import type { LlmRuntimeProvider } from '../types/index.ts';
 
-export const OPTIONAL_RULES = ['card', 'ui', 'canvas', 'three', 'svg', 'music', 'fx', 'facts'] as const;
+export const OPTIONAL_RULES = ['card', 'ui', 'canvas', 'three', 'svg', 'music', 'fx', 'facts', 'text'] as const;
 export type RuleName = (typeof OPTIONAL_RULES)[number];
 
 /** The system prompt of every question: nothing in it about writing programs, which small models then do */
@@ -44,6 +44,7 @@ export const RULE_QUESTIONS: Record<RuleName, { note?: string; question?: string
   music: { question: 'Will the program play music, a song, notes or a beat?' },
   fx: { question: 'Will the program make a beep or a sound effect?' },
   facts: { question: 'Is the request a question about a person, place or fact?' },
+  text: { question: 'Does the request give a piece of text to count, reverse or change?' },
 };
 
 /**
@@ -53,9 +54,10 @@ export const RULE_QUESTIONS: Record<RuleName, { note?: string; question?: string
  * or whose question doesn't tell its cases apart (card). A model with no entry goes by keywords.
  */
 export const RULE_CUTOFFS: Readonly<Record<string, Partial<Record<RuleName, number>>>> = {
-  // 34 cases, keywords with these cutoffs: 31 exact. Its card answers don't tell cases apart (AUC 0.5)
-  'qwen3-0.6b': { ui: 0.902, canvas: 0.733, three: 0.807 },
-  // 34 cases: 29 exact. Its interface answers don't tell cases apart (AUC 0.48)
+  // 34 cases, keywords with these cutoffs: 31 exact. Its card answers don't tell cases apart (AUC 0.5).
+  // Text (AUC 0.82): below every request that needs it; the fitted 0.652 dropped a palindrome and a find-and-replace
+  'qwen3-0.6b': { ui: 0.902, canvas: 0.733, three: 0.807, text: 0.35 },
+  // 34 cases: 29 exact. Its interface answers don't tell cases apart (AUC 0.48), nor its text answers (AUC 0.33)
   'qwen2.5-0.5b': { card: 0.431, canvas: 0.455, three: 0.615 },
 };
 
@@ -166,6 +168,21 @@ export const RULE_CASES: ReadonlyArray<{ request: string; rules: RuleName[] }> =
   { request: 'Show a snowfall animation', rules: ['card', 'canvas'] },
   { request: 'What is 12 times 13?', rules: [] },
   { request: 'Give me a random number between 1 and 100', rules: [] },
+  // Text to count, reverse or change
+  { request: 'How many words are in: I love sunny mornings by the sea', rules: ['text'] },
+  { request: "Write the sentence 'hello world' backwards", rules: ['text'] },
+  { request: "Change every 'a' to 'o' in 'banana'", rules: ['text'] },
+  { request: "Make 'good morning everyone' all uppercase", rules: ['text'] },
+  { request: "How many letters does 'encyclopedia' have?", rules: ['text'] },
+  { request: "Is 'racecar' a palindrome?", rules: ['text'] },
+  { request: "Count the vowels in 'programming'", rules: ['text'] },
+  { request: 'Draw the letter A in big red strokes', rules: ['card', 'canvas'] },
+  { request: 'Make a text box where I can type my name and a hello button', rules: ['card', 'ui'] },
+  { request: 'Play Twinkle Twinkle backwards', rules: ['music'] },
+  { request: 'Tell me a word that rhymes with cat', rules: [] },
+  { request: 'Write a sentence about the ocean', rules: [] },
+  { request: 'Make a word guessing game', rules: ['card', 'ui'] },
+  { request: 'Make a button that changes color when I tap it', rules: ['card', 'ui'] },
 ];
 
 /**

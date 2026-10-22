@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { fitCutoffs, RULE_QUESTIONS, ruleQuestion, scoredRules, yesScorer } from '../src/core/rule-filter.ts';
-import { promptRules } from '../src/core/orchestrator.ts';
+import { fitCutoffs, RULE_CUTOFFS, RULE_QUESTIONS, ruleQuestion, scoredRules, yesScorer } from '../src/core/rule-filter.ts';
+import { promptRules, rulesNamedBy } from '../src/core/orchestrator.ts';
 
 describe('the rule filter', () => {
   it('asks about a rule as a note or as a direct question, with A and B for answers', () => {
@@ -56,5 +56,23 @@ describe('prompt rules from the model', () => {
 
   it("keeps a rule the program being changed uses, whatever the model said about the request", () => {
     expect(promptRules('make it red', true, scored, 'const c = document.createElement("canvas")')).toContain('Use <canvas>');
+  });
+});
+
+describe('the text rule', () => {
+  it('is put forward for text to count, reverse or change, and only then', () => {
+    expect(rulesNamedBy('Count the words in this sentence: the cat sat').has('text')).toBe(true);
+    expect(rulesNamedBy('Reverse the word "pineapple"').has('text')).toBe(true);
+    expect(rulesNamedBy("Change every 'a' to 'o' in 'banana'").has('text')).toBe(true);
+    expect(rulesNamedBy('Who was Ada Lovelace?').has('text')).toBe(false);
+    expect(promptRules('Make it all uppercase', true)).toContain('For text tools');
+    expect(promptRules('Tell me a joke about cats', true)).not.toContain('For text tools');
+  });
+
+  it('is kept on Qwen3 when its yes passes the cutoff, and goes by keywords on Qwen2.5', async () => {
+    const yes = (p: number) => () => Promise.resolve(p);
+    expect([...((await scoredRules('Reverse "abc"', yes(0.6), RULE_CUTOFFS['qwen3-0.6b'], ['text']))?.kept ?? [])]).toEqual(['text']);
+    expect((await scoredRules('Play it backwards', yes(0.2), RULE_CUTOFFS['qwen3-0.6b'], ['text']))?.kept.has('text')).toBe(false);
+    expect(RULE_CUTOFFS['qwen2.5-0.5b'].text).toBeUndefined();
   });
 });
