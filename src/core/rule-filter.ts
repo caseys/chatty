@@ -304,6 +304,39 @@ export const RULE_CASES: ReadonlyArray<{ request: string; rules: RuleName[] }> =
   { request: 'Write a poem about a copycat', rules: [] },
   { request: 'Make toothpaste ads', rules: [] },
   { request: 'Paint a sunflower copying the style of Van Gogh', rules: ['card', 'canvas'] },
+  // Drawing or not (from the repair notes): a game played in words, square numbers, a picture painted with words
+  // and a conclusion drawn aren't drawings; a clock with hands is, and a heart is shown however it can be
+  { request: 'Make a guessing game where I try to guess the number you picked', rules: ['card', 'ui'] },
+  { request: 'Show a table of the first ten square numbers', rules: ['card', 'ui'] },
+  { request: 'draw me a conclusion from this: it rained and the grass is wet', rules: [] },
+  { request: 'paint me a picture with words of a sunset', rules: [] },
+  { request: 'Make a trivia game about animals', rules: ['card', 'ui'] },
+  { request: "What's 15 squared?", rules: [] },
+  { request: 'Let me play pong against the computer', rules: ['card', 'canvas'] },
+  { request: 'Set up a chess board with all the pieces', rules: ['card', 'canvas'] },
+  { request: 'Draw a big square with a small circle inside it', rules: ['card', 'canvas'] },
+  { request: 'an analog clock with hands', rules: ['card', 'canvas'] },
+  { request: 'show a big red heart, centered on the page', rules: ['card'] },
+  { request: 'Show a clock face with hour and minute hands', rules: ['card', 'canvas'] },
+  { request: 'Make a clock that shows the time in big digits', rules: ['card', 'ui'] },
+  { request: 'Make a heart that slowly grows and shrinks', rules: ['card', 'css'] },
+  { request: 'Tell me about the human heart', rules: ['facts'] },
+  // Writing about the weather, and a letter to write (neither asks for the weather or a text tool)
+  { request: 'write one sentence describing the weather in the opening of my novel', rules: [] },
+  { request: 'Write a short poem about a rainy afternoon', rules: [] },
+  { request: 'Tell me a story about a snowy day', rules: [] },
+  { request: 'Will it be windy in Boston tomorrow?', rules: ['weather'] },
+  { request: 'Write a program that tells me the temperature in Oslo', rules: ['weather'] },
+  { request: 'copy editing tips for a cover letter', rules: [] },
+  { request: 'Write a thank-you letter to my neighbor', rules: [] },
+  { request: "Count the letters in 'mississippi'", rules: ['text'] },
+  // An analog synth isn't a clock; a heart that beats isn't music; a memory game is cards on the page, not 3D
+  { request: 'Play an analog synth bass line', rules: ['music'] },
+  { request: 'a heart that beats with CSS', rules: ['card', 'css'] },
+  { request: 'Play a beat that sounds like a heart beating', rules: ['music'] },
+  { request: 'memory matching game', rules: ['card', 'ui'] },
+  { request: 'Make a memory game where I flip tiles to find pairs', rules: ['card', 'ui'] },
+  { request: 'Make a card game of blackjack against the dealer', rules: ['card', 'ui'] },
 ];
 
 /**
