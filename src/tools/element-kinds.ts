@@ -5,7 +5,7 @@
  */
 import { parse } from 'acorn';
 
-export type ElementKind = 'canvas' | 'media' | 'field' | 'dialog';
+export type ElementKind = 'canvas' | 'media' | 'field' | 'dialog' | 'button';
 
 /** Members only one kind of element has */
 const KIND_OF_MEMBER: Record<string, ElementKind> = {
@@ -35,6 +35,14 @@ const KIND_OF_MEMBER: Record<string, ElementKind> = {
 
 /** Events only a form control fires (see oninput above) */
 const FIELD_EVENTS = new Set(['input', 'change']);
+
+/**
+ * A click handler on an id the program calls a button (calculate-button, submitBtn): a button. A
+ * tip calculator wired addEventListener('click') to its 'calculate-button' and never made it, and
+ * the empty <div> that stood in could not be pressed (Qwen2.5 0.5B). Anything can be clicked, so
+ * the click alone says nothing: the name has to say button too
+ */
+const BUTTON_NAME = /btn|button/i;
 
 type AnyNode = Record<string, unknown> & { type: string };
 
@@ -81,7 +89,18 @@ export function elementKinds(code: string): Record<string, ElementKind> {
     const id = lookedUpId(object) ?? (object.type === 'Identifier' ? holders.get(object.name as string) : undefined);
     const member = (node.property as AnyNode).name as string;
     const event = member === 'addEventListener' && parent?.type === 'CallExpression' && parent.callee === node ? (parent.arguments as AnyNode[])[0] : undefined;
-    const kind = !id ? undefined : event ? (event.type === 'Literal' && FIELD_EVENTS.has(event.value as string) ? 'field' : undefined) : Object.hasOwn(KIND_OF_MEMBER, member) ? KIND_OF_MEMBER[member] : undefined;
+    const clicked = (event ? event.type === 'Literal' && event.value === 'click' : member === 'onclick') && !!id && BUTTON_NAME.test(id);
+    const kind = !id
+      ? undefined
+      : clicked
+        ? 'button'
+        : event
+          ? event.type === 'Literal' && FIELD_EVENTS.has(event.value as string)
+            ? 'field'
+            : undefined
+          : Object.hasOwn(KIND_OF_MEMBER, member)
+            ? KIND_OF_MEMBER[member]
+            : undefined;
     if (!id || !kind) return;
     if (!seen.has(id)) seen.set(id, new Set());
     seen.get(id)!.add(kind);
@@ -132,4 +151,17 @@ export function checkedIds(code: string): string[] {
     if (tested) checked.add(id);
   });
   return [...checked];
+}
+
+/**
+ * The fields a program reads but never makes, to be put on the card before it runs: their ids
+ * appear nowhere in the program but in lookups (no markup or .id gives them). A tip calculator
+ * read 'bill-element' and 'tip-amount-element' only in its click handler, so their stand-ins came
+ * only once the button was pressed, and there was nothing to type in (Qwen2.5 0.5B)
+ */
+export function fieldsToMake(code: string, kinds: Record<string, ElementKind> = elementKinds(code)): string[] {
+  const elsewhere = code.replace(/\b(?:getElementById\s*\(\s*|querySelector\s*\(\s*)(['"`])#?[\w-]+\1/g, '');
+  return Object.entries(kinds)
+    .filter(([id, kind]) => kind === 'field' && !new RegExp(`(?<![\\w-])${id.replace(/[-]/g, '\\-')}(?![\\w-])`).test(elsewhere))
+    .map(([id]) => id);
 }

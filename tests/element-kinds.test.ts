@@ -50,3 +50,28 @@ describe('the ids whose absence the program handles itself', async () => {
     expect(checkedIds('const = ;')).toEqual([]);
   });
 });
+
+describe('buttons and the fields a click handler reads', async () => {
+  const { elementKinds, fieldsToMake } = await import('../src/tools/element-kinds.ts');
+  // A tip calculator Qwen2.5 0.5B wrote: every element looked up, none made
+  const TIP = [
+    'function calculateTip() {',
+    '  var bill = parseFloat(document.getElementById("bill-element").value);',
+    '  var tip = parseFloat(document.getElementById("tip-amount-element").value);',
+    '  document.getElementById("output-element").innerHTML = "Total: $" + (bill + bill * tip / 100).toFixed(2);',
+    '}',
+    'document.getElementById("calculate-button").addEventListener("click", calculateTip);',
+  ].join('\n');
+
+  it('calls a clicked id named as a button a button, and the fields it reads fields to make first', () => {
+    expect(elementKinds(TIP)).toMatchObject({ 'bill-element': 'field', 'tip-amount-element': 'field', 'calculate-button': 'button' });
+    expect(fieldsToMake(TIP)).toEqual(['bill-element', 'tip-amount-element']);
+  });
+
+  it('leaves a clicked id with no button in its name, and fields the program makes itself', () => {
+    expect(elementKinds('document.getElementById("board").addEventListener("click", play);').board).toBeUndefined();
+    expect(elementKinds('document.getElementById("goBtn").onclick = go;').goBtn).toBe('button');
+    const made = 'document.body.innerHTML = \'<input id="bill">\';\ndocument.getElementById("go").onclick = () => speak(document.getElementById("bill").value);';
+    expect(fieldsToMake(made)).toEqual([]);
+  });
+});

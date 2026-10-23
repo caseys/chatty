@@ -411,6 +411,10 @@ describe('a program that ends on a sentence in a comment', async () => {
     expect(speakClosingComment('draw();\n// draw loop')).toBeNull();
     expect(speakClosingComment('draw();\n// x = 5 then redraw it')).toBeNull();
     expect(speakClosingComment('draw();\nspeak("Done.");\n// This draws a red ball.')).toBeNull();
+    // (a note about the code or a place in it, from a tip calculator Qwen2.5 0.5B wrote)
+    expect(speakClosingComment('draw();\n// Load the necessary libraries, stylesheets, and scripts here...')).toBeNull();
+    expect(speakClosingComment('draw();\n// Add more buttons here.')).toBeNull();
+    expect(speakClosingComment('draw();\n// This shows a calculator for your bill and tip.')).not.toBeNull();
   });
 });
 

@@ -12,7 +12,7 @@ import { fetchWeather, fetchWikipediaSummary } from './web-tools.ts';
 import { callFromFrameLoop, closeCutOff, declareOnce, markupAcrossLines, tripleQuotedStrings, type StandIn } from '../core/error-hints.ts';
 import { analyse, isReference } from '../core/blank-fix.ts';
 import { sureMatch } from '../core/fuzzy-match.ts';
-import { checkedIds, elementKinds } from './element-kinds.ts';
+import { checkedIds, elementKinds, fieldsToMake } from './element-kinds.ts';
 
 /**
  * Wraps fn so that however often the result is called, fn runs at most once per animation frame,
@@ -899,6 +899,9 @@ export function speakClosingComment(code: string): { code: string; text: string 
   // with nothing that reads as code; a note to a programmer (TODO, FIXME) is none
   if (text.split(' ').length < 4 || !/^[A-Z]/.test(text) || !/[.!?]$/.test(text) || /^(?:TODO|FIXME|NOTE|HACK|XXX)\b/i.test(text)) return null;
   if (/[=;{}()[\]<>]|=>|\b(?:const|let|var|function|return)\b/.test(text)) return null;
+  // Nor a note about the code or a place in it: "Load the necessary libraries, stylesheets, and
+  // scripts here..." was said aloud to the user of a tip calculator (Qwen2.5 0.5B)
+  if (/\b(?:librar(?:y|ies)|scripts?|stylesheets?|code|functions?|variables?|imports?|html|css|dom|api|elements?|logic)\b/i.test(text) || /\bhere\W*$/i.test(text)) return null;
   return { code: `${code}\nspeak(${JSON.stringify(text)});`, text };
 }
 
@@ -4424,9 +4427,14 @@ export class JavascriptRuntime {
     let idKinds = {};
     // Ids whose absence the program handles itself (element-kinds.ts checkedIds): those get null
     let idChecked = new Set();
-    const KIND_TAGS = { canvas: ['CANVAS'], media: ['AUDIO', 'VIDEO'], field: ['INPUT', 'TEXTAREA', 'SELECT'], dialog: ['DIALOG'] };
+    const KIND_TAGS = { canvas: ['CANVAS'], media: ['AUDIO', 'VIDEO'], field: ['INPUT', 'TEXTAREA', 'SELECT'], dialog: ['DIALOG'], button: ['BUTTON'] };
     // What stands in for each kind; sound gets a <div> (a silent <audio> would fail without an error)
-    const KIND_STAND_IN = { canvas: 'canvas', field: 'input', dialog: 'dialog' };
+    const KIND_STAND_IN = { canvas: 'canvas', field: 'input', dialog: 'dialog', button: 'button' };
+    // A button's label from the program's own name for it: 'calculate-button' says Calculate
+    const buttonLabel = (id) => {
+      const words = id.replace(/[-_]?(?:btn|button)$/i, '').replace(/^(?:btn|button)[-_]?/i, '').replace(/([a-z])([A-Z])/g, '$1 $2').split(/[-_\s]+/).filter(Boolean).join(' ').toLowerCase();
+      return words ? words[0].toUpperCase() + words.slice(1) : 'OK';
+    };
     // An id one slip from an id on the page ('startbutton' for 'startButton', 'start_btn' for
     // 'start-btn') means that element, not a new empty one
     // (Chatty's shared name matcher, the same rules as every repair: fuzzy-match.ts)
@@ -4563,6 +4571,7 @@ export class JavascriptRuntime {
       // A field says which it is by the program's own name for it: a BMI calculator's two boxes
       // read 'height' and 'weight'
       if (kind === 'field') made.placeholder = id;
+      if (kind === 'button') made.textContent = buttonLabel(id);
       made.id = id;
       // A sound it never made (an <audio> with no file): play() plays a short note instead of
       // failing, pause() and load() do nothing
@@ -5016,6 +5025,12 @@ export class JavascriptRuntime {
       __chattyStartWatch();
       __chattyResetMade();
       __chattyWatchTone();
+      // The fields it reads but never makes, on the card before it runs, to type in (element-kinds.ts fieldsToMake)
+      const firstFields = (data.makeFirst || []).filter((id) => !idChecked.has(id) && !findElementById(id));
+      for (const id of firstFields) {
+        try { document.getElementById(id); } catch {}
+      }
+      if (firstFields.length) imagined('the fields it reads but never makes (' + firstFields.map((id) => '#' + id).join(', ') + ') → text boxes on the card');
       runningProgram = true;
       const logs = [];
       const origLog = console.log;
@@ -5234,7 +5249,7 @@ export class JavascriptRuntime {
     // (host first: Tone's bundle asks it for the page's audio as it loads)
     const head = [await scriptOf(hostUrl), three ? await scriptOf(three.default) : '', tone ? await scriptOf(tone.default) : ''].join('\n');
     const json = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c');
-    const start = `<script>window.postMessage({ type: 'execute', id: 'standalone', code: ${json(code)}, idKinds: ${json(elementKinds(code))}, idChecked: ${json(checkedIds(code))} }, '*');</script>`;
+    const start = `<script>window.postMessage({ type: 'execute', id: 'standalone', code: ${json(code)}, idKinds: ${json(elementKinds(code))}, idChecked: ${json(checkedIds(code))}, makeFirst: ${json(fieldsToMake(code))} }, '*');</script>`;
     return this.buildRunnerHtml(false, 'window.__chattyStandaloneHost')
       // Functions as replacements: the inlined code has $ patterns a replacement string would expand
       .replace('<head>', () => `<head>\n  <title>Chatty program</title>\n  <meta name="viewport" content="width=device-width, initial-scale=1">\n${head}`)
@@ -5470,7 +5485,7 @@ export class JavascriptRuntime {
       this.pendingRuns.set(reqId, { options, spokenTexts, timer, finish: settle });
       this.trackDownload(code);
       void withLibraries(code, iframe.contentWindow).then(() =>
-        iframe.contentWindow?.postMessage({ type: 'execute', id: reqId, code, idKinds: elementKinds(code), idChecked: checkedIds(code), valuesExpected: VALUES_ASKED_ABOUT.test(options?.request ?? '') }, '*')
+        iframe.contentWindow?.postMessage({ type: 'execute', id: reqId, code, idKinds: elementKinds(code), idChecked: checkedIds(code), makeFirst: fieldsToMake(code), valuesExpected: VALUES_ASKED_ABOUT.test(options?.request ?? '') }, '*')
       );
     });
   }
@@ -5549,7 +5564,7 @@ export class JavascriptRuntime {
             // Loops guarded as in a real run: the hidden page shares this page's thread, so a fix with
             // `while (true)` tried here would freeze the whole app
             const runnable = loopProtect(await letReassignedConsts(await makeAwaitingFunctionsAsync(code)));
-            if (!finished) iframe.contentWindow?.postMessage({ type: 'execute', id, code: runnable, idKinds: elementKinds(code), idChecked: checkedIds(code) }, '*');
+            if (!finished) iframe.contentWindow?.postMessage({ type: 'execute', id, code: runnable, idKinds: elementKinds(code), idChecked: checkedIds(code), makeFirst: fieldsToMake(code) }, '*');
           });
         } catch (err) {
           finish(err instanceof Error ? err.message : String(err));
