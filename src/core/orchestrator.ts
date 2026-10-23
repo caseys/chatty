@@ -15,6 +15,7 @@ import type {
   TtsRuntimeProvider,
   TurnMetrics,
 } from '../types/index.ts';
+import { parse, tokenizer, type Node as AcornNode } from 'acorn';
 import { BoundedQueue, TurnResourceScheduler } from './bounded-queue.ts';
 import { ConversationMemoryStore } from './memory-store.ts';
 import {
@@ -1008,6 +1009,266 @@ export function saysQuestionBack(code: string, request: string): boolean {
   const body = stripComments(code);
   const said = Array.from(body.matchAll(says), (m) => flatText(m[2]));
   return said.length > 0 && body.replace(says, '').trim() === '' && said.every((text) => text === asked);
+}
+
+/**
+ * Words that say nothing of an answer: the question's own grammar (what, is, of, the), who is asking (you, my), and
+ * talk about the asking ("You asked what is half of three quarters."). "Which" is not one: "Which Ada do you mean?"
+ * asks the user to choose.
+ */
+const NO_ANSWER_WORDS = new Set(
+  (
+    'a an the and or but if so then than to of in on at for from with by about as into over under up down out ' +
+    'what who whom whose when where why how is are was were be been being am do does did done can could will would should shall may might must ' +
+    'i me my mine we us our you your yours it its s t re ll ve d m that this these those there here ' +
+    'ask asks asked asking question questions let lets tell know'
+  ).split(' ')
+);
+/** A question answered yes or no ("is 91 a prime number", "should I bring a jacket today?") */
+const YES_NO_QUESTION = /^\s*(?:is|are|was|were|am|do|does|did|can|could|will|would|should|shall|has|have|had)\b/i;
+/** A question that offers the answers: "which …", "whether …", "… or …" */
+const CHOICE_QUESTION = /^\s*(?:which|whether)\b|\bor\b/i;
+
+/**
+ * What a question's run said, when it says nothing but the question again: every word it spoke is a word of
+ * the request or one of NO_ANSWER_WORDS, and it spoke at least one of the request's own words. Qwen3 0.6B,
+ * "should I bring a jacket today?": getWeather was called, then speak("Should I bring a jacket today?"); "what's
+ * 15% of 80": the result logged, then speak("What's 15% of 80?") (a program that speaks doesn't have its logs
+ * read out); "what is half of three quarters": speak("You asked what is half of three quarters."). Any word of
+ * its own (a number, a name, "yes") is an answer of some kind and stays. Only for a question (see isQuestion)
+ * that asks for nothing to be made (see asksForOutcome).
+ */
+export function onlyRestates(request: string, spoken: string[]): string | null {
+  if (!isQuestion(request) || asksForOutcome(request)) return null;
+  const said = flatText(spoken.join(' '));
+  if (!said) return null;
+  const asked = new Set(flatText(request).split(' '));
+  // A yes-or-no question is answered in its own words, said as a statement ("91 is a prime number." for "is 91 a
+  // prime number", Qwen3.5 2B; wrong, but an answer): only said as a question again is it no answer
+  // So is a choice between things it names ("Which is bigger, 7 or 9?": "9 is bigger."; "Is 7 odd or even?": "7 is odd.")
+  const answeredInItsWords = YES_NO_QUESTION.test(request) || CHOICE_QUESTION.test(request);
+  if (answeredInItsWords && !spoken.every((text) => !text.trim() || /\?\s*$/.test(text.trim()))) return null;
+  const words = said.split(' ');
+  if (!words.every((word) => asked.has(word) || NO_ANSWER_WORDS.has(word))) return null;
+  if (!words.some((word) => asked.has(word) && !NO_ANSWER_WORDS.has(word))) return null;
+  return spoken.map((text) => text.trim()).filter(Boolean).join(' ');
+}
+
+/** The numbers written in a text, as numbers ("15%" is 15, "1,000" is 1000; "1st" and "mp3" are not numbers) */
+const numbersIn = (text: string): number[] =>
+  Array.from(text.replace(/(\d),(?=\d{3}(?!\d))/g, '$1').matchAll(/(?<![\w.])\d+(?:\.\d+)?(?![\w])/g), (m) => Number(m[0]));
+
+/** A speak() with no words: speak(), speak(''), speak("") */
+const EMPTY_SPEAK = /\bspeak\(\s*(?:(["'`])\1\s*)?\)/;
+/** What a program that says nothing may still be doing: waiting (a timer, a tap, a key), keeping something (the clipboard, storage, a download), or fetching, playing or asking */
+const ACTS_WITHOUT_WORDS =
+  /\b(?:setTimeout|setInterval|requestAnimationFrame|clipboard|localStorage|sessionStorage|indexedDB|download|fetch|XMLHttpRequest|getWeather|searchWikipedia|playNotes|prompt|confirm)\b/;
+
+/**
+ * A run that said nothing when it meant to: every speak() was empty, as the program calls speak() with no words.
+ * Qwen3 0.6B wrote `speak();` alone for "write a four-line poem about autumn" (its own speak function, which logged
+ * the poem, taken out as a copy of the ready-made one), and console.log("…") then speak() for "a haiku about the
+ * sea" (a program that speaks doesn't have its logs read out). Not a program that waits, keeps something, fetches
+ * or plays (see ACTS_WITHOUT_WORDS, LISTENS_FOR_USER): it has done or will do something without words. The caller
+ * judges it only when the card shows nothing and nothing played either.
+ */
+export function saidNothing(code: string, spoken: string[]): string | null {
+  if (spoken.some((text) => text.trim()) || !EMPTY_SPEAK.test(code)) return null;
+  if (LISTENS_FOR_USER.test(code) || ACTS_WITHOUT_WORDS.test(code)) return null;
+  return `The program said nothing: speak() was called with no words${
+    /\bconsole\.log\s*\(/.test(code) ? ", and what console.log() writes isn't read out in a program that speaks" : ''
+  }. Put the reply in it: speak("…").`;
+}
+
+/** What a card that shows nothing is told: what was empty, and how something shows */
+const nothingVisible = (emptied: string[]) =>
+  `The program put nothing visible on screen: its canvas has nothing drawn on it, or its elements are empty${emptied.length ? ` (${emptied.join(', ')} have no text and no size)` : ''}. Put text in an element (textContent, innerHTML) or give it a size (a style with width and height), or draw with the 2d context (fillRect, arc, lineTo, fill, stroke, fillText) in a function that is called.`;
+
+/** A temperature a reply states: a number with a degree sign or word after it ("12.5 degrees", "18°C", "-3 °F") */
+const STATED_TEMPERATURE = /(?<![\w.])(-|−|minus\s+)?(\d+(?:\.\d+)?)\s*(?:[°º]\s?[CF]?\b|[°º℃℉]|degrees?\b|deg\b|celsius\b|fahrenheit\b)/gi;
+/** The weather as it is now (or today), asked for: what a temperature can only be read from */
+const CURRENT_WEATHER = /\b(?:weather|forecast|now|today|tonight|outside|currently)\b/i;
+/** The weather in general (a season, a month, on average, on another planet): the climate, which facts answer */
+const CLIMATE =
+  /\b(?:usually|usual|average|typical|typically|normally|climate|record|ever|winters?|summers?|spring|autumn|fall|january|february|march|april|may|june|july|august|september|october|november|december|mars|venus|moon|sun|space)\b/i;
+
+/** The number literals of a program outside its strings (a threshold it compares with: temperature < 15), or null when it doesn't parse */
+function codeNumbers(code: string): number[] | null {
+  try {
+    const found: number[] = [];
+    for (const token of tokenizer(code, { ecmaVersion: 'latest', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true })) {
+      const value = (token as { value?: unknown }).value;
+      if (token.type.label === 'num' && typeof value === 'number') found.push(value);
+    }
+    return found;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A temperature the reply to a weather question states that no look-up gave. Qwen3.5 2B, "how hot is it in Tokyo
+ * right now?": getWeather('Tokyo') was awaited, then speak("It is currently 25 degrees Celsius in Tokyo, with clear
+ * skies and no rain.") (the reading was 12.5). A temperature counts as read when it is within a degree of one that
+ * getWeather() gave or a fetched reply held (rounded, cut to whole degrees), in °F or from kelvin too. One the
+ * request names ("is 20 degrees warm?") or that the code compares with (temperature < 15: "below 15 degrees") is no
+ * reading. With nothing looked up at all, only for the weather as it is now ("What's the weather in Berlin?"): a
+ * question about the climate ("How cold is Moscow in winter?", "the temperature on Mars") is answered from facts.
+ */
+export function madeUpWeather(
+  request: string,
+  code: string,
+  spoken: string[],
+  lookedUp: { weather: Array<number | null>; requests: number; numbers: number[] }
+): string | null {
+  if (!WEATHER_REQUEST.test(request)) return null;
+  const named = new Set(numbersIn(request));
+  const stated = Array.from(spoken.join(' ').matchAll(STATED_TEMPERATURE), (m) => ({ text: m[0].trim(), value: (m[1] ? -1 : 1) * Number(m[2]) })).filter(
+    (t) => !named.has(Math.abs(t.value))
+  );
+  if (stated.length === 0) return null;
+  const readings = [...lookedUp.weather.filter((t): t is number => typeof t === 'number'), ...lookedUp.numbers];
+  const asRead = (value: number) =>
+    readings.some((t) => [t, (t * 9) / 5 + 32, t - 273.15, ((t - 273.15) * 9) / 5 + 32].some((c) => Math.abs(value - c) <= 1));
+  const looked = lookedUp.weather.length > 0 || lookedUp.requests > 0;
+  if (!looked) {
+    if (!CURRENT_WEATHER.test(request) || CLIMATE.test(request)) return null;
+    return `The program says ${stated[0].text} without looking the weather up: get it with const { temperature } = await getWeather("") (the city's name in the quotes, "" for where the user is) and speak its temperature.`;
+  }
+  const compared = codeNumbers(code);
+  if (!compared) return null;
+  const madeUp = stated.find((t) => !asRead(t.value) && !compared.includes(Math.abs(t.value)));
+  if (!madeUp) return null;
+  const read = lookedUp.weather.find((t): t is number => typeof t === 'number');
+  return lookedUp.weather.length > 0
+    ? `The weather numbers spoken (${madeUp.text}) don't come from getWeather()${read !== undefined ? `, which gave ${read} °C` : ''}: speak its temperature (speak(\`It is \${temperature} degrees\`)).`
+    : `The weather numbers spoken (${madeUp.text}) don't come from what the program fetched: speak the temperature its reply gives.`;
+}
+
+/** Counting in a text the request quotes ("count the words in 'the quick brown fox'"): what is counted, and the text */
+const COUNTS_QUOTED_TEXT = /\b(?:count|how many|number of)\b[^.?!"'“‘]*?\b(words?|letters?|characters?|vowels?)\b[^"'“‘]*?["“'‘](.{2,}?)["”'’]\s*[?.!]?\s*$/i;
+/** Reversing a word the request gives ("reverse the word 'stressed'", "spell hello backwards") */
+const REVERSES_WORD = /^\s*(?:please\s+)?(?:reverse|spell)\s+(?:the\s+(?:word|name)\s+)?["“'‘]?([\p{L}]{2,})["”'’]?(?:\s+backwards?)?\s*[?.!]?\s*$/iu;
+/** Arithmetic on two numbers, with one operation: "what's 17 times 23", "15% of 84", "100 divided by 8" */
+const NUMBER = String.raw`(\d+(?:\.\d+)?)`;
+const PLAIN_SUMS: Array<{ shape: RegExp; work: (a: number, b: number) => number; how: string; arity?: number }> = [
+  { shape: new RegExp(`${NUMBER}\\s*(?:%|percent)\\s+of\\s+${NUMBER}`, 'i'), work: (a, b) => (a * b) / 100, how: 'b * a / 100' },
+  { shape: new RegExp(`${NUMBER}\\s*(?:times|multiplied by|x|\\*|×)\\s*${NUMBER}`, 'i'), work: (a, b) => a * b, how: 'a * b' },
+  { shape: new RegExp(`${NUMBER}\\s*(?:plus|\\+)\\s*${NUMBER}`, 'i'), work: (a, b) => a + b, how: 'a + b' },
+  { shape: new RegExp(`${NUMBER}\\s*(?:minus|−|\\s-\\s)\\s*${NUMBER}`, 'i'), work: (a, b) => a - b, how: 'a - b' },
+  { shape: new RegExp(`${NUMBER}\\s*(?:divided by|over|/|÷)\\s*${NUMBER}`, 'i'), work: (a, b) => a / b, how: 'a / b' },
+  { shape: new RegExp(`${NUMBER}\\s*(?:°|degrees?)\\s*(?:f|fahrenheit)\\s+(?:in|to|into)\\s+(?:°?c\\b|celsius)`, 'i'), work: (a) => ((a - 32) * 5) / 9, how: '(f - 32) * 5 / 9', arity: 1 },
+  { shape: new RegExp(`${NUMBER}\\s*(?:°|degrees?)\\s*(?:c|celsius)\\s+(?:in|to|into)\\s+(?:°?f\\b|fahrenheit)`, 'i'), work: (a) => (a * 9) / 5 + 32, how: 'c * 9 / 5 + 32', arity: 1 },
+];
+
+/**
+ * The one answer a request has that can be worked out here, or null: arithmetic on the two numbers it gives with one
+ * operation (or a °F/°C conversion), a count of the words, letters, characters or vowels of a text it quotes, or a
+ * word it gives reversed. What a program is told when it says something else: how it is worked out, never the
+ * answer itself (a fix would copy it).
+ */
+function workedOut(request: string): { numbers: number[]; how: string } | { reversed: string; word: string; how: string } | null {
+  const reverse = request.match(REVERSES_WORD);
+  if (reverse) return { reversed: [...reverse[1]].reverse().join('').toLowerCase(), word: reverse[1].toLowerCase(), how: "text.split('').reverse().join('')" };
+  const count = request.match(COUNTS_QUOTED_TEXT);
+  if (count) {
+    const text = count[2];
+    const kind = count[1].toLowerCase().replace(/s$/, '');
+    const letters = text.match(/\p{L}/gu)?.length ?? 0;
+    if (kind === 'word') {
+      // Counted one way only when every word is letters ("well-known", "3-step", a dash alone count either way)
+      const words = text.trim().split(/\s+/);
+      if (!words.every((word) => /^\p{L}+(?:['’]\p{L}+)*[,.;:!?]?$/u.test(word))) return null;
+      return { numbers: [words.length], how: 'count the words with text.trim().split(/\\s+/).length' };
+    }
+    if (kind === 'letter') return { numbers: [letters], how: 'count the letters with text.match(/[a-z]/gi).length' };
+    if (kind === 'character') return { numbers: [text.length, text.replace(/\s/g, '').length], how: 'count the characters with text.length' };
+    // (y is a vowel to some: either count is the count)
+    return { numbers: [text.match(/[aeiou]/gi)?.length ?? 0, text.match(/[aeiouy]/gi)?.length ?? 0], how: 'count the vowels with text.match(/[aeiou]/gi).length' };
+  }
+  // Only its own numbers: "what is 2 plus 3 times 4" has two operations
+  const sums = PLAIN_SUMS.filter((sum) => sum.shape.test(request));
+  if (sums.length !== 1 || numbersIn(request).length !== (sums[0].arity ?? 2)) return null;
+  const [, a, b] = request.match(sums[0].shape)!;
+  return { numbers: [sums[0].work(Number(a), Number(b))], how: `work out ${sums[0].how} with the request's numbers` };
+}
+
+/** Whether a number said is the value, to as many decimal places as it was said with (12.6 for 12.6, 0.33 for 1/3) */
+const saysValue = (said: number, value: number) => {
+  const places = (String(said).split('.')[1] ?? '').length;
+  return Math.abs(Number(value.toFixed(places)) - said) < 1e-9;
+};
+
+/** The single plain string literal (no ${}) of each speak(), console.log() or alert() call in a program, or null when it doesn't parse */
+function literalSays(code: string): string[] | null {
+  let tree: AcornNode;
+  try {
+    tree = parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true });
+  } catch {
+    return null;
+  }
+  const found: string[] = [];
+  const visit = (node: unknown): void => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item);
+      return;
+    }
+    const n = node as { type?: string; callee?: any; arguments?: any[] };
+    if (n.type === 'CallExpression' && n.arguments?.length === 1) {
+      const callee = n.callee;
+      const says =
+        (callee?.type === 'Identifier' && (callee.name === 'speak' || callee.name === 'alert')) ||
+        (callee?.type === 'MemberExpression' && callee.object?.name === 'console' && callee.property?.name === 'log');
+      const arg = n.arguments[0];
+      if (says && arg.type === 'Literal' && typeof arg.value === 'string') found.push(arg.value.trim());
+      if (says && arg.type === 'TemplateLiteral' && arg.expressions.length === 0) found.push(String(arg.quasis[0]?.value?.cooked ?? '').trim());
+    }
+    for (const key of Object.keys(node)) if (key !== 'type' && key !== 'start' && key !== 'end') visit((node as Record<string, unknown>)[key]);
+  };
+  visit(tree);
+  return found;
+}
+
+/**
+ * A wrong answer typed into the program's words, for a request whose one answer can be worked out here (see
+ * workedOut): what was said is a whole plain string the program speaks (speak("Word count: 10"), for seven words
+ * quoted; a small model counting in its head), and the number in it, or the reversed word, isn't the answer. A
+ * right answer typed in passes ("17 times 23 is 391"), and so does one the program put together (speak("15% of 84
+ * is " + 0.15 * 84)) whatever its value: only the literal text is judged. Nothing to judge when the literal holds no
+ * number of its own (words around an answer said elsewhere) or the request isn't one worked out here ("how many
+ * words are in a novel?"). Not for something to make (a word counter app): what that says is for its user.
+ */
+export function wrongTypedAnswer(request: string, code: string, spoken: string[]): string | null {
+  if (asksForOutcome(request)) return null;
+  const answer = workedOut(request);
+  if (!answer) return null;
+  const literals = literalSays(code);
+  if (!literals || literals.length === 0) return null;
+  const said = spoken.map((text) => text.trim()).filter(Boolean);
+  if ('reversed' in answer) {
+    // A word of the same letters as the one given, in another order: the reversal tried, and missed
+    const sameLetters = (word: string) => [...word].sort().join('') === [...answer.word].sort().join('');
+    for (const text of said) {
+      if (!literals.includes(text)) continue;
+      const words: string[] = text.toLowerCase().match(/\p{L}+/gu) ?? [];
+      if (words.includes(answer.reversed)) return null;
+      const tried = words.find((word) => word !== answer.word && word.length === answer.word.length && sameLetters(word));
+      if (tried) return `${JSON.stringify(text.slice(0, 60))} is typed into the program, and "${tried}" isn't the word reversed: reverse it in the program (${answer.how}) and speak the result.`;
+    }
+    return null;
+  }
+  const named = new Set(numbersIn(request));
+  // A number of its own said in words the program put together (speak(0.15 * 84) after speak("Step 1: 15% is
+  // 0.15")): the answer was worked out, and the literal's numbers are working
+  if (said.some((text) => !literals.includes(text) && numbersIn(text).some((n) => !named.has(n)))) return null;
+  for (const text of said) {
+    if (!literals.includes(text)) continue;
+    const typed = numbersIn(text).filter((n) => !named.has(n));
+    if (typed.length === 0 || typed.some((n) => answer.numbers.some((value) => saysValue(n, value)))) continue;
+    return `${JSON.stringify(text.slice(0, 60))} is typed into the program, and ${typed[0]} isn't the answer: ${answer.how} in the program and speak the result.`;
+  }
+  return null;
 }
 /** The program a fix turn starts from when there was none (a fix turn is known by its program) */
 const NO_PROGRAM_YET = '// (no program yet)';
@@ -2475,8 +2736,14 @@ export class ConversationOrchestrator {
               execResult.error = copiedQuestion ? COPIED_QUESTION : SAID_BACK;
               appendRunLog('error', execResult.error);
             }
+            // It ran and said something, but not an answer (see answerFault)
+            const madeUp = !execResult.error ? this.answerFault(codeTask, executableCode, execResult, soundMark) : null;
+            if (madeUp) {
+              execResult.error = madeUp;
+              appendRunLog('error', madeUp);
+            }
             // Only talk that asks the user something: their answer comes next, nothing is missing
-            const asksUser = !saidBack && !copiedQuestion && isTalkOnly(executableCode) && /\?\s*["'`]\s*\)/.test(executableCode);
+            const asksUser = !saidBack && !copiedQuestion && !madeUp && isTalkOnly(executableCode) && /\?\s*["'`]\s*\)/.test(executableCode);
             if (asksUser) appendRunLog('retry', 'the reply asks the user a question: waiting for the answer');
             if (!execResult.error && !asksUser) {
               const missing = await this.missingOutcome(codeTask, soundMark, executableCode);
@@ -2492,6 +2759,12 @@ export class ConversationOrchestrator {
               } else {
                 for (const issue of softNotThere) appendRunLog('retry', `line ${issue.line}: ${issue.error} (the program worked: left as it is)`);
               }
+            }
+            // Things on the card that all show nothing, for a request the outcome check doesn't judge by its words
+            const blank = !execResult.error && !asksUser ? await this.blankCard(codeTask, executableCode, execResult) : null;
+            if (blank) {
+              execResult.error = blank;
+              appendRunLog('error', blank);
             }
             // Failed here, after the sandbox saw no error: nothing to download
             if (execResult.error) this.javascriptRuntime.withdrawDownload?.();
@@ -2794,6 +3067,11 @@ export class ConversationOrchestrator {
         result.error = missing;
         appendRunLog('error', missing);
       }
+    }
+    const madeUp = !result.error && !this.scheduler.getActiveTurnId() ? (this.answerFault(run.task, code, result, soundMark) ?? (await this.blankCard(run.task, code, result))) : null;
+    if (madeUp) {
+      result.error = madeUp;
+      appendRunLog('error', madeUp);
     }
     setForRecentRequests(this.correctedPrograms, run.turnId, { code, request: this.requestKey(run) }, (_turnId, v) => v.request);
     if (this.lastAction?.kind === 'code' && this.lastAction.code === run.code) this.lastAction = { ...this.lastAction, code };
@@ -3294,6 +3572,55 @@ export class ConversationOrchestrator {
   }
 
   /**
+   * What a run that said something got wrong about what it said, or null: a temperature for the weather that no
+   * look-up gave (madeUpWeather), a wrong answer typed into its words for a request whose answer is worked out here
+   * (wrongTypedAnswer); and, when the card shows nothing, nothing played and nothing is still to come, a question said
+   * again with nothing of its own (onlyRestates) or nothing said at all (saidNothing). A runtime that can't say what
+   * was looked up (as in tests) has the weather taken at its word.
+   */
+  private answerFault(request: string, code: string, result: { spokenTexts?: string[]; stillRunning?: boolean }, soundMark: { uses: number }): string | null {
+    const spoken = result.spokenTexts ?? [];
+    if (spoken.length === 0) return null;
+    const lookedUp = this.javascriptRuntime.lookedUp?.();
+    const weather = lookedUp ? madeUpWeather(request, code, spoken, lookedUp) : null;
+    if (weather) return weather;
+    const typed = wrongTypedAnswer(request, code, spoken);
+    if (typed) return typed;
+    const nothingElse = !result.stillRunning && !this.javascriptRuntime.hasVisualContent?.() && (this.javascriptRuntime.soundUseCount?.() ?? 0) <= soundMark.uses;
+    if (!nothingElse) return null;
+    const restated = onlyRestates(request, spoken);
+    if (restated) return `The program only said the question again (${JSON.stringify(restated.slice(0, 80))}), with no answer: it has to say the answer itself (work it out, or look it up, and speak it).`;
+    return saidNothing(code, spoken);
+  }
+
+  /**
+   * A card the program put things on that all show nothing (elements with no text and no size, canvases nothing
+   * was drawn on), after the moment missingOutcome gives a first frame, for a request whose words that check doesn't
+   * judge: a thing named without a verb ("a button that counts how many times I click it", "a grocery list where I
+   * can add and remove items": an empty <div> each, Qwen2.5 0.5B) or a shape it has no word for ("show a big red
+   * heart in the middle of the page": an empty <div> styled red, Qwen3.5 2B). Only for a request to make or show
+   * something, or a run that said nothing either: an empty element beside a spoken answer (a joke) hides nothing.
+   * Not judged: a program still running, one whose frames a hidden page never gets, or one that fetched and got its
+   * answer (a picture may still be loading).
+   */
+  private async blankCard(request: string, code: string, result: { spokenTexts?: string[]; stillRunning?: boolean }): Promise<string | null> {
+    const runtime = this.javascriptRuntime;
+    if (result.stillRunning || !runtime.hasDrawnContent || !runtime.hasVisualContent?.()) return null;
+    if ((result.spokenTexts ?? []).some((text) => text.trim()) && !asksForOutcome(request)) return null;
+    const waits = LISTENS_FOR_USER.test(code);
+    const drawn = () => !!runtime.hasDrawnContent?.(waits);
+    for (let waited = 0; !drawn() && waited < 1500; waited += 100) await settle(100);
+    if (drawn()) return null;
+    // (a picture still loading, or a fade-in longer than the wait, shows later)
+    if (runtime.stillAppearing?.()) return null;
+    if (/\brequestAnimationFrame\b/.test(code) && !(await framesArrive())) return null;
+    const network = runtime.networkFacts?.() ?? [];
+    if (network.length === 0 && (runtime.lookedUp?.().requests ?? 0) > 0) return null;
+    appendRunLog('retry', 'outcome check: the card holds only things that show nothing');
+    return [nothingVisible(runtime.emptyElements?.() ?? []), network.length > 0 ? `${network.join('; ')}.` : ''].filter(Boolean).join(' ');
+  }
+
+  /**
    * The blank stage (blank-fix.ts), one fix attempt: the expression the error names is replaced by
    * candidates, each tried in a hidden run (trialRun), until one runs without that error. The
    * candidates, in order: the model's pick among the page's own names (multiple choice), its
@@ -3388,7 +3715,7 @@ export class ConversationOrchestrator {
       wantsVisual && !shown()
         ? 'The program showed nothing: what it adds to document.body appears in the card on screen.'
         : wantsVisual && !drawn()
-          ? `The program put nothing visible on screen: its canvas has nothing drawn on it, or its elements are empty${emptied.length ? ` (${emptied.join(', ')} have no text and no size)` : ''}. Put text in an element (textContent, innerHTML) or give it a size (a style with width and height), or draw with the 2d context (fillRect, arc, lineTo, fill, stroke, fillText) in a function that is called.`
+          ? nothingVisible(emptied)
           : offCanvas
             ? offCanvas
           : textOnly

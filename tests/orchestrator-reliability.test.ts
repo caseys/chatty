@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { ConversationMemoryStore } from '../src/core/memory-store.ts';
-import { ConversationOrchestrator, changedLines, droppedCapabilities, failedReplyLine, onlyAsksExample, saysQuestionBack, normalizedError, promptRules } from '../src/core/orchestrator.ts';
+import { ConversationOrchestrator, changedLines, droppedCapabilities, failedReplyLine, madeUpWeather, onlyAsksExample, onlyRestates, saidNothing, saysQuestionBack, normalizedError, promptRules, wrongTypedAnswer } from '../src/core/orchestrator.ts';
 import { StateMachineCoordinator } from '../src/core/state-machine.ts';
 import { pastProgramResult } from '../src/core/history-format.ts';
 import type { ConversationMessage } from '../src/types/index.ts';
@@ -318,6 +318,240 @@ describe('a reply that says the question back', () => {
     expect(saysQuestionBack('const a = 1;\nspeak("What is 1 plus 1?")', 'What is 1 plus 1?')).toBe(false);
     // A request that is no question
     expect(saysQuestionBack('speak("Draw a cat")', 'Draw a cat')).toBe(false);
+  });
+});
+
+describe('a temperature for the weather that no look-up gave', () => {
+  const looked = (weather: Array<number | null>, requests = 0, numbers: number[] = []) => ({ weather, requests, numbers });
+  const TOKYO = 'const place = "Tokyo";\nconst { temperature, rain, sky } = await getWeather(place);\n';
+
+  it('is caught, as Qwen3.5 2B wrote it for "how hot is it in Tokyo right now?"', () => {
+    const said = 'It is currently 25 degrees Celsius in Tokyo, with clear skies and no rain.';
+    expect(madeUpWeather('how hot is it in Tokyo right now?', `${TOKYO}speak("${said}");`, [said], looked([12.5]))).toBe(
+      "The weather numbers spoken (25 degrees) don't come from getWeather(), which gave 12.5 °C: speak its temperature (speak(`It is ${temperature} degrees`))."
+    );
+  });
+
+  it('is caught with nothing looked up, for the weather now, and when the look-up got no temperature', () => {
+    expect(madeUpWeather("What's the weather in Berlin?", 'speak("It is 55 °C in Berlin.");', ['It is 55 °C in Berlin.'], looked([]))).toBe(
+      'The program says 55 °C without looking the weather up: get it with const { temperature } = await getWeather("") (the city\'s name in the quotes, "" for where the user is) and speak its temperature.'
+    );
+    expect(madeUpWeather('is it cold outside?', 'speak("It is -3 degrees.");', ['It is -3 degrees.'], looked([]))).toContain('-3 degrees');
+    expect(madeUpWeather('how hot is it in Tokyo right now?', `${TOKYO}speak("It is 20 degrees.");`, ['It is 20 degrees.'], looked([null]))).toContain("don't come from getWeather()");
+    // A fetch whose reply held no such number
+    expect(
+      madeUpWeather("what's the weather in Paris today?", 'const r = await fetch(url);\nspeak("It is 31 degrees.");', ['It is 31 degrees.'], looked([], 1, [48.8, 2.3, 14.2]))
+    ).toContain('what the program fetched');
+  });
+
+  it('leaves the reading spoken rounded, cut, in °F or from kelvin, and a reply with no temperature', () => {
+    const tokyo = (said: string, reading: Array<number | null> = [12.5]) =>
+      madeUpWeather('how hot is it in Tokyo right now?', `${TOKYO}speak(\`${said}\`);`, [said], looked(reading));
+    expect(tokyo('It is 12.5 degrees Celsius in Tokyo.')).toBeNull();
+    expect(tokyo('It is 13°C in Tokyo.')).toBeNull();
+    expect(tokyo('It is 12 degrees in Tokyo.')).toBeNull();
+    expect(tokyo('It is 54.5 °F in Tokyo.')).toBeNull();
+    expect(tokyo('It is 55 degrees Fahrenheit in Tokyo.')).toBeNull();
+    expect(tokyo('It is -2 degrees.', [-1.6])).toBeNull();
+    expect(tokyo("It's clear and dry in Tokyo.")).toBeNull();
+    // Fetched in kelvin and worked out
+    expect(
+      madeUpWeather("what's the weather in Oslo now?", 'const r = await (await fetch(url)).json();\nspeak(`It is ${Math.round(r.main.temp - 273.15)} degrees.`);', ['It is 12 degrees.'], looked([], 1, [285.6]))
+    ).toBeNull();
+  });
+
+  it('leaves a temperature the request names, a threshold the code compares with, and the climate', () => {
+    // The user's own number
+    expect(madeUpWeather('is 20 degrees warm?', 'speak("20 degrees is mild.");', ['20 degrees is mild.'], looked([]))).toBeNull();
+    expect(
+      madeUpWeather(
+        'is it warmer than 20 degrees in Paris today?',
+        'const { temperature } = await getWeather("Paris");\nspeak(temperature > 20 ? "Yes, above 20 degrees." : "No, under 20 degrees.");',
+        ['No, under 20 degrees.'],
+        looked([14])
+      )
+    ).toBeNull();
+    // The code's own threshold, said with the reading
+    expect(
+      madeUpWeather('should I bring a jacket today?', 'const { temperature } = await getWeather("");\nif (temperature < 15) speak("Yes: it is below 15 degrees.");', ['Yes: it is below 15 degrees.'], looked([9.8]))
+    ).toBeNull();
+    // Facts, not today's weather: nothing to look up
+    expect(madeUpWeather('How cold is Moscow in winter?', 'speak("About -10 degrees Celsius.");', ['About -10 degrees Celsius.'], looked([]))).toBeNull();
+    expect(madeUpWeather('what temperature does water boil at?', 'speak("100 degrees Celsius.");', ['100 degrees Celsius.'], looked([]))).toBeNull();
+    expect(madeUpWeather("what's the weather like on Mars?", 'speak("About -60 degrees.");', ['About -60 degrees.'], looked([]))).toBeNull();
+  });
+
+  it('leaves temperatures that are not the weather: a conversion, a story, an app', () => {
+    expect(madeUpWeather('convert 20°C to F', 'speak("20°C is 68 °F.");', ['20°C is 68 °F.'], looked([]))).toBeNull();
+    expect(
+      madeUpWeather('a temperature converter between Celsius and Fahrenheit', 'speak("0 degrees Celsius is 32 degrees Fahrenheit.");', ['0 degrees Celsius is 32 degrees Fahrenheit.'], looked([]))
+    ).toBeNull();
+    expect(
+      madeUpWeather('write one sentence describing the weather in the opening of my novel', 'speak("It was a crisp 4 degrees.");', ['It was a crisp 4 degrees.'], looked([12]))
+    ).toBeNull();
+  });
+});
+
+describe('a wrong answer typed into what the program says', () => {
+  // Nine words
+  const WORDS = "count the words in 'the quick brown fox jumps over the lazy dog'";
+
+  it('is caught when the request has one answer worked out here, and the typed one is another', () => {
+    expect(wrongTypedAnswer(WORDS, 'speak("Word count: 10");', ['Word count: 10'])).toBe(
+      '"Word count: 10" is typed into the program, and 10 isn\'t the answer: count the words with text.trim().split(/\\s+/).length in the program and speak the result.'
+    );
+    expect(wrongTypedAnswer('what is 17 times 23?', 'console.log(`The answer is 381`);', ['The answer is 381'])).toBe(
+      '"The answer is 381" is typed into the program, and 381 isn\'t the answer: work out a * b with the request\'s numbers in the program and speak the result.'
+    );
+    expect(wrongTypedAnswer("what's 15% of 84", 'speak("15% of 84 is 12");', ['15% of 84 is 12'])).toContain("12 isn't the answer");
+    expect(wrongTypedAnswer("how many vowels in 'banana split'?", "speak('There are 5 vowels.');", ['There are 5 vowels.'])).toContain('count the vowels');
+    expect(wrongTypedAnswer('what is 72°F in Celsius?', 'speak("72°F is 20°C.");', ['72°F is 20°C.'])).toContain('(f - 32) * 5 / 9');
+    expect(wrongTypedAnswer("reverse the word 'stressed'", 'speak("Reversed: desstres");', ['Reversed: desstres'])).toBe(
+      '"Reversed: desstres" is typed into the program, and "desstres" isn\'t the word reversed: reverse it in the program (text.split(\'\').reverse().join(\'\')) and speak the result.'
+    );
+    // The answer is never in the message: a fix would copy it
+    expect(wrongTypedAnswer(WORDS, 'speak("Word count: 10");', ['Word count: 10'])).not.toMatch(/\b9\b/);
+  });
+
+  it('leaves a right answer typed in, rounded as said', () => {
+    expect(wrongTypedAnswer('what is 17 times 23?', 'speak("17 times 23 is 391");', ['17 times 23 is 391'])).toBeNull();
+    expect(wrongTypedAnswer(WORDS, 'speak("Word count: 9");', ['Word count: 9'])).toBeNull();
+    expect(wrongTypedAnswer("what's 15% of 84", 'speak("15% of 84 is 12.6");', ['15% of 84 is 12.6'])).toBeNull();
+    expect(wrongTypedAnswer('what is 10 divided by 3', 'speak("About 3.33");', ['About 3.33'])).toBeNull();
+    expect(wrongTypedAnswer("reverse 'hello'", 'speak("olleh");', ['olleh'])).toBeNull();
+    expect(wrongTypedAnswer("reverse the word 'stressed'", 'speak("Stressed reversed is desserts.");', ['Stressed reversed is desserts.'])).toBeNull();
+    // Words that count more than one way: not judged
+    expect(wrongTypedAnswer("count the words in 'a well-known idea'", 'speak("3 words");', ['3 words'])).toBeNull();
+    expect(wrongTypedAnswer("count the words in 'a 3-step plan — easy'", 'speak("6 words");', ['6 words'])).toBeNull();
+    // With the space or without
+    expect(wrongTypedAnswer("how many characters in 'hi there'", 'speak("7 characters");', ['7 characters'])).toBeNull();
+    expect(wrongTypedAnswer("how many characters in 'hi there'", 'speak("8 characters");', ['8 characters'])).toBeNull();
+  });
+
+  it('leaves an answer the program put together, whatever its value, and words with no answer in them', () => {
+    expect(wrongTypedAnswer("what's 15% of 84", 'speak("15% of 84 is " + 0.15 * 85);', ['15% of 84 is 12.75'])).toBeNull();
+    expect(wrongTypedAnswer("what's 15% of 84", 'const answer = 0.15 * 84;\nspeak(`15% of 84 is ${answer}`);', ['15% of 84 is 12.6'])).toBeNull();
+    expect(wrongTypedAnswer('what is 17 times 23?', 'console.log(17 * 23);', ['391'])).toBeNull();
+    expect(wrongTypedAnswer("what's 15% of 84", 'speak("Working out 15% of 84.");\nspeak(0.15 * 84);', ['Working out 15% of 84.', '12.6'])).toBeNull();
+    // Working typed in, and the answer worked out and said too
+    expect(wrongTypedAnswer("what's 15% of 84", 'speak("Step 1: 15% is 0.15");\nspeak(0.15 * 84);', ['Step 1: 15% is 0.15', '12.6'])).toBeNull();
+    expect(wrongTypedAnswer("reverse the word 'stressed'", 'speak("Here it is reversed!");', ['Here it is reversed!'])).toBeNull();
+  });
+
+  it('leaves requests not worked out here, and things to make', () => {
+    expect(wrongTypedAnswer('how many words are in a novel?', 'speak("About 90000 words.");', ['About 90000 words.'])).toBeNull();
+    expect(wrongTypedAnswer('what is 2 plus 3 times 4', 'speak("It is 20.");', ['It is 20.'])).toBeNull();
+    expect(wrongTypedAnswer('what is half of three quarters', 'speak("It is 0.4.");', ['It is 0.4.'])).toBeNull();
+    expect(wrongTypedAnswer('tell me a joke about cats', 'speak("Why did 2 cats...");', ['Why did 2 cats...'])).toBeNull();
+    expect(wrongTypedAnswer('a word counter for whatever I type in a text area', 'speak("Words: 0");', ['Words: 0'])).toBeNull();
+    expect(wrongTypedAnswer('a tip calculator for a 15% tip on 80', 'speak("Tip: 0");', ['Tip: 0'])).toBeNull();
+  });
+});
+
+describe('a reply that only says the question again', () => {
+  it('is caught as small models said it, in a program or alone', () => {
+    // Qwen3 0.6B, each passed before
+    expect(onlyRestates("what's 15% of 80", ["What's 15% of 80?"])).toBe("What's 15% of 80?");
+    expect(onlyRestates('what is half of three quarters', ['You asked what is half of three quarters.'])).not.toBeNull();
+    expect(onlyRestates('should I bring a jacket today?', ['Should I bring a jacket today?'])).not.toBeNull();
+    expect(onlyRestates("what's my IP address?", ["What's your IP address?"])).not.toBeNull();
+    expect(onlyRestates("what's a good name for a rock band", ["What's a good name for a rock band?"])).not.toBeNull();
+    expect(onlyRestates("help me remember my friend's birthday, any tricks?", ["Help me remember my friend's birthday! What can I do?"])).not.toBeNull();
+    expect(onlyRestates('Who was Ada Lovelace?', ['Ada Lovelace.'])).not.toBeNull();
+    // A choice question said back as a question is no answer
+    expect(onlyRestates('Which is bigger, 7 or 9?', ['Which is bigger, 7 or 9?'])).not.toBeNull();
+  });
+
+  it("leaves answers in the question's words, a yes or no said as a statement, and questions back", () => {
+    expect(onlyRestates('What is the capital of France?', ['The capital of France is Paris.'])).toBeNull();
+    expect(onlyRestates("what's 17 times 23", ['17 times 23 is 391'])).toBeNull();
+    // Wrong, but an answer
+    expect(onlyRestates('is 91 a prime number', ['91 is a prime number.'])).toBeNull();
+    expect(onlyRestates('is it raining where I am?', ['It is raining.'])).toBeNull();
+    expect(onlyRestates('is it raining where I am?', ['No.'])).toBeNull();
+    // A choice answered in the words it offers
+    expect(onlyRestates('Which is bigger, 7 or 9?', ['9 is bigger.'])).toBeNull();
+    expect(onlyRestates('Is the earth round or flat?', ['The earth is round.'])).toBeNull();
+    expect(onlyRestates('Is 7 odd or even?', ['7 is odd.'])).toBeNull();
+    // Asking the user to choose
+    expect(onlyRestates('Who was Ada Lovelace?', ['Which Ada do you mean?'])).toBeNull();
+    expect(onlyRestates('Who is John?', ['Which John?'])).toBeNull();
+    // Nothing said, a request to make something, a request that is no question
+    expect(onlyRestates('Who was Ada Lovelace?', [])).toBeNull();
+    expect(onlyRestates('can you draw a cat?', ['Can you draw a cat?'])).toBeNull();
+    expect(onlyRestates('say something encouraging', ['Something encouraging!'])).toBeNull();
+  });
+
+  it('is judged only when the card shows nothing and nothing played', () => {
+    const run = (runtime: object) =>
+      (ConversationOrchestrator.prototype as any).answerFault.call(
+        { javascriptRuntime: runtime },
+        "what's 15% of 80",
+        'const result = 80 * 0.15;\nspeak("What\'s 15% of 80?");',
+        { spokenTexts: ["What's 15% of 80?"] },
+        { uses: 0 }
+      );
+    expect(run({ hasVisualContent: () => false, soundUseCount: () => 0 })).toContain('only said the question again');
+    expect(run({ hasVisualContent: () => true, soundUseCount: () => 0 })).toBeNull();
+    expect(run({ hasVisualContent: () => false, soundUseCount: () => 1 })).toBeNull();
+  });
+});
+
+describe('a run that said nothing', () => {
+  it('is caught when its speak() had no words, as Qwen3 0.6B wrote it', () => {
+    expect(saidNothing('speak();', [''])).toBe('The program said nothing: speak() was called with no words. Put the reply in it: speak("…").');
+    expect(saidNothing('console.log("Waves and tides in the ocean\'s embrace.");\nspeak();\nspeak()', ['', ''])).toContain("console.log() writes isn't read out");
+    expect(saidNothing('const daysLeft = 5;\n\nawait speak();', [''])).not.toBeNull();
+    expect(saidNothing("speak('')", [''])).not.toBeNull();
+  });
+
+  it('leaves a run that said something, and programs that wait, keep or fetch without words', () => {
+    expect(saidNothing('speak("Hi");\nspeak();', ['Hi', ''])).toBeNull();
+    // Nothing said, but no empty speak() either (a silent program is not this)
+    expect(saidNothing('const x = 1;', [])).toBeNull();
+    expect(saidNothing('speak(result);', [''])).toBeNull();
+    expect(saidNothing('navigator.clipboard.writeText(new Date().toDateString());\nspeak();', [''])).toBeNull();
+    expect(saidNothing('localStorage.setItem("name", "Casey");\nspeak();', [''])).toBeNull();
+    expect(saidNothing('setTimeout(() => speak("Time is up"), 300000);\nspeak();', [''])).toBeNull();
+    expect(saidNothing('document.addEventListener("keydown", (e) => speak(e.key));\nspeak();', [''])).toBeNull();
+  });
+
+  it('is judged only when the card shows nothing and nothing played', () => {
+    const run = (runtime: object, stillRunning = false) =>
+      (ConversationOrchestrator.prototype as any).answerFault.call({ javascriptRuntime: runtime }, 'write a four-line poem about autumn', 'speak();', { spokenTexts: [''], stillRunning }, { uses: 0 });
+    expect(run({ hasVisualContent: () => false, soundUseCount: () => 0 })).toContain('said nothing');
+    expect(run({ hasVisualContent: () => true, soundUseCount: () => 0 })).toBeNull();
+    expect(run({ hasVisualContent: () => false, soundUseCount: () => 1 })).toBeNull();
+    expect(run({ hasVisualContent: () => false, soundUseCount: () => 0 }, true)).toBeNull();
+  });
+});
+
+describe('a card whose things all show nothing', () => {
+  const blank = (request: string, runtime: object, result: object = { spokenTexts: [] }, code = 'document.body.appendChild(document.createElement("div"));') =>
+    (ConversationOrchestrator.prototype as any).blankCard.call({ javascriptRuntime: runtime }, request, code, result) as Promise<string | null>;
+  const empty = { hasVisualContent: () => true, hasDrawnContent: () => false, emptyElements: () => ['div#count'], networkFacts: () => [], lookedUp: () => ({ weather: [], requests: 0, numbers: [] }) };
+
+  it('is caught for a thing named without a verb, and for a shape the outcome check has no word for', async () => {
+    // Qwen2.5 0.5B: an empty <div id="count"> and nothing said
+    expect(await blank('a button that counts how many times I click it', empty)).toBe(
+      'The program put nothing visible on screen: its canvas has nothing drawn on it, or its elements are empty (div#count have no text and no size). Put text in an element (textContent, innerHTML) or give it a size (a style with width and height), or draw with the 2d context (fillRect, arc, lineTo, fill, stroke, fillText) in a function that is called.'
+    );
+    // Qwen3.5 2B: an empty red <div>, and words that say it was drawn
+    expect(await blank('show a big red heart in the middle of the page', empty, { spokenTexts: ['A big red heart has been drawn in the middle of the page.'] })).toContain('nothing visible');
+    // The data it fetched never came: why, too
+    expect(await blank('a list of posts', { ...empty, networkFacts: () => ['fetch(posts.json) answered 404'], lookedUp: () => ({ weather: [], requests: 1, numbers: [] }) })).toContain('answered 404.');
+  });
+
+  it('leaves a card that shows something, a spoken answer beside an empty element, and what may still come', async () => {
+    expect(await blank('a button that counts how many times I click it', { ...empty, hasDrawnContent: () => true })).toBeNull();
+    expect(await blank('tell me a joke about cats', empty, { spokenTexts: ['Why did the cat sit on the computer? To keep an eye on the mouse.'] })).toBeNull();
+    expect(await blank('a button that counts how many times I click it', empty, { spokenTexts: [], stillRunning: true })).toBeNull();
+    // Fetched and answered: a picture may still be loading
+    expect(await blank('show a random dog picture from the dog.ceo api', { ...empty, lookedUp: () => ({ weather: [], requests: 1, numbers: [] }) })).toBeNull();
+    // A picture still loading, or a fade-in longer than the wait
+    expect(await blank('show a big red heart in the middle of the page', { ...empty, stillAppearing: () => true })).toBeNull();
+    // Nothing on the card at all is the outcome check's (or nobody's) to judge
+    expect(await blank('a button that counts how many times I click it', { ...empty, hasVisualContent: () => false })).toBeNull();
   });
 });
 

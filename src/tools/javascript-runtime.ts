@@ -2108,6 +2108,35 @@ export class JavascriptRuntime {
     }
   }
 
+  /**
+   * What the current run looked up: the temperature of each getWeather() call (null when it got none), how many
+   * fetch() and XMLHttpRequest requests it made, and the numbers their replies held
+   */
+  lookedUp(): { weather: Array<number | null>; requests: number; numbers: number[] } {
+    let page = { requests: 0, numbers: [] as number[] };
+    try {
+      const own = (this.activeIframe?.contentWindow as unknown as { __chattyLookedUp?: () => typeof page } | null)?.__chattyLookedUp;
+      if (typeof own === 'function') page = own();
+    } catch {
+      // the frame went away
+    }
+    return { weather: this.weatherReadings.slice(), ...page };
+  }
+  private weatherReadings: Array<number | null> = [];
+
+  /** Whether something on the card may still appear: a picture or video still loading, or a CSS animation or transition running (a fade-in) */
+  stillAppearing(): boolean {
+    try {
+      const doc = this.activeIframe?.contentDocument;
+      if (!doc) return false;
+      if (Array.from(doc.images).some((img) => !img.complete)) return true;
+      if (Array.from(doc.querySelectorAll('video')).some((video) => video.readyState < 2 && !video.error)) return true;
+      return typeof doc.getAnimations === 'function' && doc.getAnimations().some((animation) => animation.playState === 'running' || animation.pending);
+    } catch {
+      return false;
+    }
+  }
+
   /** What the card's program's network requests did (no answer, an error status, a reply read too early), as sentences */
   networkFacts(): string[] {
     try {
@@ -3640,12 +3669,25 @@ export class JavascriptRuntime {
       }
     };
     const netUrl = (input) => String(input && typeof input === 'object' && input.url ? input.url : input).slice(0, 80);
+    // The numbers the network's replies held, and how many requests were made: a temperature the program
+    // speaks came from one of them, or it made it up ("55 °C in Berlin" with nothing fetched, see madeUpWeather)
+    let __chattyRequests = 0;
+    const __chattyFetched = [];
+    const noteFetched = (text) => {
+      for (const m of String(text).slice(0, 200000).matchAll(/-?\\d+(?:\\.\\d+)?/g)) {
+        if (__chattyFetched.length >= 5000) return;
+        __chattyFetched.push(Number(m[0]));
+      }
+    };
+    window.__chattyLookedUp = () => ({ requests: __chattyRequests, numbers: __chattyFetched.slice() });
     try {
       const pageFetch = window.fetch.bind(window);
-      window.fetch = (input, init) =>
-        pageFetch(input, init).then(
+      window.fetch = (input, init) => {
+        __chattyRequests++;
+        return pageFetch(input, init).then(
           (response) => {
             if (!response.ok) noteNet('fetch(' + shown(netUrl(input)) + ') answered ' + response.status + netPlace(netUrl(input)));
+            try { response.clone().text().then(noteFetched, () => {}); } catch {}
             return response;
           },
           (err) => {
@@ -3653,6 +3695,7 @@ export class JavascriptRuntime {
             throw err;
           }
         );
+      };
     } catch {}
     try {
       const X = XMLHttpRequest.prototype;
@@ -3665,7 +3708,11 @@ export class JavascriptRuntime {
       X.send = function (...args) {
         const url = this.__chattyUrl || '';
         this.addEventListener('error', () => noteNet('XMLHttpRequest to ' + shown(url) + ' got no answer' + (netPlace(url) || " (nothing is there, or the site doesn't let pages read it)")));
-        this.addEventListener('load', () => { if (this.status >= 400) noteNet('XMLHttpRequest to ' + shown(url) + ' answered ' + this.status + netPlace(url)); });
+        __chattyRequests++;
+        this.addEventListener('load', () => {
+          if (this.status >= 400) noteNet('XMLHttpRequest to ' + shown(url) + ' answered ' + this.status + netPlace(url));
+          try { if (this.responseType === '' || this.responseType === 'text') noteFetched(this.responseText); } catch {}
+        });
         // Until the task that sent it ends, nothing can have come back
         this.__chattySending = true;
         setTimeout(() => { this.__chattySending = false; }, 0);
@@ -5392,7 +5439,12 @@ export class JavascriptRuntime {
           opts?.audioContextAccessor
         );
       } else if (data.type === 'getWeather') {
-        result = await fetchWeather(data.place);
+        // (a reading that failed is kept as null: the program got no temperature)
+        this.weatherReadings.push(null);
+        const reading = this.weatherReadings.length - 1;
+        const weather = await fetchWeather(data.place);
+        this.weatherReadings[reading] = weather.temperature;
+        result = weather;
       } else {
         result = await fetchWikipediaSummary(String(data.query ?? ''));
       }
@@ -5425,6 +5477,7 @@ export class JavascriptRuntime {
     // Each program run is counted on its own (what its MIDI was, see midiSummary)
     resetMidiSummary();
     this.notesSent = 0;
+    this.weatherReadings = [];
 
     return new Promise((resolve) => {
       const settle = (
