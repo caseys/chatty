@@ -224,4 +224,6 @@ export const RULE_CASES: ReadonlyArray<{ request: string; rules: RuleName[] }> =
   { request: 'Play a song on the piano', rules: ['music'] },
   { request: 'Play a beep', rules: ['fx'] },
   { request: 'Make a spinning cube', rules: ['card', 'three'] },
+  { request: 'Play a sound when the snake eats food', rules: ['card', 'canvas', 'fx'] },
+  { request: 'Make a star that twinkles to music', rules: ['card', 'canvas', 'music'] },
 ];

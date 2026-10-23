@@ -221,7 +221,7 @@ function soundKinds(said: string): { music: boolean; effects: boolean } {
   const music = MUSIC_REQUEST.test(request) || TONE_PROGRAM.test(request);
   const effects = EFFECT_REQUEST.test(request);
   if (!music && !effects) {
-    const either = SOUND_REQUEST.test(request) && !PLAYS_A_GAME.test(request);
+    const either = SOUND_WORDS_REQUEST.test(request) || (SOUND_REQUEST.test(request) && !PLAYS_A_GAME.test(request));
     return { music: either, effects: either };
   }
   return { music, effects };
@@ -231,7 +231,7 @@ const SOUND_WORDS_REQUEST = new RegExp(SOUND_WORDS, 'i');
 const DRAWN_GAMES = String.raw`pong|tetris|breakout|flappy|asteroids|space invaders|pac-?man|chess ?boards?|checker ?boards?`;
 /**
  * A game, which a bare "play" is for: no sound ("Make a pong game I play with the arrow keys" got both sound
- * rules). A sound named in it still is ("a snake game with a beep when it eats")
+ * rules). A sound named in it still is ("Play a sound when the snake eats food")
  */
 const PLAYS_A_GAME = new RegExp(String.raw`\bgames?\b|\b(?:${DRAWN_GAMES}|snake|tic-?tac-?toe|chess|checkers|hangman|solitaire|sudoku|blackjack|poker|cards|catch|tag|fetch)\b`, 'i');
 const DRAWING_REQUEST = new RegExp(
@@ -408,18 +408,22 @@ const CSS_MOTION_REQUEST =
   /\b(?:fad(?:e|es|ed|ing)|slid(?:e|es|ing)|puls(?:e|es|ing)|grow(?:s|ing)?|shrink\w*|transitions?|keyframes|css|wiggl\w*|shak(?:e|es|ing)|glow\w*|blink\w*|flash\w*|hover\w*)\b/i;
 /**
  * Drawing words that also name a song or a sound: "Twinkle Twinkle Little Star", "Over the Rainbow", a square
- * wave, a drum pattern ("Play Twinkle Twinkle Little Star on the piano" got the drawing and card rules)
+ * wave, a drum pattern ("Play Twinkle Twinkle Little Star on the piano" got the drawing and card rules). Not a
+ * bare pattern: "a drum machine with a pattern grid" is one to see
  */
-const HEARD_WORDS = /\b(?:stars?|sky|skies|rainbows?|circles?|squares?|triangles?|shapes?|patterns?)\b/gi;
+const HEARD_WORDS = /\b(?:stars?|sky|skies|rainbows?|circles?|squares?|triangles?|shapes?|(?:drum|beat|rhythm|bass|note) patterns?)\b/gi;
+/** One of those made or animated ("Make a star that twinkles to music"), which is to see: not a square wave */
+const MAKES_SEEN_THING =
+  /\b(?:make|create|build|animate|add)\s+(?:me\s+)?(?:(?:a|an|some|the)\s+)?(?:[\w'-]+\s+){0,2}?(?:stars?|sky|skies|rainbows?|circles?|squares?|triangles?|shapes?)\b(?!\s+waves?\b)/i;
 /**
  * The request as the drawing and card rules read it: in a request for sound that asks to see nothing (no verb
- * for it, nothing tapped or dragged, no interface, diagram or 3D scene), those words are left out, as
- * namesVisualThing does for the outcome check. What moves ("a bouncing ball that beeps") is still drawn
+ * for it, none of those words made, nothing tapped or dragged, no interface, diagram or 3D scene), those
+ * words are left out, as namesVisualThing does for the outcome check. What moves ("a bouncing ball that beeps") is still drawn
  */
 const seenIn = (request: string): string => {
   const { music, effects } = soundKinds(request);
   const heardOnly =
-    (music || effects) && !ASKS_TO_SEE.test(request) && !ASKS_FOR_INPUT.test(request) && !INTERFACE_THING.test(request) && !DIAGRAM_REQUEST.test(request) && !THREE_D_SCENE.test(request);
+    (music || effects) && !ASKS_TO_SEE.test(request) && !MAKES_SEEN_THING.test(request) && !ASKS_FOR_INPUT.test(request) && !INTERFACE_THING.test(request) && !DIAGRAM_REQUEST.test(request) && !THREE_D_SCENE.test(request);
   return heardOnly ? request.replace(HEARD_WORDS, '') : request;
 };
 /** What the card rule is for: anything shown, and what is played with keys or the pointer or moves in CSS */

@@ -14,7 +14,7 @@ describe('song titles, games and 3D', () => {
       expect(rulesNamedBy(r).has('canvas'), r).toBe(false);
       expect(rulesNamedBy(r).has('card'), r).toBe(false);
     }
-    for (const r of ['Draw a star', 'Draw stars in the night sky while soft piano music plays', 'Show a star that twinkles to a piano tune', 'A bouncing ball that beeps when it hits a wall', 'Make a circle that plays a chime when I tap it'])
+    for (const r of ['Draw a star', 'Draw stars in the night sky while soft piano music plays', 'Show a star that twinkles to a piano tune', 'A bouncing ball that beeps when it hits a wall', 'Make a circle that plays a chime when I tap it', 'Make a drum machine with a pattern grid', 'Make a star that twinkles to music'])
       expect(rulesNamedBy(r).has('card') && rulesNamedBy(r).has('canvas'), r).toBe(true);
   });
 
@@ -25,6 +25,7 @@ describe('song titles, games and 3D', () => {
     expect(sounds('play a beep')).toEqual(['fx']);
     expect(sounds('Play a snake game that beeps when the snake eats')).toEqual(['fx']);
     expect(sounds('Play something')).toEqual(['music', 'fx']);
+    expect(sounds('Play a sound when the snake eats food')).toEqual(['music', 'fx']);
   });
 
   it('gives 3D to a 3D scene or a game that asks for 3D, not to every game', () => {
