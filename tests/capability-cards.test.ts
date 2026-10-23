@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CAPABILITY_CARDS } from '../src/core/capability-cards.ts';
-import { OPTIONAL_RULES, RULE_CASES } from '../src/core/rule-filter.ts';
+import { OPTIONAL_RULES, RULE_CASES } from '../src/core/rule-cases.ts';
 
 const words = (request: string): string[] => request.toLowerCase().replace(/[’']/g, '').split(/[^a-z0-9]+/).filter(Boolean);
 /** Every run of four words in a row: two requests sharing one are near-copies */
@@ -19,7 +19,7 @@ describe('the capability cards', () => {
     }
   });
 
-  it('repeats no labeled rule-filter case, nor shares a run of four words with one', () => {
+  it('repeats no labeled rule case, nor shares a run of four words with one', () => {
     const caseRuns = new Map<string, string>();
     for (const c of RULE_CASES) for (const run of runsOfFour(c.request)) caseRuns.set(run, c.request);
     const cases = new Set(RULE_CASES.map((c) => words(c.request).join(' ')));

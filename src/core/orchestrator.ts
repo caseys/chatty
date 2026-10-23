@@ -51,9 +51,7 @@ import { applyAssignmentFixes, moveToContext, renameMembers, unknownMemberError,
 import { AFTER_HEAVY_MS, settle, settleOnIos } from './settle.ts';
 import { isAppleMobile, LOCAL_CHAT_MODELS } from './settings.ts';
 import { redeclaredCut } from './repeat-guard.ts';
-import { calibrateRules, RULE_CUTOFFS, scoredRules, yesScorer, type RuleName } from './rule-filter.ts';
-
-type ScoredRules = { kept: ReadonlySet<RuleName>; decided: ReadonlySet<RuleName> };
+import type { RuleName } from './rule-cases.ts';
 import { withActivity } from './activity-breadcrumbs.ts';
 import { MIDI_OUTPUT, MIDI_PLAIN_FORM, MIDI_RULE } from './midi-form.ts';
 import { copiedExampleNotes, emptyExampleNotes, restoreMidiOutputLine, routePlainSendToMidi, useRequestedInstrument, useRequestedShape, wrongInstrument } from './example-copy.ts';
@@ -223,7 +221,7 @@ function soundKinds(said: string): { music: boolean; effects: boolean } {
   const music = MUSIC_REQUEST.test(request) || TONE_PROGRAM.test(request);
   const effects = EFFECT_REQUEST.test(request);
   if (!music && !effects) {
-    const either = SOUND_REQUEST.test(request);
+    const either = SOUND_WORDS_REQUEST.test(request) || (SOUND_REQUEST.test(request) && !PLAYS_A_GAME.test(request));
     return { music: either, effects: either };
   }
   return { music, effects };
@@ -231,6 +229,11 @@ function soundKinds(said: string): { music: boolean; effects: boolean } {
 const SOUND_WORDS_REQUEST = new RegExp(SOUND_WORDS, 'i');
 /** Games that are drawn whatever the request says ("Let me play pong against the computer" got no drawing rule) */
 const DRAWN_GAMES = String.raw`pong|tetris|breakout|flappy|asteroids|space invaders|pac-?man|chess ?boards?|checker ?boards?`;
+/**
+ * A game, which a bare "play" is for: no sound ("Make a pong game I play with the arrow keys" got both sound
+ * rules). A sound named in it still is ("Play a sound when the snake eats food")
+ */
+const PLAYS_A_GAME = new RegExp(String.raw`\bgames?\b|\b(?:${DRAWN_GAMES}|snake|tic-?tac-?toe|chess|checkers|hangman|solitaire|sudoku|blackjack|poker|cards|catch|tag|fetch)\b`, 'i');
 const DRAWING_REQUEST = new RegExp(
   String.raw`\b(?:draw|paint|sketch|picture|image|art\b|animat|game|simulat|bounc|canvas|scene|shape|circle|square|triangle|stars?\b|sky|rainbow|landscape|pattern|fractal|particle|mov(?:e|ing)|getContext|(?:${DRAWN_GAMES})\b)`,
   'i'
@@ -268,7 +271,7 @@ const IN_WORDS = /\b(?:with|in|using) (?:\w+ )?words\b|\bword ?pictures?\b/i;
 const CANVAS_REQUEST = {
   test: (request: string) =>
     !IN_WORDS.test(request) &&
-    (CANVAS_WORDS.test(request) || (GAME_WORDS.test(request) && !GAME_IN_WORDS.test(request))),
+    (CANVAS_WORDS.test(seenIn(request)) || (GAME_WORDS.test(request) && !GAME_IN_WORDS.test(request))),
 };
 /** A request for something the user does to it: tap, click, press, type in, drag, move by mouse or keys */
 const ASKS_FOR_INPUT = /\b(?:tap(?:s|ping)?|click(?:s|ing)?|pressing|swipe|drag(?:ging)?|typ(?:e|ing) (?:in|into)|arrow keys|keyboard|mouse or touch|(?:with|by|using) (?:the |your )?mouse)\b/i;
@@ -278,13 +281,16 @@ const MOTION_REQUEST = /\b(?:animat\w*|bounc\w*|mov(?:ing|es)|spinn?(?:ing)?|rot
 const MOVES_WITH_USER = /\baddEventListener\s*\(\s*['"`](?:mouse|pointer|touch|key|wheel)\w*['"`]|\bon(?:mouse|pointer|touch|key|wheel)\w*\s*=/i;
 const THREE_D_SCENE = /(?:\b3d\b|\bthree[- ]?d\b|\brender|\bscene|\bcube|\bsphere|\bwebgl|\brotat|\bspin|\borbit|THREE\.)/i;
 const THREE_D_REQUEST = new RegExp(`${THREE_D_SCENE.source}|\\bgames?\\b`, 'i');
-/** The 3D rule: not for a game played in words, which put a renderer's canvas in a guessing game, as the canvas rule did */
-const THREE_RULE_REQUEST = { test: (request: string) => THREE_D_SCENE.test(request) || (GAME_WORDS.test(request) && !GAME_IN_WORDS.test(request)) };
+/**
+ * The 3D rule: for a 3D scene or shape, not for every game. A game is drawn flat unless it asks for 3D ("a 3D
+ * racing game"): "Make a snake game", a pong game and a tic-tac-toe game of tapped squares all got the 3D rule
+ */
+const THREE_RULE_REQUEST = THREE_D_SCENE;
 const DIAGRAM_REQUEST = /\b(?:svg|diagram|icon|chart|graph|logo|vector|flowchart|map)/i;
 /** Things that must appear on screen: an app, a form, a to-do list, a timer */
 const INTERFACE_THING =
   /\b(?:app|calculator|converter|form(?!\s+of\b)|button|input|slider|todo|to-do|timer|stopwatch|count ?down|clock|dashboard|widget|tracker|quiz|counter|picker|toggle|checklist|planner|calendar|scoreboard|editor|menu|interface|ui)s?\b/i;
-/** What the interface rule is for: the things above, the verbs that ask for something to look at, and what is tapped or played (the model turns down what isn't an interface: rule-filter.ts) */
+/** What the interface rule is for: the things above, the verbs that ask for something to look at, and what is tapped or played */
 const INTERFACE_REQUEST = new RegExp(`${INTERFACE_THING.source}|\\b(?:form|list|table|page|show|display|game|keyboard|key)s?\\b|\\b(?:tap|click|press)\\w*`, 'i');
 /** Anything shown on screen, which goes in the card (what the rules go by) */
 const VISUAL_REQUEST = new RegExp([INTERFACE_REQUEST, DRAWING_REQUEST, THREE_D_REQUEST, DIAGRAM_REQUEST].map((r) => r.source).join('|'), 'i');
@@ -326,8 +332,7 @@ const WEATHER_REQUEST = { test: (request: string) => WEATHER_TOPIC.test(request)
 /**
  * Something kept between visits: notes, a list, a name, a count. Not a bare "keep" or "notes" ("keep the ball
  * bouncing", the notes C, E and G), and not in a game or a drawing: the rule's example is a text field, which
- * has no place there ("a snake game that remembers my high score", "save it as a PNG"). The model turns down
- * the rest (rule-filter.ts)
+ * has no place there ("a snake game that remembers my high score", "save it as a PNG")
  */
 const SAVE_WORDS =
   /\b(?:sav(?:e|es|ed|ing)|remember\w*|keep (?:my|it|them|this)|kept|persist\w*|stor(?:e|es|ed|age)|still (?:be )?(?:here|there)|next time|come back|reload\w*|refresh\w*|clos(?:e|ing) (?:the |this )?(?:tab|page|app|browser)|my notes|take notes|notes app|sticky notes|notepad|to-?dos?|journal|diary|between visits)\b/i;
@@ -385,7 +390,7 @@ button.textContent = "Copy";
 button.onclick = () => navigator.clipboard.writeText(""); // the text to copy
 document.body.appendChild(button);
 \`\`\``;
-/** Text to count, reverse or change (the model turns down a letter to draw, a text box, a song backwards: rule-filter.ts). Not a letter written to someone ("copy editing tips for a cover letter" got it) */
+/** Text to count, reverse or change. Not a letter written to someone ("copy editing tips for a cover letter" got it) */
 const TEXT_REQUEST =
   /\b(?:words?|(?<!\b(?:cover|love|thank[- ]you|business|open|resignation|recommendation|reference|application) )letters?(?!\s+(?:to|for|from)\b)|characters?|sentences?|text|paragraph|revers\w*|backwards?|replac\w*|swap\w*|chang(?:e|es|ing)|upper ?case|lower ?case|capitali[sz]\w*|palindromes?|vowels?|consonants?|spell\w*|anagrams?)\b/i;
 /**
@@ -401,8 +406,29 @@ const DRAG_REQUEST =
 /** An element that changes by itself in CSS: fading, sliding, growing, pulsing (not "animate": that's mostly canvas motion, the canvas rule's) */
 const CSS_MOTION_REQUEST =
   /\b(?:fad(?:e|es|ed|ing)|slid(?:e|es|ing)|puls(?:e|es|ing)|grow(?:s|ing)?|shrink\w*|transitions?|keyframes|css|wiggl\w*|shak(?:e|es|ing)|glow\w*|blink\w*|flash\w*|hover\w*)\b/i;
+/**
+ * Drawing words that also name a song or a sound: "Twinkle Twinkle Little Star", "Over the Rainbow", a square
+ * wave, a drum pattern ("Play Twinkle Twinkle Little Star on the piano" got the drawing and card rules). Not a
+ * bare pattern: "a drum machine with a pattern grid" is one to see
+ */
+const HEARD_WORDS = /\b(?:stars?|sky|skies|rainbows?|circles?|squares?|triangles?|shapes?|(?:drum|beat|rhythm|bass|note) patterns?)\b/gi;
+/** One of those made or animated ("Make a star that twinkles to music"), which is to see: not a square wave */
+const MAKES_SEEN_THING =
+  /\b(?:make|create|build|animate|add)\s+(?:me\s+)?(?:(?:a|an|some|the)\s+)?(?:[\w'-]+\s+){0,2}?(?:stars?|sky|skies|rainbows?|circles?|squares?|triangles?|shapes?)\b(?!\s+waves?\b)/i;
+/**
+ * The request as the drawing and card rules read it: in a request for sound that asks to see nothing (no verb
+ * for it, none of those words made, nothing tapped or dragged, no interface, diagram or 3D scene), those
+ * words are left out, as namesVisualThing does for the outcome check. What moves ("a bouncing ball that beeps") is still drawn
+ */
+const seenIn = (request: string): string => {
+  const { music, effects } = soundKinds(request);
+  const heardOnly =
+    (music || effects) && !ASKS_TO_SEE.test(request) && !MAKES_SEEN_THING.test(request) && !ASKS_FOR_INPUT.test(request) && !INTERFACE_THING.test(request) && !DIAGRAM_REQUEST.test(request) && !THREE_D_SCENE.test(request);
+  return heardOnly ? request.replace(HEARD_WORDS, '') : request;
+};
 /** What the card rule is for: anything shown, and what is played with keys or the pointer or moves in CSS */
-const CARD_REQUEST = new RegExp([VISUAL_REQUEST, KEYS_REQUEST, DRAG_REQUEST, CSS_MOTION_REQUEST].map((r) => r.source).join('|'), 'i');
+const CARD_WORDS = new RegExp([VISUAL_REQUEST, KEYS_REQUEST, DRAG_REQUEST, CSS_MOTION_REQUEST].map((r) => r.source).join('|'), 'i');
+const CARD_REQUEST = { test: (request: string) => CARD_WORDS.test(seenIn(request)) };
 
 /**
  * The rules, as bullets (small models copy numbering into their replies). A rule with `when` is
@@ -482,15 +508,14 @@ export function rulesNamedBy(request: string): Set<RuleName> {
 }
 
 /**
- * The rules for a request: all of them, or (filter) only those it needs: by their keywords, in the
- * request or the program it changes (`program`), and for those the model was asked about (`scored`,
- * rule-filter.ts: only rules the request's keywords put forward), by its answer.
+ * The rules for a request: all of them, or (filter) only those it needs, by their keywords in the
+ * request or the program it changes (`program`). The same for every model: a model once confirmed
+ * some rules by a scored yes/no, above cutoffs fitted for each model, so two models picked differently
  */
-export function promptRules(request = '', filter = false, scored?: { kept: ReadonlySet<RuleName>; decided: ReadonlySet<RuleName> }, program = ''): string {
+export function promptRules(request = '', filter = false, program = ''): string {
   const needed = (rule: (typeof PROMPT_RULES)[number]): boolean => {
     if (!rule.when) return true;
     if (program !== '' && (rule.inProgram ?? rule.when).test(program)) return true;
-    if (scored && rule.name && scored.decided.has(rule.name)) return scored.kept.has(rule.name);
     // The request comes with the program after it (staticPromptParts): a rule with its own program test goes by the request alone
     return rule.when.test(rule.inProgram && program !== '' && request.endsWith(program) ? request.slice(0, -program.length) : request);
   };
@@ -1462,8 +1487,6 @@ export class ConversationOrchestrator {
   private correctedPrograms = new Map<string, { code: string; request: string }>();
   // User messages that went out with notes added (see buildModelPrompt), by message id
   private sentRequests = new Map<string, string>();
-  /** The rules the model kept for recent requests (asked once a request: a re-ask or a rewrite reuses them) */
-  private scoredRuleCache = new Map<string, ScoredRules | null>();
   // Phone pipeline (small models): router picks a tool / code / chat each turn
   private phonePipeline: {
     router: TurnRouter;
@@ -1797,16 +1820,8 @@ export class ConversationOrchestrator {
     this.events.onMessageCreated?.(userMsg);
 
 
-    // Stage 3: Build the prompt respecting model context budget. A small model is asked first which
-    // optional rules this request needs (rule-filter.ts); a fix turn uses its own prompt, and needs none
-    const scored = !options?.autoFix || options.autoFix === NO_PROGRAM_YET ? await this.rulesFor(normalized) : undefined;
-    let { systemPrompt, promptMessages } = this.buildModelPrompt(
-      normalized,
-      resolvedContext,
-      programBeingEdited,
-      complaint,
-      scored
-    );
+    // Stage 3: Build the prompt respecting model context budget
+    let { systemPrompt, promptMessages } = this.buildModelPrompt(normalized, resolvedContext, programBeingEdited, complaint);
     // A fix turn is its own job: a short prompt about fixing and only the fix request (the
     // rules, examples and history are for writing programs, and small models rewrote the
     // program they saw there, bug and all). The turn whose program it fixes:
@@ -3889,50 +3904,12 @@ export class ConversationOrchestrator {
    * messages are sent again exactly as before, so anything that varies with a request
    * (memories, notes) goes into that request's message instead (see buildModelPrompt).
    */
-  /**
-   * The optional rules the model says a request needs, for the smallest models on a runtime that
-   * can score choices (WebLLM), calibrated for this model (RULE_CUTOFFS); undefined otherwise, or when a question went unscored, and the
-   * rules then go by their keywords. Logged with each rule's "yes", for adding cases (rule-filter.ts).
-   */
-  private async rulesFor(request: string): Promise<ScoredRules | undefined> {
-    if (!this.isSmallModel || this.phonePipeline) return undefined;
-    if (this.scoredRuleCache.has(request)) return this.scoredRuleCache.get(request) ?? undefined;
-    const cutoffs = RULE_CUTOFFS[this.llmProvider.modelId];
-    const score = yesScorer(this.llmProvider);
-    if (!score || !cutoffs) return undefined;
-    const started = performance.now();
-    const scored = await scoredRules(request, score, cutoffs, rulesNamedBy(request)).catch(() => null);
-    this.scoredRuleCache.set(request, scored);
-    for (const oldest of this.scoredRuleCache.keys()) {
-      if (this.scoredRuleCache.size <= 32) break;
-      this.scoredRuleCache.delete(oldest);
-    }
-    if (!scored) {
-      appendRunLog('rules', 'the model could not be asked which rules apply: they go by keywords');
-      return undefined;
-    }
-    const yes = Object.entries(scored.yes).map(([rule, p]) => `${rule} ${Math.round((p ?? 0) * 100)}%`).join(', ');
-    appendRunLog('rules', `asked about ${[...scored.decided].join(', ') || 'none'}, kept ${[...scored.kept].join(', ') || 'none'} (yes: ${yes || '-'}; ${Math.round(performance.now() - started)} ms); the other rules go by keywords`);
-    return scored;
-  }
-
-  /** Scores the rule filter's labeled cases with the loaded model and fits each rule's cutoff (rule-filter.ts) */
-  async calibrateRuleFilter(): Promise<Awaited<ReturnType<typeof calibrateRules>> | null> {
-    const score = yesScorer(this.llmProvider);
-    return score ? calibrateRules(score, rulesNamedBy) : null;
-  }
-
-  /** The smallest models (a 4,096-token context), on any device: they get a trimmed prompt */
-  private get isSmallModel(): boolean {
-    return this.llmProvider.contextLimit <= 4096;
-  }
-
-  private staticPromptParts(request?: string, scored?: ScoredRules, program = ''): { head: string[]; tail: string[] } {
+  private staticPromptParts(request?: string, program = ''): { head: string[]; tail: string[] } {
     // Every model gets only the rules this request needs: one set of rules for all of them. (Bigger
     // models once got every rule, the same prompt each turn for its cache: Qwen3.5 2B, given all of them
     // for a tip calculator, wrote a 4-line program that made no field)
     const filter = request !== undefined;
-    const rules = filter ? promptRules(`${request}\n${program}`, true, scored, program) : CONCISE_VOICE_SYSTEM_PROMPT;
+    const rules = filter ? promptRules(`${request}\n${program}`, true, program) : CONCISE_VOICE_SYSTEM_PROMPT;
     const head = this.phonePipeline
       ? [`${this.phonePipeline.chatSystemPrompt} Current date and time: ${new Date().toLocaleString()}.`]
       : [rules];
@@ -3991,14 +3968,13 @@ export class ConversationOrchestrator {
     userMessage: string,
     context: ReturnType<ConversationMemoryStore['resolveContextForQuery']>,
     programBeingEdited: string | null = null,
-    complaint = false,
-    scored?: ScoredRules
+    complaint = false
   ): {
     systemPrompt: string;
     promptMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
   } {
     // Rules are picked by the request and, for an edit or a fix, the program it changes
-    const { head, tail } = this.staticPromptParts(userMessage, scored, programBeingEdited ?? '');
+    const { head, tail } = this.staticPromptParts(userMessage, programBeingEdited ?? '');
     const systemParts: string[] = [...head];
 
     // What applies to this request only: memories picked for it, a reference it makes. In the system prompt these would change it on most turns, and the model would
