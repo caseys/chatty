@@ -1,5 +1,5 @@
 /**
- * Example requests for each optional prompt rule (rule-filter.ts OPTIONAL_RULES), for picking a request's rules
+ * Example requests for each optional prompt rule (rule-cases.ts OPTIONAL_RULES), for picking a request's rules
  * by embedding similarity, which doesn't depend on the chat model: a request would get a rule when it sits close
  * to that rule's examples and not to its `notFor` look-alikes. Being tried offline first; nothing in the app
  * reads these yet.
@@ -11,7 +11,7 @@
  * or subject but not its need (a game of fetch, the key of a song, a story about a button).
  */
 
-import type { RuleName } from './rule-filter.ts';
+import type { RuleName } from './rule-cases.ts';
 
 export interface CapabilityCard {
   name: RuleName;
@@ -71,7 +71,7 @@ export const CAPABILITY_CARDS: ReadonlyArray<CapabilityCard> = [
       'Paint a night sky full of stars',
       'Set off some fireworks',
       'Show a fish swimming back and forth in a tank',
-      'Make a pong game I can play against the computer',
+      'I want a pong game to play against the computer',
       'Draw a smiling sun wearing sunglasses',
       'Make it rain confetti',
       'Simulate a few planets pulled by gravity',

@@ -1772,18 +1772,30 @@ describe('which turns are about the last program, and which rules a request gets
     expect(sent.at(-1)!.content).toContain('did not do what they asked');
   });
 
-  it('gives three.js to games and 3D, and the facts rule to questions but not arithmetic', () => {
+  it('gives three.js to 3D (a game only when it asks for 3D), and the facts rule to questions but not arithmetic', () => {
     const three = 'THREE (three.js) is ready to use';
-    expect(promptRules('Build a racing game', true)).toContain(three);
+    expect(promptRules('Build a 3D racing game', true)).toContain(three);
+    expect(promptRules('Build a racing game', true)).not.toContain(three);
     expect(promptRules('render a scene with a 3D cube', true)).toContain(three);
     expect(promptRules('Draw a cat', true)).not.toContain(three);
     const facts = 'For facts you lack';
     expect(promptRules('Who was Ada Lovelace?', true)).toContain(facts);
     expect(promptRules("What's 15 percent of 84?", true)).not.toContain(facts);
     expect(promptRules('Build a game where the car is steered by arrow keys', true)).not.toContain(facts);
-    // A game puts the interface rule forward; the model decides (rule-filter.ts)
-    const vetoed = { kept: new Set<never>(), decided: new Set(['ui'] as const) };
-    expect(promptRules('Build a racing game', true, vetoed)).not.toContain('Use HTML and CSS for interfaces');
+  });
+
+  it('picks the rules by keywords alone, the same for every model: a small model that can score is asked nothing about them', async () => {
+    const prompts: string[] = [];
+    for (const modelId of ['qwen3-0.6b', 'qwen2.5-0.5b', 'queue']) {
+      const llm = new ScoringLlm(['speak("ok");'], [0.9, 0.1]);
+      Object.assign(llm, { modelId, contextLimit: 4096 });
+      await orchestratorFor(llm).submitUserInput('Make a snake game');
+      expect(llm.scored).toEqual([]);
+      prompts.push(llm.turns[0].systemPrompt ?? '');
+    }
+    expect(prompts[0]).toContain('Use <canvas> for visuals');
+    expect(prompts[0]).not.toContain('For 3D');
+    expect(new Set(prompts).size).toBe(1);
   });
 });
 

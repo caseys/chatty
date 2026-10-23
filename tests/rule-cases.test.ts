@@ -1,61 +1,37 @@
 import { describe, expect, it } from 'vitest';
-import { fitCutoffs, RULE_CUTOFFS, RULE_QUESTIONS, ruleQuestion, scoredRules, yesScorer } from '../src/core/rule-filter.ts';
 import { promptRules, rulesNamedBy } from '../src/core/orchestrator.ts';
 
-describe('the rule filter', () => {
-  it('asks about a rule as a note or as a direct question, with A and B for answers', () => {
-    expect(ruleQuestion('ui', 'Make a  dice roller')).toBe(
-      `Note: ${RULE_QUESTIONS.ui.note}\nRequest: "Make a dice roller"\nQuestion: Is this note useful for the request?\nA) yes\nB) no\nAnswer:`
-    );
-    expect(ruleQuestion('music', 'Play a song')).toBe(`Request: "Play a song"\nQuestion: ${RULE_QUESTIONS.music.question}\nA) yes\nB) no\nAnswer:`);
-  });
-
-  it('keeps a rule whose yes passes its cutoff, asks only about rules with one, and gives up when a question goes unscored', async () => {
-    const asked: string[] = [];
-    const high = (question: string) => {
-      asked.push(question);
-      return Promise.resolve(/something in 3D/.test(question) ? 0.99 : 0.01);
-    };
-    const cutoffs = { ui: 0.9, canvas: 0.7, three: 0.8 };
-    const scored = await scoredRules('Show a 3D cube', high, cutoffs);
-    expect([...(scored?.kept ?? [])]).toEqual(['three']);
-    expect(asked).toHaveLength(3);
-    expect([...(scored?.decided ?? [])]).toEqual(['ui', 'canvas', 'three']);
-    expect(await scoredRules('Show a 3D cube', () => Promise.resolve(null), cutoffs)).toBeNull();
-    // Only the rules put forward are asked about
-    asked.length = 0;
-    await scoredRules('Show a 3D cube', high, cutoffs, ['three']);
-    expect(asked).toHaveLength(1);
-  });
-
-  it('reads yes as the share of A against B, and has no scorer for a runtime that cannot score', async () => {
-    const score = yesScorer({ scoreChoices: () => Promise.resolve([0.3, 0.1]) });
-    expect(await score?.('q')).toBeCloseTo(0.75);
-    expect(yesScorer({})).toBeNull();
-  });
-
-  it('fits each cutoff to the fewest wrong calls, and none to a rule no case needs', () => {
-    const cases = [{ rules: ['music' as const] }, { rules: [] }, { rules: ['music' as const] }, { rules: [] }];
-    const fitted = fitCutoffs(cases, [{ music: 0.9, fx: 0.5 }, { music: 0.7, fx: 0.6 }, { music: 0.8, fx: 0.4 }, { music: 0.2, fx: 0.3 }]);
-    expect(fitted.music).toMatchObject({ errors: 0, auc: 1, positives: 2 });
-    expect(fitted.music.cutoff).toBeGreaterThanOrEqual(0.7);
-    expect(fitted.music.cutoff).toBeLessThan(0.8);
-    expect(fitted.fx.cutoff).toBeNull();
+describe('prompt rules for a program being changed', () => {
+  it("keeps a rule the program being changed uses, whatever the request's words", () => {
+    expect(promptRules('make it red', true, 'const c = document.createElement("canvas")')).toContain('Use <canvas>');
+    expect(promptRules('make it red', true)).not.toContain('Use <canvas>');
   });
 });
 
-describe('prompt rules from the model', () => {
-  const scored = { kept: new Set(['music' as const]), decided: new Set(['card', 'ui', 'canvas', 'music', 'facts'] as const) };
-
-  it('keeps the decided rules the model kept, and the others by keywords', () => {
-    const rules = promptRules('Draw a song', true, scored);
-    expect(rules).toContain('For music');
-    expect(rules).not.toContain('Use <canvas>');
-    expect(promptRules('Show a spinning 3D cube', true, scored)).toContain('For 3D');
+describe('song titles, games and 3D', () => {
+  it('reads no drawing into a song named for one, or a sound shaped like one', () => {
+    for (const r of ['Play Twinkle Twinkle Little Star on the piano', 'Play Twinkle Twinkle Little Star', 'Play Somewhere Over the Rainbow on the guitar', 'Play a square wave tone', 'Play a drum pattern']) {
+      expect(rulesNamedBy(r).has('canvas'), r).toBe(false);
+      expect(rulesNamedBy(r).has('card'), r).toBe(false);
+    }
+    for (const r of ['Draw a star', 'Draw stars in the night sky while soft piano music plays', 'Show a star that twinkles to a piano tune', 'A bouncing ball that beeps when it hits a wall', 'Make a circle that plays a chime when I tap it'])
+      expect(rulesNamedBy(r).has('card') && rulesNamedBy(r).has('canvas'), r).toBe(true);
   });
 
-  it("keeps a rule the program being changed uses, whatever the model said about the request", () => {
-    expect(promptRules('make it red', true, scored, 'const c = document.createElement("canvas")')).toContain('Use <canvas>');
+  it('hears no sound in a game played, unless one is named', () => {
+    const sounds = (r: string) => [...rulesNamedBy(r)].filter((rule) => rule === 'music' || rule === 'fx');
+    for (const r of ['Make a pong game I play with the arrow keys', 'Let me play pong against the computer', "Let's play a game of fetch with a dog", "Let's play tic-tac-toe"]) expect(sounds(r), r).toEqual([]);
+    expect(sounds('Play a song on the piano')).toEqual(['music']);
+    expect(sounds('play a beep')).toEqual(['fx']);
+    expect(sounds('Play a snake game that beeps when the snake eats')).toEqual(['fx']);
+    expect(sounds('Play something')).toEqual(['music', 'fx']);
+  });
+
+  it('gives 3D to a 3D scene or a game that asks for 3D, not to every game', () => {
+    for (const r of ['Make a snake game', 'Make a pong game I play with the arrow keys', 'Make a tic-tac-toe game where two players take turns tapping the squares', 'Make a racing game'])
+      expect(rulesNamedBy(r).has('three'), r).toBe(false);
+    for (const r of ['Make a 3D racing game', 'a 3D game', 'Make a spinning cube', 'Show a spinning 3D cube']) expect(rulesNamedBy(r).has('three'), r).toBe(true);
+    expect(rulesNamedBy('Make a snake game').has('canvas')).toBe(true);
   });
 });
 
@@ -88,13 +64,6 @@ describe('the text rule', () => {
     expect(promptRules('Make it all uppercase', true)).toContain('For text tools');
     expect(promptRules('Tell me a joke about cats', true)).not.toContain('For text tools');
   });
-
-  it('is kept on Qwen3 when its yes passes the cutoff, and goes by keywords on Qwen2.5', async () => {
-    const yes = (p: number) => () => Promise.resolve(p);
-    expect([...((await scoredRules('Reverse "abc"', yes(0.6), RULE_CUTOFFS['qwen3-0.6b'], ['text']))?.kept ?? [])]).toEqual(['text']);
-    expect((await scoredRules('Play it backwards', yes(0.2), RULE_CUTOFFS['qwen3-0.6b'], ['text']))?.kept.has('text')).toBe(false);
-    expect(RULE_CUTOFFS['qwen2.5-0.5b'].text).toBeUndefined();
-  });
 });
 
 describe('keyboard and CSS motion rules', () => {
@@ -106,7 +75,7 @@ describe('keyboard and CSS motion rules', () => {
     expect(named('Fade a word in and out')).toEqual(['css']);
   });
 
-  it('are not put forward by the look-alikes the model could not turn down', () => {
+  it('are not put forward by their look-alikes', () => {
     expect(named('Make a piano keyboard I can play by tapping the keys')).toEqual([]);
     expect(named('Play a short tune in the key of G major')).toEqual([]);
     expect(named('Give me three keys to staying productive')).toEqual([]);
@@ -133,11 +102,11 @@ describe('saving and the weather', () => {
 
   it('take a program being changed by what it uses, not by its words (window, ctx.save())', () => {
     const program = 'window.addEventListener("click", () => { ctx.save(); const notes = [60, 62]; performance.now(); });';
-    const rules = promptRules(`make it blue\n${program}`, true, undefined, program);
+    const rules = promptRules(`make it blue\n${program}`, true, program);
     expect(rules).not.toContain('For weather');
     expect(rules).not.toContain('To keep what the user types between visits');
     const saving = 'let value = JSON.parse(localStorage.getItem("notes"));';
-    expect(promptRules(`make it blue\n${saving}`, true, undefined, saving)).toContain('To keep what the user types between visits');
+    expect(promptRules(`make it blue\n${saving}`, true, saving)).toContain('To keep what the user types between visits');
   });
 
   it('show each value to fill in as an empty slot with what goes there', () => {
@@ -170,7 +139,7 @@ describe('data from a web address and the clipboard', () => {
 
   it('take a program being changed by what it uses', () => {
     const program = 'navigator.clipboard.writeText(text); const data = await (await fetch(url)).json();';
-    const rules = promptRules(`make it blue\n${program}`, true, undefined, program);
+    const rules = promptRules(`make it blue\n${program}`, true, program);
     expect(rules).toContain('For data from a web address');
     expect(rules).toContain('To copy text for the user');
   });
